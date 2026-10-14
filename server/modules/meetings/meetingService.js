@@ -3,6 +3,13 @@ const { LIMITS, REVIEW, RETRIEVAL, quarterFor } = require("./policy");
 
 const activeMeetingWhere = { deletedAt: null };
 const now = () => new Date();
+const sleep = (duration) => new Promise((resolve) => setTimeout(resolve, duration));
+
+function isTransactionContention(error) {
+  if (["P1008", "P2028", "P2034"].includes(error.code)) return true;
+  return /database is locked|SQLITE_BUSY|write conflict|transaction.*(?:closed|timeout)|timed out during query execution/i
+    .test(error.message || "");
+}
 
 function createMeetingService({ prisma, audit = async () => {} } = {}) {
   if (!prisma) throw new TypeError("createMeetingService requires an injected Prisma client");
@@ -33,48 +40,68 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
     },
 
     async createMetadata(data, userId) {
+      const connectionId = Number(data.connectionId);
+      if (!Number.isSafeInteger(connectionId) || connectionId <= 0) {
+        throw new MeetingError("A valid connection ID is required", "INVALID_CONNECTION_ID");
+      }
+      const externalId = typeof data.externalId === "string" ? data.externalId.trim() : "";
+      if (!externalId) throw new MeetingError("An external meeting ID is required", "INVALID_EXTERNAL_ID");
       const startTime = new Date(data.startTime);
       if (Number.isNaN(startTime.getTime())) throw new MeetingError("A valid meeting start time is required", "INVALID_DATE");
-      const quarter = data.quarter || quarterFor(startTime);
-      const activeKey = `${data.connectionId}:${data.externalId}`;
-      try {
-        return await transaction(async (db) => {
-          const duplicate = await db.meetings.findUnique({ where: { activeKey } });
-          if (duplicate) throw new MeetingError("This meeting is already imported", "MEETING_DUPLICATE", 409);
+      const quarter = quarterFor(startTime);
+      if (data.quarter && data.quarter !== quarter) {
+        throw new MeetingError("Meeting quarter must match its start time", "QUARTER_MISMATCH");
+      }
+      const activeKey = `${connectionId}:${externalId}`;
+      let attempt = 0;
+      while (true) {
+        try {
+          return await transaction(async (db) => {
+            const duplicate = await db.meetings.findUnique({ where: { activeKey } });
+            if (duplicate) throw new MeetingError("This meeting is already imported", "MEETING_DUPLICATE", 409);
 
-          const existing = await db.meetings.findMany({ where: { quarter, deletedAt: null } });
-          const activeKeys = new Set(existing.map((meeting) => meeting.activeKey).filter(Boolean));
-          const reservations = await db.meeting_jobs.findMany({
-            where: { quarter, kind: "IMPORT", status: { in: ["CREATED", "PROCESSING"] } },
+            const existing = await db.meetings.findMany({ where: { quarter, deletedAt: null } });
+            const activeKeys = new Set(existing.map((meeting) => meeting.activeKey).filter(Boolean));
+            const reservations = await db.meeting_jobs.findMany({
+              where: { quarter, kind: "IMPORT", status: { in: ["CREATED", "PROCESSING"] } },
+            });
+            const reservationCount = reservations.filter((job) => job.activeKey !== activeKey &&
+              (!job.activeKey || !activeKeys.has(job.activeKey))).length;
+            if (existing.length + reservationCount >= LIMITS.meetingsPerQuarter) {
+              throw new MeetingError("The quarterly meeting limit has been reached", "MEETING_QUARTER_LIMIT", 409);
+            }
+
+            const meeting = await db.meetings.create({ data: {
+              connectionId,
+              externalId,
+              activeKey,
+              title: String(data.title || "").trim(),
+              startTime,
+              endTime: data.endTime ? new Date(data.endTime) : null,
+              quarter,
+              reviewStatus: REVIEW.DRAFT,
+              retrievalStatus: RETRIEVAL.WAITING_CONTENT,
+              summary: data.summary ?? null,
+              transcript: data.transcript ?? null,
+              coverage: data.coverage || "{}",
+              generation: 0,
+              deletedAt: null,
+              createdBy: userId ?? null,
+            } });
+            await auditMutation("MEETING_METADATA_CREATED", meeting, userId);
+            return meeting;
           });
-          const reservationCount = reservations.filter((job) => !job.activeKey || !activeKeys.has(job.activeKey)).length;
-          if (existing.length + reservationCount >= LIMITS.meetingsPerQuarter) {
-            throw new MeetingError("The quarterly meeting limit has been reached", "MEETING_QUARTER_LIMIT", 409);
+        } catch (error) {
+          if (error.code === "P2002") {
+            throw new MeetingError("This meeting is already imported", "MEETING_DUPLICATE", 409);
           }
-
-          const meeting = await db.meetings.create({ data: {
-            connectionId: Number(data.connectionId),
-            externalId: String(data.externalId),
-            activeKey,
-            title: String(data.title || "").trim(),
-            startTime,
-            endTime: data.endTime ? new Date(data.endTime) : null,
-            quarter,
-            reviewStatus: REVIEW.DRAFT,
-            retrievalStatus: RETRIEVAL.WAITING_CONTENT,
-            summary: data.summary ?? null,
-            transcript: data.transcript ?? null,
-            coverage: data.coverage || "{}",
-            generation: 0,
-            deletedAt: null,
-            createdBy: userId ?? null,
-          } });
-          await auditMutation("MEETING_METADATA_CREATED", meeting, userId);
-          return meeting;
-        });
-      } catch (error) {
-        if (error.code === "P2002") throw new MeetingError("This meeting is already imported", "MEETING_DUPLICATE", 409);
-        throw error;
+          if (!isTransactionContention(error)) throw error;
+          if (attempt >= 2) {
+            throw new MeetingError("Meeting creation was contended; retry this request", "MEETING_WRITE_CONFLICT", 409);
+          }
+          await sleep(15 * (attempt + 1));
+          attempt += 1;
+        }
       }
     },
 

@@ -47,8 +47,11 @@ function assertSourceDeletion(meeting, source) {
   if (source.sourceType === "TENCENT_ORIGINAL") {
     throw new MeetingError("Original meeting sources cannot be deleted", "SOURCE_IMMUTABLE", 409);
   }
-  if (meeting.reviewStatus !== REVIEW.DRAFT || !["SUPPLEMENT_FILE", "SUPPLEMENT_TEXT"].includes(source.sourceType)) {
-    throw new MeetingError("Only supplemental sources in a draft can be deleted", "SOURCE_IMMUTABLE", 409);
+  if (source.sourceType === "SUPPLEMENT_FILE" && meeting.reviewStatus !== REVIEW.DRAFT) {
+    throw new MeetingError("File supplements can only be deleted from a draft", "SOURCE_IMMUTABLE", 409);
+  }
+  if (!["SUPPLEMENT_FILE", "SUPPLEMENT_TEXT"].includes(source.sourceType)) {
+    throw new MeetingError("Only supplemental sources can be deleted", "SOURCE_IMMUTABLE", 409);
   }
   return true;
 }

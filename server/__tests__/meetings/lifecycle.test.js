@@ -1,4 +1,8 @@
 const { createMeetingService } = require("../../modules/meetings/meetingService");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { PrismaClient } = require("@prisma/client");
 
 function fakePrisma(seed = {}) {
   const state = {
@@ -95,5 +99,120 @@ describe("meeting persistence lifecycle", () => {
     expect(revised).toMatchObject({ reviewStatus: "DRAFT", retrievalStatus: "INDEXING", generation: 2 });
     expect(state.meeting_jobs).toHaveLength(1);
     expect(state.meeting_jobs[0]).toMatchObject({ kind: "REINDEX", meetingId: meeting.id, status: "CREATED" });
+  });
+});
+
+describe("meeting creation with real SQLite transactions", () => {
+  let prisma;
+  let service;
+  let databaseDirectory;
+  let connectionId;
+
+  beforeAll(() => {
+    databaseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "meeting-lifecycle-"));
+    const isolatedDatabase = path.join(databaseDirectory, "meetings.db");
+    fs.copyFileSync(path.join(__dirname, "../../storage/anythingllm.db"), isolatedDatabase);
+    const databaseUrl = `file:${isolatedDatabase.replace(/\\/g, "/")}`;
+    prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    service = createMeetingService({ prisma });
+  });
+
+  beforeEach(async () => {
+    await prisma.meeting_jobs.deleteMany();
+    await prisma.meeting_chunks.deleteMany();
+    await prisma.meeting_sources.deleteMany();
+    await prisma.meetings.deleteMany();
+    await prisma.meeting_connections.deleteMany();
+    const connection = await prisma.meeting_connections.create({ data: { name: "SQLite test", config: "{}" } });
+    connectionId = connection.id;
+  });
+
+  afterAll(async () => {
+    await prisma?.$disconnect();
+    if (databaseDirectory) fs.rmSync(databaseDirectory, { recursive: true, force: true });
+  });
+
+  const insertQuarterMeetings = async (count) => {
+    for (let index = 0; index < count; index += 1) {
+      await prisma.meetings.create({ data: {
+        connectionId,
+        externalId: `existing-${index}`,
+        activeKey: `${connectionId}:existing-${index}`,
+        title: `Existing ${index}`,
+        startTime: new Date("2026-04-01T02:00:00.000Z"),
+        quarter: "2026-Q2",
+        reviewStatus: "DRAFT",
+        retrievalStatus: "WAITING_CONTENT",
+        coverage: "{}",
+      } });
+    }
+  };
+
+  const databaseMetadata = (externalId, overrides = {}) => metadata(externalId, {
+    ...overrides,
+    connectionId: overrides.connectionId ?? connectionId,
+  });
+
+  test("rejects a caller quarter that differs from the Shanghai start-time quarter", async () => {
+    await expect(service.createMetadata(databaseMetadata("wrong-quarter", { quarter: "2026-Q1" }), 5))
+      .rejects.toMatchObject({ code: "QUARTER_MISMATCH" });
+    expect(await prisma.meetings.count()).toBe(0);
+  });
+
+  test("normalizes connection IDs before checking active duplicate identity", async () => {
+    await service.createMetadata(databaseMetadata("  normalized  ", { connectionId: String(connectionId).padStart(2, "0") }), 5);
+    await expect(service.createMetadata(databaseMetadata("normalized", { connectionId }), 5))
+      .rejects.toMatchObject({ code: "MEETING_DUPLICATE" });
+    expect(await prisma.meetings.count({ where: { deletedAt: null } })).toBe(1);
+  });
+
+  test("rejects invalid connection IDs before attempting persistence", async () => {
+    await expect(service.createMetadata(databaseMetadata("invalid", { connectionId: "1.5" }), 5))
+      .rejects.toMatchObject({ code: "INVALID_CONNECTION_ID" });
+    expect(await prisma.meetings.count()).toBe(0);
+  });
+
+  test("rejects an empty or non-string external meeting ID", async () => {
+    await expect(service.createMetadata(databaseMetadata("  "), 5))
+      .rejects.toMatchObject({ code: "INVALID_EXTERNAL_ID" });
+    await expect(service.createMetadata(databaseMetadata(42), 5))
+      .rejects.toMatchObject({ code: "INVALID_EXTERNAL_ID" });
+    expect(await prisma.meetings.count()).toBe(0);
+  });
+
+  test("does not count the current import reservation twice against its own meeting", async () => {
+    await insertQuarterMeetings(199);
+    await prisma.meeting_jobs.create({ data: {
+      kind: "IMPORT", connectionId, externalId: "reservation-owner",
+      activeKey: `${connectionId}:reservation-owner`, quarter: "2026-Q2", payload: "{}", status: "PROCESSING",
+    } });
+    const meeting = await service.createMetadata(databaseMetadata("reservation-owner"), 5);
+    expect(meeting.quarter).toBe("2026-Q2");
+    expect(await prisma.meetings.count({ where: { quarter: "2026-Q2", deletedAt: null } })).toBe(200);
+  });
+
+  test("concurrent duplicate creates persist exactly one meeting", async () => {
+    const results = await Promise.allSettled([
+      service.createMetadata(databaseMetadata("same-concurrent"), 5),
+      service.createMetadata(databaseMetadata("same-concurrent"), 5),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected").reason)
+      .toMatchObject({ code: "MEETING_DUPLICATE" });
+    expect(await prisma.meetings.count({ where: { activeKey: `${connectionId}:same-concurrent` } })).toBe(1);
+  });
+
+  test("concurrent distinct creates cannot oversubscribe the last quarterly slot", async () => {
+    await insertQuarterMeetings(199);
+    const results = await Promise.allSettled([
+      service.createMetadata(databaseMetadata("last-slot-a"), 5),
+      service.createMetadata(databaseMetadata("last-slot-b"), 5),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(["MEETING_QUARTER_LIMIT", "MEETING_WRITE_CONFLICT"])
+      .toContain(results.find((result) => result.status === "rejected").reason.code);
+    expect(await prisma.meetings.count({ where: { quarter: "2026-Q2", deletedAt: null } })).toBe(200);
   });
 });

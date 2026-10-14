@@ -53,5 +53,13 @@ describe("meeting lifecycle policies", () => {
       { reviewStatus: REVIEW.APPROVED },
       { sourceType: "SUPPLEMENT_FILE" },
     )).toThrow(expect.objectContaining({ code: "SOURCE_IMMUTABLE" }));
+    expect(() => assertSourceDeletion(
+      { reviewStatus: REVIEW.APPROVED },
+      { sourceType: "SUPPLEMENT_TEXT" },
+    )).not.toThrow();
+    expect(() => assertSourceDeletion(
+      { reviewStatus: REVIEW.APPROVED },
+      { sourceType: "SUMMARY" },
+    )).toThrow(expect.objectContaining({ code: "SOURCE_IMMUTABLE" }));
   });
 });

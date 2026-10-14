@@ -6,8 +6,11 @@ The business timezone is `Asia/Shanghai`. Quarter assignment uses the local mont
 
 ## RED/GREEN evidence
 
-- RED: `npx jest server/__tests__/meetings/policy.test.js server/__tests__/meetings/lifecycle.test.js --runInBand` failed because the requested meeting policy and service modules did not exist; both suites reported the expected module-resolution failure before implementation.
-- GREEN: the same command passed: 2 suites, 11 tests.
-- Schema: `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma` passed with “The schema ... is valid”.
+- Original RED: before the first implementation, the focused Jest command failed because the requested meeting policy and service modules did not exist. The original GREEN run passed 2 suites and 11 tests.
+- Review-fix RED: the focused command reproduced caller-supplied quarter mismatches, equivalent numeric connection IDs, and approved typed-text deletion. The first integration run also exposed that this generated SQLite client does not support `createMany`; fixture seeding was changed to ordinary inserts.
+- Review-fix GREEN: `npx jest server/__tests__/meetings/policy.test.js server/__tests__/meetings/lifecycle.test.js --runInBand` passed 2 suites and 18 tests, then passed twice more consecutively. The tests use real Prisma transactions against an isolated temporary copy of the worktree SQLite database and cover concurrent duplicate creation, concurrent allocation of the final quarterly slot, and exclusion of the request's own import reservation.
+- Schema: `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma` passed with “The schema ... is valid”. The parent deployed all 41 migrations to the worktree database; isolated integration tests confirmed that the meeting tables are available and usable.
 
-No shared contract changes were made. The migration was validated through Prisma schema validation but was not applied to a live or existing database. Native/server runtime integration was outside Task 1 verification.
+`createMetadata` now derives quarter from the Shanghai start time and rejects a mismatching supplied quarter. It validates and normalizes positive integer connection IDs and trims external IDs before building the unique key. It excludes the current request's active import reservation from quota reservation totals. SQLite transaction contention gets three bounded attempts, followed by an explicit 409 conflict, so a race cannot return success without a persisted row.
+
+The PRD clarifies that approved file supplements remain immutable while typed-text supplements may be deleted; policy now allows deletion of approved typed-text sources. The source lifecycle operation that downgrades approval remains with its owning follow-up task. Original, summary, and transcript sources remain undeletable through this policy.
