@@ -282,6 +282,8 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
     }
     if (
       !["http:", "https:"].includes(endpoint.protocol) ||
+      endpoint.username ||
+      endpoint.password ||
       endpoint.pathname.replace(/\/$/, "") !== "/parse"
     ) {
       throw new MeetingError(
@@ -307,9 +309,9 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
           : {},
         body: form,
       });
-    } catch (error) {
+    } catch {
       throw new MeetingError(
-        `OCR/document parser request failed: ${error.message}`,
+        "OCR/document parser request failed",
         "PARSER_SERVICE_FAILED",
         502
       );

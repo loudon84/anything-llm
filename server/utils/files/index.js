@@ -42,6 +42,30 @@ async function fileData(filePath = null) {
   return JSON.parse(data);
 }
 
+async function updateDocumentData(filePath, updater) {
+  if (typeof updater !== "function")
+    throw new TypeError("Document data updater must be a function");
+  const current = await fileData(filePath);
+  const fullFilePath = path.resolve(documentsPath, normalizePath(filePath));
+  const [realRoot, realFile] = await Promise.all([
+    fs.promises.realpath(documentsPath),
+    fs.promises.realpath(fullFilePath),
+  ]);
+  if (!isWithin(realRoot, realFile))
+    throw new Error("Document file resolves outside the documents directory");
+  const updated = await updater(current);
+  if (!updated || typeof updated !== "object" || Array.isArray(updated))
+    throw new TypeError("Document data updater must return an object");
+  const temporaryPath = `${realFile}.${require("crypto").randomUUID()}.tmp`;
+  await fs.promises.writeFile(temporaryPath, JSON.stringify(updated, null, 4), {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  await fs.promises.rename(temporaryPath, realFile);
+  return updated;
+}
+
 function listFolders() {
   if (!fs.existsSync(documentsPath)) fs.mkdirSync(documentsPath);
   const folders = [];
@@ -988,6 +1012,7 @@ module.exports = {
   purgeVectorCache,
   storeVectorResult,
   fileData,
+  updateDocumentData,
   normalizePath,
   isWithin,
   documentsPath,

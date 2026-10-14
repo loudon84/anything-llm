@@ -3,6 +3,35 @@ const {
 } = require("../../modules/meetings/retrieval");
 
 describe("authenticated Workspace evidence validation", () => {
+  test("forwards the transaction database to authenticated Workspace lookup", async () => {
+    const db = { transactionMarker: true };
+    const lookupWorkspace = jest.fn(async ({ id }) => ({ id }));
+    const retriever = createWorkspaceRetriever({
+      lookupWorkspace,
+      searchWorkspace: async () => [],
+      lookupDocument: async ({ documentId }) => ({
+        docId: documentId,
+        revision: "rev-1",
+      }),
+    });
+    await expect(
+      retriever.validateEvidence({
+        workspaceIds: [3],
+        userId: 4,
+        db,
+        evidence: [
+          {
+            sourceType: "WORKSPACE",
+            workspaceId: 3,
+            documentId: "doc-1",
+            revision: "rev-1",
+          },
+        ],
+      })
+    ).resolves.toBe(true);
+    expect(lookupWorkspace).toHaveBeenCalledWith({ id: 3, userId: 4, db });
+  });
+
   test("retains real document identity and validates current membership and revision in the supplied transaction", async () => {
     const workspaceDocuments = [
       {

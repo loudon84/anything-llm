@@ -129,6 +129,25 @@ describe("located meeting chunk index", () => {
     });
   });
 
+  test("rejects mixed dimensions within one document embedding batch", async () => {
+    const indexer = createIndexer({
+      prisma: {},
+      embedder: {
+        embedDocuments: async () => [
+          [1, 0],
+          [1, 0, 0],
+        ],
+      },
+      chunkCharacters: 5,
+    });
+    await expect(
+      indexer.prepare([
+        { text: "first", location: { type: "paragraph", paragraph: 0 } },
+        { text: "second", location: { type: "paragraph", paragraph: 1 } },
+      ])
+    ).rejects.toMatchObject({ code: "EMBEDDING_VECTOR_INVALID" });
+  });
+
   test("searches only current chunks from selected available meetings", async () => {
     const meetings = [
       {
@@ -252,6 +271,64 @@ describe("located meeting chunk index", () => {
     await expect(indexer.search([1], "question")).rejects.toMatchObject({
       code: "EMBEDDING_VECTOR_INVALID",
     });
+    chunk.embedding = JSON.stringify({ vector: [1, 0] });
+    await expect(indexer.search([1], "question")).rejects.toMatchObject({
+      code: "EMBEDDING_PROFILE_MISMATCH",
+    });
+  });
+
+  test("does not publish an AVAILABLE index when one source batch mixes dimensions", async () => {
+    const meeting = {
+      id: 1,
+      generation: 3,
+      retrievalStatus: "INDEXING",
+      deletedAt: null,
+      summary: null,
+      transcript: null,
+    };
+    const sources = [
+      {
+        id: 10,
+        meetingId: 1,
+        sourceType: "SUPPLEMENT_TEXT",
+        contentHash: "a",
+        contentText: "first second",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          { text: "first", location: { type: "paragraph", paragraph: 0 } },
+          { text: "second", location: { type: "paragraph", paragraph: 1 } },
+        ]),
+      },
+    ];
+    const inserted = [];
+    const tx = {
+      meetings: {
+        findUnique: async () => meeting,
+        update: async ({ data }) => Object.assign(meeting, data),
+      },
+      meeting_sources: { findMany: async () => sources },
+      meeting_chunks: {
+        deleteMany: async () => {},
+        create: async ({ data }) => inserted.push(data),
+      },
+    };
+    const indexer = createIndexer({
+      prisma: { ...tx, $transaction: async (callback) => callback(tx) },
+      embedder: {
+        profileId: "model-a",
+        embedDocuments: async () => [
+          [1, 0],
+          [1, 0, 0],
+        ],
+      },
+      chunkCharacters: 20,
+    });
+    await expect(indexer.reindex(1)).rejects.toMatchObject({
+      code: "EMBEDDING_VECTOR_INVALID",
+    });
+    expect(inserted).toHaveLength(0);
+    expect(meeting.retrievalStatus).toBe("INDEXING");
   });
 
   test("rejects a missing query embedding operation", async () => {

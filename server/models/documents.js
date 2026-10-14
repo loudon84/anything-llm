@@ -80,8 +80,16 @@ const Document = {
     }
   },
 
-  addDocuments: async function (workspace, additions = [], userId = null) {
+  addDocuments: async function (
+    workspace,
+    additions = [],
+    userId = null,
+    { originalRetention = null } = {}
+  ) {
     const VectorDb = getVectorDbClass();
+    const workspaceOriginals =
+      originalRetention ||
+      require("../utils/workspaceOriginals").getWorkspaceOriginals();
     if (additions.length === 0) return { failed: [], embedded: [] };
     const { fileData } = require("../utils/files");
     const { emitProgress } = require("../utils/EmbeddingWorkerManager");
@@ -155,15 +163,21 @@ const Document = {
         continue;
       }
 
+      let originalBound = false;
       try {
-        if (typeof metadata.workspaceOriginalId === "string") {
-          await require("../utils/workspaceOriginals")
-            .getWorkspaceOriginals()
-            .bind({
-              referenceId: metadata.workspaceOriginalId,
-              workspaceId: workspace.id,
-              docId,
-            });
+        if (typeof data.workspaceOriginalId === "string") {
+          await workspaceOriginals.bind({
+            referenceId: data.workspaceOriginalId,
+            workspaceId: workspace.id,
+            docId,
+            parsedDocumentId: data.id,
+            documentPath: path,
+            contentHash: require("crypto")
+              .createHash("sha256")
+              .update(String(data.pageContent || ""))
+              .digest("hex"),
+          });
+          originalBound = true;
         }
         await prisma.workspace_documents.create({ data: newDoc });
         embedded.push(path);
@@ -173,6 +187,26 @@ const Document = {
         });
       } catch (error) {
         console.error(error.message);
+        failedToEmbed.push(metadata?.title || newDoc.filename);
+        errors.add(error.message || "Failed to save document record");
+        if (originalBound)
+          await workspaceOriginals
+            .unbind({
+              referenceId: data.workspaceOriginalId,
+              workspaceId: workspace.id,
+              docId,
+            })
+            .catch((cleanupError) => console.error(cleanupError.message));
+        try {
+          await VectorDb.deleteDocumentFromNamespace(workspace.slug, docId);
+        } catch (cleanupError) {
+          console.error(cleanupError.message);
+        }
+        try {
+          await prisma.document_vectors.deleteMany({ where: { docId } });
+        } catch (cleanupError) {
+          console.error(cleanupError.message);
+        }
         emitProgress(workspace.slug, {
           type: "doc_failed",
           ...docProgress,
@@ -210,8 +244,16 @@ const Document = {
     return { failedToEmbed, errors: Array.from(errors), embedded };
   },
 
-  removeDocuments: async function (workspace, removals = [], userId = null) {
+  removeDocuments: async function (
+    workspace,
+    removals = [],
+    userId = null,
+    { originalRetention = null } = {}
+  ) {
     const VectorDb = getVectorDbClass();
+    const workspaceOriginals =
+      originalRetention ||
+      require("../utils/workspaceOriginals").getWorkspaceOriginals();
     if (removals.length === 0) return;
 
     for (const path of removals) {
@@ -229,6 +271,13 @@ const Document = {
         await prisma.workspace_documents.delete({
           where: { id: document.id, workspaceId: workspace.id },
         });
+        const metadata = safeJsonParse(document.metadata, {});
+        if (typeof metadata.workspaceOriginalId === "string")
+          await workspaceOriginals.unbind({
+            referenceId: metadata.workspaceOriginalId,
+            workspaceId: workspace.id,
+            docId: document.docId,
+          });
         await prisma.document_vectors.deleteMany({
           where: { docId: document.docId },
         });

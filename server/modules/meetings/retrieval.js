@@ -14,12 +14,12 @@ function createWorkspaceRetriever({
     );
   }
 
-  async function resolve({ workspaceIds, userId }) {
+  async function resolve({ workspaceIds, userId, db }) {
     const resolved = [];
     for (const id of workspaceIds) {
       let workspace;
       try {
-        workspace = await lookupWorkspace({ id, userId });
+        workspace = await lookupWorkspace({ id, userId, db });
       } catch (error) {
         throw new MeetingError(
           `Workspace access check failed: ${error.message}`,
@@ -97,7 +97,7 @@ function createWorkspaceRetriever({
   }
 
   async function validateEvidence({ workspaceIds, userId, evidence, db } = {}) {
-    const workspaces = await resolve({ workspaceIds, userId });
+    const workspaces = await resolve({ workspaceIds, userId, db });
     const scoped = (evidence || []).filter(
       (item) => item.sourceType === "WORKSPACE"
     );

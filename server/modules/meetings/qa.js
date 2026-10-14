@@ -92,6 +92,24 @@ function answerSourceState(manifest, citations) {
   const citedSources = [];
   const seen = new Set();
   for (const citation of citations) {
+    if (
+      citation.sourceType === "WORKSPACE" &&
+      citation.workspaceId != null &&
+      citation.documentId != null &&
+      citation.revision != null
+    ) {
+      const key = `workspace:${citation.workspaceId}:${citation.documentId}:${citation.revision}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        citedSources.push({
+          sourceType: "WORKSPACE",
+          workspaceId: Number(citation.workspaceId),
+          documentId: String(citation.documentId),
+          revision: citation.revision,
+        });
+      }
+      continue;
+    }
     if (citation.meetingId == null || citation.sourceId == null) continue;
     const key = `${citation.meetingId}:${citation.sourceId}`;
     if (!seen.has(key) && sources.has(key)) {
@@ -272,14 +290,14 @@ function createQAService({
     return sourceSets;
   }
 
-  function compareSnapshots(savedValue, currentValue) {
+  function compareSnapshots(savedValue, currentValue, workspaceStale = false) {
     const saved = sourceStateParts(savedValue);
     const previousManifest = saved.manifest;
     const current = currentValue;
     const savedMeetings = new Map(
       previousManifest.map((item) => [item.meeting.id, item])
     );
-    let stale = false;
+    let stale = workspaceStale;
     let newSources = false;
     const sourceByKey = new Map(
       current.flatMap((item) =>
@@ -290,6 +308,7 @@ function createQAService({
       )
     );
     for (const cited of saved.citedSources) {
+      if (cited.sourceType === "WORKSPACE") continue;
       const latest = sourceByKey.get(`${cited.meetingId}:${cited.id}`);
       if (!latest) {
         stale = true;
@@ -314,6 +333,36 @@ function createQAService({
       }
     }
     return { stale, newSources, blockedReason: scopeBlockReason(current) };
+  }
+
+  async function workspaceCitationsChanged(
+    savedValue,
+    { workspaceIds, userId, db = prisma } = {}
+  ) {
+    const citations = sourceStateParts(savedValue).citedSources.filter(
+      (item) => item.sourceType === "WORKSPACE"
+    );
+    if (!citations.length) return false;
+    if (typeof workspaceRetriever.validateEvidence !== "function") return true;
+    return !(await workspaceRetriever.validateEvidence({
+      workspaceIds,
+      userId,
+      evidence: citations,
+      db,
+    }));
+  }
+
+  async function historyAnswer(answer, current, scope) {
+    const workspaceStale = await workspaceCitationsChanged(
+      answer.sourceState,
+      scope
+    );
+    return {
+      ...answer,
+      citations: parse(answer.citations, []),
+      sourceState: parse(answer.sourceState, []),
+      ...compareSnapshots(answer.sourceState, current, workspaceStale),
+    };
   }
 
   async function createConversation(scope = {}, userId) {
@@ -371,12 +420,11 @@ function createQAService({
         available: !scopeBlockReason(current),
         blockedReason: scopeBlockReason(current),
       },
-      answers: answers.map((answer) => ({
-        ...answer,
-        citations: parse(answer.citations, []),
-        sourceState: parse(answer.sourceState, []),
-        ...compareSnapshots(answer.sourceState, current),
-      })),
+      answers: await Promise.all(
+        answers.map((answer) =>
+          historyAnswer(answer, current, { workspaceIds, userId })
+        )
+      ),
     };
   }
 
@@ -399,12 +447,11 @@ function createQAService({
           blockedReason: scopeBlockReason(current),
         },
       },
-      answers: answers.map((answer) => ({
-        ...answer,
-        citations: parse(answer.citations, []),
-        sourceState: parse(answer.sourceState, []),
-        ...compareSnapshots(answer.sourceState, current),
-      })),
+      answers: await Promise.all(
+        answers.map((answer) =>
+          historyAnswer(answer, current, { workspaceIds, userId })
+        )
+      ),
     };
   }
 

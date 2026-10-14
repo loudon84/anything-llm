@@ -162,10 +162,21 @@ describe("Tencent Meeting connector", () => {
       decrypt: (value) => Buffer.from(value, "base64").toString(),
     };
     const service = createMeetingConfig({ prisma, encryption });
+    for (const url of [
+      "https://synthetic-user:synthetic-url-password@ocr.example/parse",
+      "https://ocr.example/service/parse",
+    ]) {
+      await expect(
+        service.save({ id: 1, services: { ocr: { url } } }, 7)
+      ).rejects.toMatchObject({ code: "INVALID_MEETING_CONFIG" });
+      expect(rows).toHaveLength(0);
+    }
     await service.save(
       {
         id: 1,
         appId: "app",
+        sdkId: "sdk",
+        operatorId: "operator",
         secretId: "id",
         secretKey: "key",
         services: {
@@ -178,6 +189,9 @@ describe("Tencent Meeting connector", () => {
       7
     );
     expect(await service.getPublic()).toMatchObject({
+      appId: "app",
+      sdkId: "sdk",
+      operatorId: "operator",
       services: { ocr: { url: "https://ocr.example/parse", configured: true } },
     });
     expect(JSON.stringify(await service.getPublic())).not.toContain(

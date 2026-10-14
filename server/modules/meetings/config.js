@@ -79,6 +79,11 @@ function createMeetingConfig({
       id: row.id,
       name: row.name,
       configured: Boolean(stored.credentials),
+      ...Object.fromEntries(
+        ["appId", "sdkId", "operatorId"].flatMap((field) =>
+          settings[field] == null ? [] : [[field, settings[field]]]
+        )
+      ),
       ...(settings.userId ? { userId: settings.userId } : {}),
       ...(settings.operatorIdType != null
         ? { operatorIdType: settings.operatorIdType }
@@ -177,10 +182,12 @@ function createMeetingConfig({
         }
         if (
           !new Set(["https:", "http:"]).has(parsed.protocol) ||
-          !parsed.pathname.endsWith("/parse")
+          parsed.username ||
+          parsed.password ||
+          parsed.pathname.replace(/\/$/, "") !== "/parse"
         )
           throw new MeetingError(
-            "OCR parser URL must use HTTP(S) and end in /parse",
+            "OCR parser URL must be an HTTP(S) /parse endpoint without URL credentials",
             "INVALID_MEETING_CONFIG"
           );
       }

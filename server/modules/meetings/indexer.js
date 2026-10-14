@@ -113,6 +113,13 @@ function createIndexer({
           503
         );
       }
+      const dimensions = vectors[0].length;
+      if (vectors.some((vector) => vector.length !== dimensions))
+        throw new MeetingError(
+          "Embedding service returned vectors with inconsistent dimensions",
+          "EMBEDDING_VECTOR_INVALID",
+          503
+        );
       return vectors.map((vector) => vector.map(Number));
     } catch (error) {
       if (error instanceof MeetingError) throw error;
@@ -209,6 +216,15 @@ function createIndexer({
         const storedProfile = Array.isArray(stored)
           ? "default"
           : stored?.profileId;
+        if (
+          !Array.isArray(stored) &&
+          (typeof storedProfile !== "string" || !storedProfile.trim())
+        )
+          throw new MeetingError(
+            "Indexed vector profile metadata is missing; rebuild the meeting index",
+            "EMBEDDING_PROFILE_MISMATCH",
+            503
+          );
         if (storedProfile && storedProfile !== profileId)
           throw new MeetingError(
             "Indexed vectors use a different embedding profile; rebuild the meeting index",

@@ -159,6 +159,47 @@ describe("located meeting source parsing", () => {
     ).rejects.toMatchObject({ code: "PARSER_UNCONFIGURED" });
   });
 
+  test("rejects OCR URLs outside the configured endpoint without echoing credentials", async () => {
+    const secret = "synthetic-url-password";
+    const fetchImpl = jest.fn();
+    const parser = createParser({
+      services: {
+        ocr: { url: `https://synthetic-user:${secret}@ocr.example/parse` },
+      },
+      fetchImpl,
+    });
+    await expect(
+      parser.parse({ name: "scan.png", buffer: Buffer.from("image") })
+    ).rejects.toMatchObject({
+      code: "PARSER_CONFIG_INVALID",
+      message: expect.not.stringContaining(secret),
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    for (const url of [
+      "https://ocr.example/service/parse",
+      "https://ocr.example/parse/more",
+    ]) {
+      await expect(
+        createParser({ services: { ocr: { url } }, fetchImpl }).parse({
+          name: "scan.png",
+          buffer: Buffer.from("image"),
+        })
+      ).rejects.toMatchObject({ code: "PARSER_CONFIG_INVALID" });
+    }
+    await expect(
+      createParser({
+        services: { ocr: { url: "https://ocr.example/parse/" } },
+        fetchImpl: async () => ({
+          ok: true,
+          json: async () => ({
+            segments: [{ text: "OCR text", location: { type: "image" } }],
+          }),
+        }),
+      }).parse({ name: "scan.png", buffer: Buffer.from("image") })
+    ).resolves.toEqual([{ text: "OCR text", location: { type: "image" } }]);
+  });
+
   test("validates located OCR service responses", async () => {
     const parser = createParser({
       services: { ocr: { url: "http://parser.local/parse" } },

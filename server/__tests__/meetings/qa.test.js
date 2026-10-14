@@ -138,6 +138,68 @@ function setup(overrides = {}) {
 }
 
 describe("fixed-scope meeting QA and history", () => {
+  test("marks saved Workspace citations stale when their current document revision changes", async () => {
+    let currentDocument = {
+      workspaceId: 2,
+      docId: "doc-a",
+      lastUpdatedAt: new Date("2026-05-01T00:00:00.000Z"),
+    };
+    const revision = currentDocument.lastUpdatedAt;
+    const retriever = createWorkspaceRetriever({
+      lookupWorkspace: async ({ id, userId }) => (userId === 9 ? { id } : null),
+      searchWorkspace: async () => [
+        {
+          evidenceId: "chunk-a",
+          workspaceId: 2,
+          documentId: "doc-a",
+          revision,
+          quote: "The Workspace document says May.",
+          name: "planning.txt",
+        },
+      ],
+      lookupDocument: async ({ workspace, userId, documentId }) =>
+        workspace.id === 2 && userId === 9 && documentId === "doc-a"
+          ? currentDocument
+          : null,
+    });
+    const { service } = setup({
+      indexer: { search: async () => [] },
+      workspaceRetriever: retriever,
+      llm: {
+        generate: async () => ({
+          status: "ANSWERED",
+          text: "The Workspace document says May.",
+          missingInfo: null,
+          citations: [
+            {
+              evidenceId: "workspace:2:chunk-a",
+              quote: "The Workspace document says May.",
+            },
+          ],
+        }),
+      },
+    });
+    const conversation = await service.createConversation(
+      { meetingIds: [1], workspaceIds: [2] },
+      9
+    );
+    const answer = await service.ask(
+      conversation.id,
+      { question: "What date?" },
+      9
+    );
+    expect(answer.citations[0].quote).toBe("The Workspace document says May.");
+    currentDocument = {
+      ...currentDocument,
+      lastUpdatedAt: new Date("2026-06-01T00:00:00.000Z"),
+    };
+    const history = await service.history(conversation.id, 9);
+    expect(history.answers[0].stale).toBe(true);
+    expect(history.answers[0].citations[0].quote).toBe(
+      "The Workspace document says May."
+    );
+  });
+
   test("does not call the model when a selected meeting has no current evidence", async () => {
     const llm = { generate: jest.fn() };
     const { service, prisma } = setup({
