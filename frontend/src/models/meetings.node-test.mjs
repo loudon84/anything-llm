@@ -70,7 +70,7 @@ test("remote API page unwraps the actual meetings.items and nextCursor envelope"
   assert.throws(() => getRemoteMeetingPage({ meetings: [] }), /无效响应/);
 });
 
-test("approved meeting action matrix allows revisions and text but not file replacement", () => {
+test("approved meeting action matrix allows revisions and new files but not deleting files", () => {
   assert.deepEqual(
     getMeetingActionCapabilities({
       reviewStatus: "APPROVED",
@@ -79,7 +79,7 @@ test("approved meeting action matrix allows revisions and text but not file repl
     {
       editContent: true,
       addSupplementText: true,
-      addSupplementFile: false,
+      addSupplementFile: true,
       approve: false,
       deleteMeeting: false,
     }

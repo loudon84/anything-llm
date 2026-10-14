@@ -32,7 +32,7 @@ export function getMeetingActionCapabilities(meeting) {
   return {
     editContent: ["DRAFT", "APPROVED"].includes(review),
     addSupplementText: ["DRAFT", "APPROVED"].includes(review),
-    addSupplementFile: review === "DRAFT",
+    addSupplementFile: ["DRAFT", "APPROVED"].includes(review),
     approve: review === "DRAFT" && meeting?.retrievalStatus === "AVAILABLE",
     deleteMeeting: review === "DRAFT",
   };

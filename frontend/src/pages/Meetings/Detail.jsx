@@ -390,7 +390,8 @@ export default function MeetingDetail() {
       >
         <p className="mb-3 text-xs text-theme-text-secondary">
           每个文件 ≤100 MB；原始与补充文件合计最多 20 个、500 MB。补充文本计入
-          500 MB 容量。重复内容由服务端按哈希拒绝。修改文件请删除后重新上传。
+          500 MB
+          容量。已审核会议可以添加新文件，添加后会返回草稿；删除和重新上传仅限草稿。重复内容由服务端按哈希拒绝。修改文件请删除后重新上传。
         </p>
         {supplementalSources.filter(
           (source) => source.sourceType === "SUPPLEMENT_FILE"
