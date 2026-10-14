@@ -46,9 +46,13 @@ const {
   googleAgentSkillEndpoints,
 } = require("./endpoints/utils/googleAgentSkillEndpoints");
 const { memoryEndpoints } = require("./endpoints/memory");
+const { meetingsEndpoints } = require("./endpoints/meetings");
+const { createMeetingRuntime } = require("./modules/meetings/runtime");
+const { attachMeetingRuntime } = require("./modules/meetings/serverLifecycle");
 const { httpLogger } = require("./middleware/httpLogger");
 const app = express();
 const apiRouter = express.Router();
+const meetingRuntime = createMeetingRuntime();
 const FILE_LIMIT = "3GB";
 
 // Only log HTTP requests in development mode and if the ENABLE_HTTP_LOGGER environment variable is set to true
@@ -72,8 +76,9 @@ app.use(
   })
 );
 
+let bootedServer = null;
 if (!!process.env.ENABLE_HTTPS) {
-  bootSSL(app, process.env.SERVER_PORT || 3001);
+  bootedServer = bootSSL(app, process.env.SERVER_PORT || 3001).server;
 } else {
   require("@mintplex-labs/express-ws").default(app); // load WebSockets in non-SSL mode.
 }
@@ -105,6 +110,10 @@ scheduledJobEndpoints(apiRouter);
 outlookAgentEndpoints(apiRouter);
 googleAgentSkillEndpoints(apiRouter);
 memoryEndpoints(apiRouter);
+meetingsEndpoints(apiRouter, {
+  runtime: meetingRuntime,
+  prisma: require("./utils/prisma"),
+});
 // Externally facing embedder endpoints
 embeddedEndpoints(apiRouter);
 
@@ -177,4 +186,7 @@ app.all("*", function (_, response) {
 
 // In non-https mode we need to boot at the end since the server has not yet
 // started and is `.listen`ing.
-if (!process.env.ENABLE_HTTPS) bootHTTP(app, process.env.SERVER_PORT || 3001);
+if (!process.env.ENABLE_HTTPS) {
+  bootedServer = bootHTTP(app, process.env.SERVER_PORT || 3001).server;
+}
+attachMeetingRuntime(bootedServer, meetingRuntime);

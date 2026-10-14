@@ -5,6 +5,7 @@ const { assertQueryable } = require("./policy");
 const {
   buildGroundedPrompt,
   validateGroundedResponse,
+  GROUNDING_SYSTEM_POLICY,
 } = require("./grounding");
 
 const parse = (value, fallback) => {
@@ -615,8 +616,7 @@ function createQAService({
     } else {
       try {
         const response = await llm.generate({
-          system:
-            "You are a fixed-scope meeting evidence assistant. Follow the grounded answer contract exactly.",
+          system: `You are a fixed-scope meeting evidence assistant.\n${GROUNDING_SYSTEM_POLICY}`,
           prompt: buildGroundedPrompt({
             question,
             clarification,
@@ -627,10 +627,19 @@ function createQAService({
           clarification,
           conversationContext,
           evidence,
+          userId,
         });
         result = validateGroundedResponse(response, evidence);
       } catch (error) {
-        if (
+        if (error?.partialText) {
+          result = {
+            status: "FAILED_INCOMPLETE",
+            text: String(error.partialText),
+            missingInfo: null,
+            citations: [],
+            error: String(error?.message || "Answer generation failed"),
+          };
+        } else if (
           error instanceof MeetingError &&
           error.code !== "CONFLICTING_EVIDENCE"
         ) {

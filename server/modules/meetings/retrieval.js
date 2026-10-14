@@ -130,12 +130,19 @@ function createWorkspaceRetriever({
           503
         );
       }
-      const currentRevision = document?.lastUpdatedAt ?? document?.revision;
+      const currentRevision = document?.revision ?? document?.lastUpdatedAt;
+      const sameRevision = (left, right) => {
+        if (left == null || right == null) return false;
+        const leftTime = new Date(left).getTime();
+        const rightTime = new Date(right).getTime();
+        if (Number.isFinite(leftTime) && Number.isFinite(rightTime))
+          return leftTime === rightTime;
+        return String(left) === String(right);
+      };
       if (
         !document ||
         !currentRevision ||
-        new Date(currentRevision).getTime() !==
-          new Date(item.revision).getTime()
+        !sameRevision(currentRevision, item.revision)
       )
         return false;
     }
