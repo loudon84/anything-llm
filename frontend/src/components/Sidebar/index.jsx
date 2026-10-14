@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { List, Plus } from "@phosphor-icons/react";
+import { List, Plus, CalendarDots } from "@phosphor-icons/react";
 import NewWorkspaceModal, {
   useNewWorkspaceModal,
 } from "../Modals/NewWorkspace";
@@ -63,6 +63,7 @@ export default function Sidebar() {
                 <div className="relative h-[calc(100%-60px)] flex flex-col w-full justify-between pt-[10px] overflow-y-scroll no-scroll">
                   <div className="flex flex-col gap-y-[14px]">
                     <SearchBox user={user} showNewWsModal={showNewWsModal} />
+                    <MeetingsLink />
                     <ActiveWorkspaces />
                   </div>
                 </div>
@@ -173,6 +174,7 @@ export function SidebarMobileHeader() {
                     user={user}
                     showNewWsModal={showNewWsModal}
                   />
+                  <MeetingsLink />
                   <ActiveWorkspaces />
                 </div>
               </div>
@@ -204,6 +206,19 @@ function NewWorkspaceButton({ user, showNewWsModal }) {
         </p>
       </button>
     </div>
+  );
+}
+
+function MeetingsLink() {
+  const { t } = useTranslation();
+  return (
+    <Link
+      to={paths.meetings.home()}
+      className="flex h-[44px] items-center gap-x-3 rounded-lg px-4 text-sm font-semibold text-theme-text-primary hover:bg-theme-bg-sidebar"
+    >
+      <CalendarDots className="h-5 w-5" />
+      <span>{t("meetings.navigation", "会议情报")}</span>
+    </Link>
   );
 }
 

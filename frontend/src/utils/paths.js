@@ -100,6 +100,14 @@ export default {
       return `/workspace/${wsSlug}/t/${threadSlug}`;
     },
   },
+  meetings: {
+    home: () => "/meetings",
+    detail: (id) => `/meetings/${encodeURIComponent(id)}`,
+    conversation: (id) => `/meetings/conversations/${encodeURIComponent(id)}`,
+    source: (meetingId, sourceId) =>
+      `/meetings/${encodeURIComponent(meetingId)}/sources/${encodeURIComponent(sourceId)}`,
+    settings: () => "/meetings/settings",
+  },
   apiDocs: () => {
     return `${API_BASE}/docs`;
   },

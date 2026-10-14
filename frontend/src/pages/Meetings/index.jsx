@@ -1,0 +1,740 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { Meetings, getMeetingSelectionState } from "@/models/meetings";
+import { getDateBounds } from "@/models/meetingRules";
+import paths from "@/utils/paths";
+import {
+  Button,
+  Field,
+  inputClass,
+  Notice,
+  Page,
+  Panel,
+  Status,
+  formatDate,
+} from "./MeetingsUI";
+
+function currentQuarter() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "numeric",
+  }).formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+}
+
+function shanghaiDate(offsetDays = 0) {
+  const now = new Date(Date.now() + offsetDays * 86_400_000);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function CoverageBadge({ coverage }) {
+  let value = coverage;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return <span>{value || "未说明"}</span>;
+    }
+  }
+  if (!value || typeof value !== "object") return <span>未说明</span>;
+  const labels = { transcript: "转写", summary: "摘要", attachments: "附件" };
+  const entries = Object.entries(value);
+  if (!entries.length) return <span>未说明</span>;
+  const incomplete = entries.some(
+    ([, item]) =>
+      (typeof item === "object" ? item?.status : item) !== "supported"
+  );
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      {incomplete && <Status value="PARTIAL" />}
+      {entries.map(([key, item]) => (
+        <span
+          key={key}
+          className="rounded bg-theme-bg-primary px-2 py-0.5 text-xs"
+        >
+          {labels[key] || key}:{" "}
+          {typeof item === "object" ? item?.status || "未知" : String(item)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+export default function MeetingsCenter() {
+  const navigate = useNavigate();
+  const [quarter, setQuarter] = useState(currentQuarter());
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [meetings, setMeetings] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [jobs, setJobs] = useState([]);
+  const [remote, setRemote] = useState([]);
+  const [nextCursor, setNextCursor] = useState("");
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [remoteFrom, setRemoteFrom] = useState(shanghaiDate(-30));
+  const [remoteTo, setRemoteTo] = useState(shanghaiDate());
+  const [connectionId, setConnectionId] = useState(null);
+  const [manifest, setManifest] = useState(null);
+  const [manifestTarget, setManifestTarget] = useState(null);
+  const [attachmentIds, setAttachmentIds] = useState(new Set());
+  const [scopeFrom, setScopeFrom] = useState("");
+  const [scopeTo, setScopeTo] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [showScopeDialog, setShowScopeDialog] = useState(false);
+  const [workspaces, setWorkspaces] = useState([]);
+  const [selectedWorkspaces, setSelectedWorkspaces] = useState(new Set());
+  const [importing, setImporting] = useState(false);
+
+  const refreshMeetings = useCallback(
+    async (params = {}, preserveSelection = false) => {
+      setLoading(true);
+      setError("");
+      try {
+        const rows = await Meetings.list(params);
+        setMeetings(rows);
+        setSelected((current) =>
+          preserveSelection
+            ? new Set(
+                [...current].filter((id) =>
+                  rows.some((meeting) => meeting.id === id)
+                )
+              )
+            : new Set(rows.map(({ id }) => id))
+        );
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
+  const refreshJobs = useCallback(async () => {
+    try {
+      setJobs(await Meetings.jobs());
+    } catch (e) {
+      setError(e.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMeetings({ quarter });
+    refreshJobs();
+    Meetings.config()
+      .then((config) => setConnectionId(config?.id || null))
+      .catch((e) => setError(e.message));
+  }, [quarter, refreshMeetings, refreshJobs]);
+
+  useEffect(() => {
+    const active = jobs.some(({ status }) =>
+      ["CREATED", "PROCESSING"].includes(status)
+    );
+    if (!active) return undefined;
+    const timer = window.setInterval(() => {
+      refreshJobs();
+      refreshMeetings({ quarter }, true);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [jobs, quarter, refreshJobs, refreshMeetings]);
+
+  const state = useMemo(
+    () => getMeetingSelectionState(meetings, selected),
+    [meetings, selected]
+  );
+
+  async function applyDateRange() {
+    try {
+      const bounds = getDateBounds(from, to);
+      setError("");
+      await refreshMeetings(bounds);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function loadRemote(next = "") {
+    setError("");
+    setLoading(true);
+    try {
+      const bounds = getDateBounds(remoteFrom, remoteTo);
+      if (new Date(bounds.to) - new Date(bounds.from) > 90 * 86_400_000)
+        throw new Error("腾讯会议历史查询区间最多 90 天。");
+      const result = await Meetings.remote({
+        ...bounds,
+        connectionId: connectionId || undefined,
+        ...(next ? { cursor: next } : {}),
+      });
+      const rows = Array.isArray(result)
+        ? result
+        : result?.items || result?.meetings || [];
+      setRemote(
+        rows.map((row) => ({
+          ...row,
+          connectionId: row.connectionId || connectionId,
+        }))
+      );
+      setNextCursor(result?.nextCursor || result?.cursor || "");
+      setRemoteOpen(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function chooseRemote(row) {
+    setManifestTarget(row);
+    setManifest(null);
+    setImporting(true);
+    setError("");
+    try {
+      const bounds = getDateBounds(remoteFrom, remoteTo);
+      const response = await Meetings.manifest(row.externalId, {
+        connectionId: row.connectionId,
+        startTime: row.startTime || bounds?.from,
+        endTime: row.endTime || bounds?.to,
+      });
+      setManifest(response);
+      setAttachmentIds(
+        new Set(
+          (response.attachments || []).map(
+            ({ externalFileId }) => externalFileId
+          )
+        )
+      );
+      setScopeFrom("");
+      setScopeTo("");
+    } catch (e) {
+      setError(e.message);
+      setManifestTarget(null);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function startImport() {
+    if (!manifestTarget || actionBusy) return;
+    const fromMs = scopeFrom === "" ? undefined : Number(scopeFrom);
+    const toMs = scopeTo === "" ? undefined : Number(scopeTo);
+    const maxDuration = 3 * 60 * 60 * 1000;
+    if (
+      (fromMs !== undefined && (!Number.isFinite(fromMs) || fromMs < 0)) ||
+      (toMs !== undefined && (!Number.isFinite(toMs) || toMs < 0))
+    ) {
+      setError("时间范围必须是非负毫秒数。");
+      return;
+    }
+    const duration = Number(manifest?.transcriptDurationMs);
+    const effectiveFrom = fromMs ?? 0;
+    const effectiveTo =
+      toMs ??
+      (Number.isFinite(duration) && duration > 0 ? duration : undefined);
+    if (toMs !== undefined && toMs <= effectiveFrom) {
+      setError("结束偏移必须晚于开始偏移。");
+      return;
+    }
+    if (
+      effectiveTo === undefined &&
+      (fromMs !== undefined || toMs === undefined)
+    ) {
+      setError(
+        "无法确认完整转写是否在 3 小时以内，请输入明确的开始和结束偏移。"
+      );
+      return;
+    }
+    if (
+      effectiveTo !== undefined &&
+      (effectiveTo <= effectiveFrom ||
+        effectiveTo - effectiveFrom > maxDuration)
+    ) {
+      setError("请选择有效时间范围，单次最多 3 小时。");
+      return;
+    }
+    setActionBusy(true);
+    setError("");
+    try {
+      await Meetings.importMeeting({
+        connectionId: manifestTarget.connectionId,
+        externalId: manifestTarget.externalId,
+        scope: {
+          ...(fromMs === undefined ? {} : { from: fromMs }),
+          ...(toMs === undefined ? {} : { to: toMs }),
+          attachmentIds: [...attachmentIds],
+        },
+      });
+      setManifestTarget(null);
+      setManifest(null);
+      await refreshJobs();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function prepareConversation() {
+    if (!state.canStart || actionBusy) return;
+    setActionBusy(true);
+    setError("");
+    try {
+      setWorkspaces(await Meetings.workspaces());
+      setSelectedWorkspaces(new Set());
+      setShowScopeDialog(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function startConversation() {
+    if (!state.canStart || actionBusy) return;
+    setActionBusy(true);
+    setError("");
+    try {
+      const conversation = await Meetings.createConversation(
+        [...selected],
+        [...selectedWorkspaces]
+      );
+      navigate(paths.meetings.conversation(conversation.id));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  return (
+    <Page
+      title="会议情报中心"
+      description="按季度查看已导入会议，选择固定会议范围进行问答。日期区间按中国标准时间计算，结束日包含在内。"
+      actions={
+        <>
+          <Link
+            className="rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm"
+            to={paths.meetings.settings()}
+          >
+            连接设置
+          </Link>
+          <Button onClick={() => loadRemote()} disabled={loading}>
+            从腾讯会议导入
+          </Button>
+        </>
+      }
+    >
+      {error && <Notice tone="error">{error}</Notice>}
+      <Panel
+        title="会议范围"
+        actions={
+          <Button
+            onClick={() => refreshMeetings({ quarter })}
+            disabled={loading}
+          >
+            {loading ? "加载中…" : "刷新"}
+          </Button>
+        }
+      >
+        <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+          <Field label="季度">
+            <input
+              aria-label="选择季度"
+              type="text"
+              value={quarter}
+              onChange={(e) => setQuarter(e.target.value)}
+              className={inputClass}
+              placeholder="2026-Q4"
+            />
+          </Field>
+          <Field label="开始日期">
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="结束日期（包含）">
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <div className="flex items-end">
+            <Button onClick={applyDateRange}>按日期筛选并全选</Button>
+          </div>
+        </div>
+        <p className="mt-3 text-xs text-theme-text-secondary">
+          筛选后自动选中所有结果；可逐项调整。选中数上限为 10，不会自动删减。
+        </p>
+      </Panel>
+      {meetings.length === 0 && !loading ? (
+        <Notice>此筛选范围内没有会议。</Notice>
+      ) : (
+        <Panel title={`会议列表（已选 ${state.count} 项）`}>
+          {state.overLimit && (
+            <Notice tone="warning">
+              当前选中 {state.count} 项，超过 10 项上限。请取消部分选择后继续。
+            </Notice>
+          )}
+          {state.unavailableIds.length > 0 && (
+            <Notice tone="warning">
+              有 {state.unavailableIds.length}{" "}
+              项尚未建立可用索引。请取消这些项目或先补充会议资料。
+            </Notice>
+          )}
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-theme-sidebar-border text-theme-text-secondary">
+                  <th className="p-2">选择</th>
+                  <th className="p-2">会议</th>
+                  <th className="p-2">时间</th>
+                  <th className="p-2">审核</th>
+                  <th className="p-2">内容状态</th>
+                  <th className="p-2">覆盖情况</th>
+                </tr>
+              </thead>
+              <tbody>
+                {meetings.map((meeting) => (
+                  <tr
+                    key={meeting.id}
+                    className="border-b border-theme-sidebar-border/60"
+                  >
+                    <td className="p-2">
+                      <input
+                        type="checkbox"
+                        aria-label={`选择会议 ${meeting.title}`}
+                        checked={selected.has(meeting.id)}
+                        onChange={(e) =>
+                          setSelected((current) => {
+                            const next = new Set(current);
+                            e.target.checked
+                              ? next.add(meeting.id)
+                              : next.delete(meeting.id);
+                            return next;
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="p-2">
+                      <Link
+                        className="underline"
+                        to={paths.meetings.detail(meeting.id)}
+                      >
+                        {meeting.title || "未命名会议"}
+                      </Link>
+                    </td>
+                    <td className="p-2">{formatDate(meeting.startTime)}</td>
+                    <td className="p-2">
+                      <Status value={meeting.reviewStatus} />
+                    </td>
+                    <td className="p-2">
+                      <Status value={meeting.retrievalStatus} />
+                    </td>
+                    <td className="p-2">
+                      <CoverageBadge coverage={meeting.coverage} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <span className="text-sm text-theme-text-secondary">
+              只有 AVAILABLE 的会议可以进入问答。元数据草稿可取消选择。
+            </span>
+            <Button
+              variant="primary"
+              disabled={!state.canStart || actionBusy}
+              onClick={prepareConversation}
+            >
+              {actionBusy ? "正在加载…" : "使用所选会议开始问答"}
+            </Button>
+          </div>
+        </Panel>
+      )}
+      <Panel
+        title="导入任务"
+        actions={<Button onClick={refreshJobs}>更新任务</Button>}
+      >
+        {jobs.length === 0 ? (
+          <p className="text-sm text-theme-text-secondary">暂无任务。</p>
+        ) : (
+          <ul className="space-y-2">
+            {jobs.map((job) => (
+              <li
+                key={job.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-theme-bg-primary p-3 text-sm"
+              >
+                <span>
+                  {job.kind} · {job.stage || job.error || "处理中"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <Status value={job.status} />
+                  {job.status === "FAILED" && (
+                    <Button
+                      onClick={async () => {
+                        try {
+                          await Meetings.retryJob(job.id);
+                          await refreshJobs();
+                        } catch (e) {
+                          setError(e.message);
+                        }
+                      }}
+                    >
+                      重试
+                    </Button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+      {remoteOpen && (
+        <Panel
+          title="腾讯会议记录"
+          actions={
+            <>
+              <Button
+                onClick={() => loadRemote(nextCursor)}
+                disabled={!nextCursor || loading}
+              >
+                下一页
+              </Button>
+              <Button onClick={() => setRemoteOpen(false)}>关闭</Button>
+            </>
+          }
+        >
+          <div className="mb-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+            <Field label="查询开始日期">
+              <input
+                type="date"
+                value={remoteFrom}
+                onChange={(e) => setRemoteFrom(e.target.value)}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="查询结束日期（包含）">
+              <input
+                type="date"
+                value={remoteTo}
+                onChange={(e) => setRemoteTo(e.target.value)}
+                className={inputClass}
+              />
+            </Field>
+            <div className="flex items-end">
+              <Button onClick={() => loadRemote()} disabled={loading}>
+                查询 90 天内会议
+              </Button>
+            </div>
+          </div>
+          {remote.length ? (
+            <div className="space-y-2">
+              {remote.map((row) => (
+                <div
+                  key={row.externalId}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-theme-bg-primary p-3"
+                >
+                  <div>
+                    <div className="font-medium">
+                      {row.title || row.subject || row.externalId}
+                    </div>
+                    <div className="text-xs text-theme-text-secondary">
+                      {formatDate(row.startTime)} · {row.externalId}
+                    </div>
+                  </div>
+                  <Button onClick={() => chooseRemote(row)}>
+                    选择导入范围
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-theme-text-secondary">
+              此日期范围内没有会议记录。
+            </p>
+          )}
+        </Panel>
+      )}
+      {manifestTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="import-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+        >
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-theme-bg-primary p-5">
+            <h2 id="import-title" className="text-lg font-semibold">
+              选择导入内容
+            </h2>
+            <p className="mt-1 text-sm text-theme-text-secondary">
+              {manifestTarget.title || manifestTarget.externalId} ·
+              一次只导入一场会议
+            </p>
+            {importing ? (
+              <p className="py-6">正在读取附件清单…</p>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <fieldset>
+                  <legend className="mb-2 text-sm font-medium">
+                    附件（可多选）
+                  </legend>
+                  {(manifest?.attachments || []).length ? (
+                    <div className="max-h-48 space-y-2 overflow-y-auto">
+                      {manifest.attachments.map((item) => (
+                        <label
+                          key={item.externalFileId}
+                          className="flex gap-2 text-sm"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={attachmentIds.has(item.externalFileId)}
+                            onChange={(e) =>
+                              setAttachmentIds((current) => {
+                                const next = new Set(current);
+                                e.target.checked
+                                  ? next.add(item.externalFileId)
+                                  : next.delete(item.externalFileId);
+                                return next;
+                              })
+                            }
+                          />
+                          <span>
+                            {item.name} ·{" "}
+                            {Number(item.bytes || 0).toLocaleString()} bytes
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-theme-text-secondary">
+                      没有可选文档附件；仍可导入会议纪要内容。
+                    </p>
+                  )}
+                </fieldset>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Field
+                    label="开始偏移（毫秒）"
+                    hint="留空表示从头开始；0 是有效值。"
+                  >
+                    <input
+                      type="number"
+                      min="0"
+                      value={scopeFrom}
+                      onChange={(e) => setScopeFrom(e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    label="结束偏移（毫秒）"
+                    hint="留空表示到结尾。所选范围最多 3 小时。"
+                  >
+                    <input
+                      type="number"
+                      min="0"
+                      value={scopeTo}
+                      onChange={(e) => setScopeTo(e.target.value)}
+                      className={inputClass}
+                    />
+                  </Field>
+                </div>
+                {error && <Notice tone="error">{error}</Notice>}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    onClick={() => {
+                      setManifestTarget(null);
+                      setManifest(null);
+                    }}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    variant="primary"
+                    disabled={actionBusy}
+                    onClick={startImport}
+                  >
+                    {actionBusy ? "正在提交…" : "导入这一场会议"}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {showScopeDialog && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="scope-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+        >
+          <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-xl bg-theme-bg-primary p-5">
+            <h2 id="scope-title" className="text-lg font-semibold">
+              固定问答范围
+            </h2>
+            <p className="mt-2 text-sm text-theme-text-secondary">
+              已选择 {state.count}{" "}
+              场会议。工作区默认不选；只会检索你在此明确勾选的可访问工作区。
+            </p>
+            <fieldset className="my-4 space-y-2">
+              <legend className="mb-2 font-medium">可用工作区</legend>
+              {workspaces.length ? (
+                workspaces.map((workspace) => (
+                  <label
+                    key={workspace.id}
+                    className="flex items-center gap-2 rounded-lg bg-theme-bg-secondary p-2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedWorkspaces.has(workspace.id)}
+                      onChange={(e) =>
+                        setSelectedWorkspaces((current) => {
+                          const next = new Set(current);
+                          e.target.checked
+                            ? next.add(workspace.id)
+                            : next.delete(workspace.id);
+                          return next;
+                        })
+                      }
+                    />
+                    <span>{workspace.name || workspace.slug}</span>
+                  </label>
+                ))
+              ) : (
+                <p className="text-sm text-theme-text-secondary">
+                  当前没有可访问工作区。会议资料仍可用于问答。
+                </p>
+              )}
+            </fieldset>
+            <div className="flex justify-end gap-2">
+              <Button onClick={() => setShowScopeDialog(false)}>取消</Button>
+              <Button
+                variant="primary"
+                disabled={actionBusy}
+                onClick={startConversation}
+              >
+                {actionBusy ? "正在创建…" : "创建固定范围"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Page>
+  );
+}
