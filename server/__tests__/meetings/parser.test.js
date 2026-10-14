@@ -255,6 +255,48 @@ describe("located meeting source parsing", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  test("OCRs scanned images on a PDF page that also has native text", async () => {
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage();
+    page.drawText("Native meeting header", {
+      font: await pdf.embedFont(StandardFonts.Helvetica),
+    });
+    const scannedBody = await pdf.embedPng(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/8uoAAAAASUVORK5CYII=",
+        "base64"
+      )
+    );
+    page.drawImage(scannedBody, {
+      x: 40,
+      y: 100,
+      width: 300,
+      height: 500,
+    });
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        segments: [
+          {
+            text: "Scanned meeting decision",
+            location: { type: "page", page: 1 },
+          },
+        ],
+      }),
+    }));
+
+    const result = await createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl,
+    }).parse({ name: "hybrid.pdf", buffer: Buffer.from(await pdf.save()) });
+
+    expect(result).toEqual([
+      { text: "Native meeting header", location: { type: "page", page: 1 } },
+      { text: "Scanned meeting decision", location: { type: "page", page: 1 } },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test("rejects OCR locations that do not match the uploaded format", async () => {
     const parser = createParser({
       services: { ocr: { url: "http://parser.local/parse" } },

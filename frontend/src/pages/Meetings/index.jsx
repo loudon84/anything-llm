@@ -419,7 +419,7 @@ export default function MeetingsCenter() {
           </div>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
             <span className="text-sm text-theme-text-secondary">
-              只有 AVAILABLE 的会议可以进入问答。元数据草稿可取消选择。
+              只有资料就绪的会议可以进入问答。元数据草稿可取消选择。
             </span>
             <Button
               variant="primary"

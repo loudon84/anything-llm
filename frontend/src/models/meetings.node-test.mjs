@@ -6,6 +6,11 @@ import { createServer } from "vite";
 import { StaticRouter } from "react-router-dom/server.js";
 import {
   getMeetingSelectionState,
+  getActiveFileUsage,
+  getSourceTypeLabel,
+  getLocationTypeLabel,
+  getMeetingSourceState,
+  getSourcePreviewMode,
   canSupplementSource,
   getCitationLocationLabel,
   getDateBounds,
@@ -21,6 +26,55 @@ import {
   getPollingRefreshError,
   getWorkspaceCitationSnapshot,
 } from "./meetingRules.js";
+
+test("attachment quota excludes supplemental text and archived sources", () => {
+  assert.deepEqual(
+    getActiveFileUsage([
+      { sourceType: "TENCENT_ORIGINAL", bytes: 499_999_999 },
+      { sourceType: "SUPPLEMENT_TEXT", bytes: 50_000_000 },
+      { sourceType: "SUPPLEMENT_FILE", bytes: 1 },
+      { sourceType: "SUPPLEMENT_FILE", bytes: 80, deletedAt: "2026-10-01" },
+    ]),
+    { fileCount: 2, bytes: 500_000_000 }
+  );
+  assert.equal(getSourceTypeLabel("SUPPLEMENT_FILE"), "用户补充文件");
+  assert.equal(getSourceTypeLabel("SUPPLEMENT_TEXT"), "用户补充文本");
+  assert.equal(getLocationTypeLabel("paragraph"), "段落");
+  assert.equal(
+    getMeetingSourceState(null, { sourceType: "SUPPLEMENT_FILE" }),
+    "current"
+  );
+  assert.equal(
+    getMeetingSourceState(
+      { citedSource: { contentHash: "saved" } },
+      { contentHash: "current" }
+    ),
+    "modified"
+  );
+  assert.equal(getSourcePreviewMode({ name: "source.txt" }), "text");
+  assert.equal(
+    getSourcePreviewMode({ name: "source.html" }, "text/html"),
+    "text"
+  );
+  assert.equal(
+    getSourcePreviewMode({ name: "source.svg" }, "image/svg+xml"),
+    "text"
+  );
+  assert.equal(
+    getSourcePreviewMode({ name: "source.pdf" }, "application/pdf"),
+    "embedded"
+  );
+  assert.equal(getSourcePreviewMode({ name: "source.pdf" }), "embedded");
+  assert.equal(
+    getSourcePreviewMode({ name: "source.png" }, "image/png"),
+    "embedded"
+  );
+  assert.equal(getSourcePreviewMode({ name: "source.docx" }), "download-only");
+  assert.equal(
+    getSourcePreviewMode({ name: "unknown" }, "application/octet-stream"),
+    "download-only"
+  );
+});
 
 test("auto-selected over-limit and unavailable meetings stay deselectable", () => {
   const meetings = Array.from({ length: 20 }, (_, index) => ({
@@ -274,6 +328,50 @@ test("actual meeting citation renders object-shaped coverage with resolved meeti
   }
 });
 
+test("meeting answer history consumes the API array envelope and rejects malformed history", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  try {
+    const { Meetings } = await vite.ssrLoadModule("/src/models/meetings.js");
+    globalThis.window = { localStorage: { getItem: () => null } };
+    const answer = { id: 8, status: "ANSWERED", citations: [] };
+    let responseBody = {
+      conversation: {
+        id: 4,
+        meetingIds: [1],
+        workspaceIds: [],
+        scopeState: { available: false, blockedReason: "WAITING_CONTENT" },
+      },
+      answers: [answer],
+    };
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    assert.deepEqual(await Meetings.answers(4), [answer]);
+
+    responseBody = {
+      answers: {
+        conversation: { scopeState: { available: false } },
+        answers: [answer],
+      },
+    };
+    await assert.rejects(Meetings.answers(4), /无效的历史回答/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    await vite.close();
+  }
+});
+
 test("background meeting refresh keeps the user's unsaved content edits", () => {
   assert.deepEqual(
     getMeetingDraftValues(
@@ -369,6 +467,53 @@ test("Workspace viewer labels saved revision and current availability without in
     );
     assert.match(unavailable, /不可读取或权限已变化/);
     assert.doesNotMatch(unavailable, /文档已删除/);
+  } finally {
+    await vite.close();
+  }
+});
+
+test("current text preview shows file text as escaped React content", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { SourceTextPreview } = await vite.ssrLoadModule(
+      "/src/pages/Meetings/SourceViewer.jsx"
+    );
+    const html = renderToStaticMarkup(
+      React.createElement(SourceTextPreview, {
+        text: "Original file text\n<script>do not execute</script>",
+      })
+    );
+    assert.match(html, /Original file text/);
+    assert.match(html, /&lt;script&gt;do not execute&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>do not execute<\/script>/);
+    assert.match(html, /回答时保存的引用快照分开显示/);
+  } finally {
+    await vite.close();
+  }
+});
+
+test("embedded source preview sandbox never enables scripts with same-origin access", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { EmbeddedSourcePreview } = await vite.ssrLoadModule(
+      "/src/pages/Meetings/SourceViewer.jsx"
+    );
+    const html = renderToStaticMarkup(
+      React.createElement(EmbeddedSourcePreview, {
+        src: "blob:http://localhost/safe-preview",
+        title: "PDF preview",
+      })
+    );
+    assert.match(html, /sandbox="allow-same-origin"/);
+    assert.doesNotMatch(html, /allow-scripts/);
   } finally {
     await vite.close();
   }

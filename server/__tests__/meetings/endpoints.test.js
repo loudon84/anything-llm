@@ -252,6 +252,35 @@ describe("authenticated meeting endpoints", () => {
     });
   });
 
+  test("conversation history exposes answers as an array and preserves scope metadata", async () => {
+    const history = {
+      conversation: {
+        id: 4,
+        meetingIds: [1],
+        workspaceIds: [],
+        scopeState: { available: false, blockedReason: "WAITING_CONTENT" },
+      },
+      answers: [{ id: 8, status: "ANSWERED", citations: [] }],
+    };
+    const { routes } = setup({ qa: { history: async () => history } });
+    const route = routes.find(
+      (item) =>
+        item.method === "get" &&
+        item.path === "/meetings/conversations/:id/answers"
+    );
+
+    const response = await invoke(route, { params: { id: "4" } });
+
+    expect(response.value).toEqual({
+      conversation: history.conversation,
+      answers: history.answers,
+    });
+    expect(Array.isArray(response.value.answers)).toBe(true);
+    expect(response.value.conversation.scopeState).toEqual(
+      history.conversation.scopeState
+    );
+  });
+
   test("non-admin config response contains only connection status", async () => {
     const publicConfig = {
       id: 4,

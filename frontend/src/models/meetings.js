@@ -195,9 +195,12 @@ export const Meetings = {
       .conversation;
   },
   async answers(id) {
-    return (
-      await meetingRequest(`/conversations/${encodeURIComponent(id)}/answers`)
-    ).answers;
+    const history = await meetingRequest(
+      `/conversations/${encodeURIComponent(id)}/answers`
+    );
+    if (!Array.isArray(history.answers))
+      throw new Error("会议服务返回了无效的历史回答。");
+    return history.answers;
   },
   async ask(id, data) {
     return (

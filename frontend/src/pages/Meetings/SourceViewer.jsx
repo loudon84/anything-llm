@@ -2,7 +2,12 @@ import React, { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { saveAs } from "file-saver";
 import { fetchMeetingBlob, Meetings } from "@/models/meetings";
-import { compareCitedSource } from "@/models/meetingRules";
+import {
+  getLocationTypeLabel,
+  getMeetingSourceState,
+  getSourcePreviewMode,
+  getSourceTypeLabel,
+} from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import { Button, Notice, Page, Panel, Status, formatDate } from "./MeetingsUI";
 
@@ -49,6 +54,33 @@ export function WorkspaceSourceStatus({
   );
 }
 
+export function SourceTextPreview({ text }) {
+  return (
+    <div className="mt-4">
+      <p className="mb-2 text-xs text-theme-text-secondary">
+        当前文件文本预览，与回答时保存的引用快照分开显示。
+      </p>
+      <pre
+        aria-label="当前文件文本预览"
+        className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-lg bg-theme-bg-primary p-3 text-sm"
+      >
+        {text}
+      </pre>
+    </div>
+  );
+}
+
+export function EmbeddedSourcePreview({ src, title }) {
+  return (
+    <iframe
+      title={title}
+      src={src}
+      sandbox="allow-same-origin"
+      className="h-[65vh] w-full rounded-lg border border-theme-sidebar-border"
+    />
+  );
+}
+
 export default function MeetingSourceViewer() {
   const { id, sourceId } = useParams();
   const routerLocation = useLocation();
@@ -60,6 +92,8 @@ export default function MeetingSourceViewer() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [previewUrl, setPreviewUrl] = useState("");
+  const [previewText, setPreviewText] = useState(null);
+  const [previewNotice, setPreviewNotice] = useState("");
   const [workspaceAvailability, setWorkspaceAvailability] =
     useState("unchecked");
 
@@ -116,13 +150,34 @@ export default function MeetingSourceViewer() {
       const blob = await fetchMeetingBlob(url);
       originalReadable = true;
       if (workspace) setWorkspaceAvailability("available");
-      if (download)
+      if (download) {
         saveAs(blob, source?.name || snapshot?.sourceName || "meeting-source");
-      else {
-        setPreviewUrl((old) => {
-          if (old) URL.revokeObjectURL(old);
-          return URL.createObjectURL(blob);
-        });
+      } else {
+        setPreviewNotice("");
+        const previewMode = getSourcePreviewMode(
+          { name: source?.name || snapshot?.sourceName },
+          blob.type
+        );
+        if (previewMode === "text") {
+          setPreviewText(await blob.text());
+          setPreviewUrl((old) => {
+            if (old) URL.revokeObjectURL(old);
+            return "";
+          });
+        } else if (previewMode === "embedded") {
+          setPreviewText(null);
+          setPreviewUrl((old) => {
+            if (old) URL.revokeObjectURL(old);
+            return URL.createObjectURL(blob);
+          });
+        } else {
+          setPreviewText(null);
+          setPreviewUrl((old) => {
+            if (old) URL.revokeObjectURL(old);
+            return "";
+          });
+          setPreviewNotice("此格式不支持安全预览，请下载原件查看。");
+        }
       }
     } catch (e) {
       if (workspace && !originalReadable)
@@ -134,11 +189,7 @@ export default function MeetingSourceViewer() {
   }
 
   const title = snapshot?.sourceName || source?.name || "证据来源";
-  const sourceState = source
-    ? compareCitedSource(snapshot?.citedSource, source)
-    : error
-      ? "unavailable"
-      : "loading";
+  const sourceState = getMeetingSourceState(snapshot, source, error);
   const latestContent = source?.contentText || source?.text || "";
   const targetIndex = snapshot?.location
     ? segments.findIndex((segment) =>
@@ -152,7 +203,9 @@ export default function MeetingSourceViewer() {
       description={
         workspace
           ? "工作区引用快照与当前授权文件"
-          : `${source?.sourceType || "会议来源"} · ${source?.parseStatus || ""}`
+          : source
+            ? getSourceTypeLabel(source.sourceType)
+            : "会议来源"
       }
       actions={
         <Link
@@ -164,6 +217,7 @@ export default function MeetingSourceViewer() {
       }
     >
       {error && <Notice tone="error">{error}</Notice>}
+      {previewNotice && <Notice>{previewNotice}</Notice>}
       {snapshot && (
         <Panel title="回答时保存的引用快照">
           <p className="text-xs text-theme-text-secondary">
@@ -207,10 +261,9 @@ export default function MeetingSourceViewer() {
           </div>
           {previewUrl && (
             <div className="mt-4">
-              <iframe
+              <EmbeddedSourcePreview
                 title="当前工作区文件预览"
                 src={previewUrl}
-                className="h-[65vh] w-full rounded-lg border border-theme-sidebar-border"
               />
             </div>
           )}
@@ -234,6 +287,11 @@ export default function MeetingSourceViewer() {
                     当前来源版本已变化。上方引用是回答时快照，下面展示的是当前来源。
                   </Notice>
                 )}
+                {sourceState === "current" && (
+                  <Notice>
+                    当前来源；未从回答历史打开，没有回答时的引用快照。
+                  </Notice>
+                )}
                 {sourceState === "unchanged" && (
                   <Notice>当前来源与回答时保存的来源版本一致。</Notice>
                 )}
@@ -247,7 +305,7 @@ export default function MeetingSourceViewer() {
                   actions={
                     <div className="flex gap-2">
                       <Status value={source.parseStatus} />
-                      <Status value={source.sourceType} />
+                      <Status value={getSourceTypeLabel(source.sourceType)} />
                     </div>
                   }
                 >
@@ -272,12 +330,14 @@ export default function MeetingSourceViewer() {
                   )}
                   {previewUrl && (
                     <div className="mt-4">
-                      <iframe
+                      <EmbeddedSourcePreview
                         title="当前来源文件预览"
                         src={previewUrl}
-                        className="h-[65vh] w-full rounded-lg border border-theme-sidebar-border"
                       />
                     </div>
+                  )}
+                  {previewText !== null && (
+                    <SourceTextPreview text={previewText} />
                   )}
                 </Panel>
                 <Panel title={`解析片段与位置（${segments.length}）`}>
@@ -325,7 +385,7 @@ export default function MeetingSourceViewer() {
 
 function locationLabel(location = {}) {
   const labels = [];
-  if (location.type) labels.push(location.type);
+  if (location.type) labels.push(getLocationTypeLabel(location.type));
   if (location.paragraph != null) labels.push(`第 ${location.paragraph} 段`);
   if (location.page != null) labels.push(`第 ${location.page} 页`);
   if (location.sheet) labels.push(`工作表 ${location.sheet}`);

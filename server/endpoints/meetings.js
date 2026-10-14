@@ -342,12 +342,16 @@ function createMeetingsEndpoints(
     "get",
     "/conversations/:id/answers",
     noRole,
-    async (req, _res, user) => ({
-      answers: await runtime.qa.history(
+    async (req, _res, user) => {
+      const history = await runtime.qa.history(
         numericId(req.params.id, "Conversation ID"),
         user?.id
-      ),
-    })
+      );
+      return {
+        conversation: history.conversation,
+        answers: history.answers,
+      };
+    }
   );
   route(
     "get",

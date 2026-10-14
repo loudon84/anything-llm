@@ -143,8 +143,8 @@ function createSourceService({
     const active = await db.meeting_sources.findMany({
       where: { meetingId, deletedAt: null },
     });
-    const files = active.filter(
-      (source) => source.bytes > 0 && source.sourceType !== "SUPPLEMENT_TEXT"
+    const files = active.filter((source) =>
+      ["TENCENT_ORIGINAL", "SUPPLEMENT_FILE"].includes(source.sourceType)
     );
     if (file && files.length >= MAX_FILES)
       throw new MeetingError(
@@ -152,13 +152,13 @@ function createSourceService({
         "SOURCE_FILE_LIMIT",
         409
       );
-    const total = active.reduce(
+    const total = files.reduce(
       (sum, source) => sum + Number(source.bytes || 0),
       0
     );
-    if (total + bytes > MAX_MEETING_BYTES)
+    if (file && total + bytes > MAX_MEETING_BYTES)
       throw new MeetingError(
-        "Meeting sources cannot exceed 500 MB",
+        "Meeting files cannot exceed 500 MB",
         "MEETING_SOURCE_LIMIT",
         413
       );
@@ -335,6 +335,25 @@ function createSourceService({
             "SOURCE_DUPLICATE",
             409
           );
+        if (
+          sourceType === "SUPPLEMENT_FILE" &&
+          current.reviewStatus === "APPROVED"
+        ) {
+          const archivedFile = await tx.meeting_sources.findFirst({
+            where: {
+              meetingId: current.id,
+              sourceType: "SUPPLEMENT_FILE",
+              contentHash,
+              deletedAt: { not: null },
+            },
+          });
+          if (archivedFile)
+            throw new MeetingError(
+              "Reuploading a deleted supplemental file requires a draft meeting",
+              "SOURCE_REUPLOAD_REQUIRES_DRAFT",
+              409
+            );
+        }
         const initialSegments =
           text == null ? null : validateSegments(asSegments(text));
         const source = await tx.meeting_sources.create({

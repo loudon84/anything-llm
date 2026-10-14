@@ -234,9 +234,22 @@ async function pdfPages(buffer) {
     return null;
   }
   const pages = [];
+  const imagePages = [];
   try {
+    // pdf-parse 1.1.1 uses PDF.js v1.10.100; inspect its operator IDs so a
+    // native heading does not hide an image-only body on the same page.
+    const pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
+    const imageOperators = new Set([
+      pdfjs.OPS.paintImageXObject,
+      pdfjs.OPS.paintInlineImageXObject,
+      pdfjs.OPS.paintInlineImageXObjectGroup,
+      pdfjs.OPS.paintImageXObjectRepeat,
+    ]);
     await pdfParse(Uint8Array.from(buffer), {
       pagerender: async (page) => {
+        const operators = await page.getOperatorList();
+        if (operators.fnArray.some((operator) => imageOperators.has(operator)))
+          imagePages.push(page.pageNumber);
         const content = await page.getTextContent({
           normalizeWhitespace: true,
         });
@@ -255,10 +268,13 @@ async function pdfPages(buffer) {
       422
     );
   }
-  return pages.map((text, index) => ({
-    text,
-    location: { type: "page", page: index + 1 },
-  }));
+  return {
+    segments: pages.map((text, index) => ({
+      text,
+      location: { type: "page", page: index + 1 },
+    })),
+    imagePages: [...new Set(imagePages)],
+  };
 }
 
 function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
@@ -387,10 +403,16 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
       } else if (extension === ".xlsx")
         segments = await spreadsheetCells(buffer);
       else if (extension === ".pdf") {
-        segments = await pdfPages(buffer);
-        if (!segments) return parseRemote(name, buffer, "page");
-        const missingPages = segments.filter((segment) => !segment.text.trim());
-        if (missingPages.length) {
+        const parsed = await pdfPages(buffer);
+        if (!parsed) return parseRemote(name, buffer, "page");
+        segments = parsed.segments;
+        const pagesForOcr = new Set([
+          ...parsed.imagePages,
+          ...segments
+            .filter((segment) => !segment.text.trim())
+            .map((segment) => segment.location.page),
+        ]);
+        if (pagesForOcr.size) {
           const remote = await parseRemote(
             name,
             buffer,
@@ -400,26 +422,24 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
           const byPage = new Map();
           for (const segment of remote) {
             const page = segment.location.page;
+            if (!pagesForOcr.has(page)) continue;
             const pageSegments = byPage.get(page) || [];
             pageSegments.push(segment);
             byPage.set(page, pageSegments);
           }
-          for (const segment of segments) {
-            const page = segment.location.page;
-            const extracted = byPage.get(page) || [];
-            if (!segment.text.trim() && !extracted.length) {
+          for (const page of pagesForOcr) {
+            if (!byPage.get(page)?.length) {
               throw new MeetingError(
-                `OCR/document parser did not return scanned PDF page ${page}`,
+                `OCR/document parser did not return content for scanned PDF page ${page}`,
                 "PARSER_RESPONSE_INVALID",
                 502
               );
             }
           }
-          segments = segments.flatMap((segment) =>
-            segment.text.trim()
-              ? [segment]
-              : byPage.get(segment.location.page) || []
-          );
+          segments = segments.flatMap((segment) => [
+            ...(segment.text.trim() ? [segment] : []),
+            ...(byPage.get(segment.location.page) || []),
+          ]);
         }
         segments = segments.filter((segment) => segment.text.trim());
         if (!segments.length) return parseRemote(name, buffer, "page");

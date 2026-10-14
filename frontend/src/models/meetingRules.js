@@ -12,6 +12,71 @@ export function getMeetingSelectionState(meetings, selectedIds) {
   };
 }
 
+export function getActiveFileUsage(sources) {
+  const files = sources.filter(
+    (source) =>
+      !source.deletedAt &&
+      ["TENCENT_ORIGINAL", "SUPPLEMENT_FILE"].includes(source.sourceType)
+  );
+  return {
+    fileCount: files.length,
+    bytes: files.reduce(
+      (total, source) => total + Number(source.bytes || 0),
+      0
+    ),
+  };
+}
+
+export function getSourceTypeLabel(sourceType) {
+  return (
+    {
+      TENCENT_ORIGINAL: "腾讯原始附件",
+      SUPPLEMENT_FILE: "用户补充文件",
+      SUPPLEMENT_TEXT: "用户补充文本",
+      SUMMARY: "会议摘要",
+      TRANSCRIPT: "会议转写",
+    }[sourceType] || sourceType
+  );
+}
+
+export function getLocationTypeLabel(locationType) {
+  return (
+    {
+      paragraph: "段落",
+      page: "页面",
+      image: "图片",
+      cell: "单元格",
+      slide: "幻灯片",
+      transcript: "转写",
+    }[locationType] || "来源位置"
+  );
+}
+
+export function getMeetingSourceState(snapshot, source, error = "") {
+  if (source && !snapshot) return "current";
+  if (source) return compareCitedSource(snapshot.citedSource, source);
+  return error ? "unavailable" : "loading";
+}
+
+export function getSourcePreviewMode(source, mimeType = "") {
+  const name = source?.name || "";
+  if (
+    /^text\//i.test(mimeType) ||
+    /^(application\/(xhtml\+xml|xml)|image\/svg\+xml)(?:;|$)/i.test(mimeType) ||
+    /\.(txt|md|html?|xhtml|xml|svg|js|mjs|css)$/i.test(name)
+  ) {
+    return "text";
+  }
+  if (
+    /^application\/pdf(?:;|$)/i.test(mimeType) ||
+    /^image\/(png|jpe?g|gif|webp|avif|bmp)(?:;|$)/i.test(mimeType) ||
+    /\.(pdf|png|jpe?g|gif|webp|avif|bmp)$/i.test(name)
+  ) {
+    return "embedded";
+  }
+  return "download-only";
+}
+
 export function canSupplementSource(meeting, source) {
   return canDeleteSupplement(meeting, source);
 }

@@ -13,6 +13,8 @@ import {
   getMeetingActionCapabilities,
   getUploadBatchFeedback,
   getPollingRefreshError,
+  getActiveFileUsage,
+  getSourceTypeLabel,
 } from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import {
@@ -94,13 +96,8 @@ export default function MeetingDetail() {
   }, [meeting?.retrievalStatus, sources, refresh]);
 
   const activeSources = sources.filter((source) => !source.deletedAt);
-  const activeBytes = activeSources.reduce(
-    (total, source) => total + Number(source.bytes || 0),
-    0
-  );
-  const activeFileCount = activeSources.filter((source) =>
-    ["TENCENT_ORIGINAL", "SUPPLEMENT_FILE"].includes(source.sourceType)
-  ).length;
+  const { bytes: activeFileBytes, fileCount: activeFileCount } =
+    getActiveFileUsage(activeSources);
   const supplementalSources = activeSources.filter((source) =>
     source.sourceType.startsWith("SUPPLEMENT_")
   );
@@ -147,10 +144,10 @@ export default function MeetingDetail() {
       return;
     }
     if (
-      activeBytes + selected.reduce((sum, file) => sum + file.size, 0) >
+      activeFileBytes + selected.reduce((sum, file) => sum + file.size, 0) >
       MAX_MEETING
     ) {
-      setError("本场会议原始资料与补充资料合计不能超过 500 MB。");
+      setError("本场会议原始附件与用户补充文件合计不能超过 500 MB。");
       return;
     }
     setBusy(true);
@@ -179,13 +176,8 @@ export default function MeetingDetail() {
   }
 
   async function addText() {
-    const bytes = new TextEncoder().encode(textBody).length;
     if (!textName.trim() || !textBody.trim()) {
       setError("请填写文本名称和内容。");
-      return;
-    }
-    if (activeBytes + bytes > MAX_MEETING) {
-      setError("本场会议的来源合计不能超过 500 MB。");
       return;
     }
     await perform(async () => {
@@ -397,9 +389,8 @@ export default function MeetingDetail() {
         }
       >
         <p className="mb-3 text-xs text-theme-text-secondary">
-          每个文件 ≤100 MB；原始与补充文件合计最多 20 个、500 MB。补充文本计入
-          500 MB
-          容量。已审核会议可以添加新文件，添加后会返回草稿；删除和重新上传仅限草稿。重复内容由服务端按哈希拒绝。修改文件请删除后重新上传。
+          每个文件 ≤100 MB；腾讯原始附件与用户补充文件合计最多 20 个、500
+          MB。补充文本不占附件数量和容量。已审核会议可以添加新文件，添加后会返回草稿；删除和重新上传仅限草稿。相同内容的文件会被拒绝。修改文件请删除后重新上传。
         </p>
         {supplementalSources.filter(
           (source) => source.sourceType === "SUPPLEMENT_FILE"
@@ -438,7 +429,7 @@ export default function MeetingDetail() {
       >
         <p className="mb-3 text-xs text-theme-text-secondary">
           补充文本提交后不可直接编辑；请删除现有文本来源，再添加修改后的文本。已审核会议删除文本后会返回草稿。文本占用会议的
-          500 MB 总容量，不计入文件数量。
+          不占附件数量和容量。
         </p>
         {supplementalSources
           .filter((source) => source.sourceType === "SUPPLEMENT_TEXT")
@@ -504,7 +495,7 @@ function SourceRow({
           {source.name || `${source.sourceType} #${source.id}`}
         </Link>
         <div className="mt-1 flex flex-wrap gap-2 text-xs text-theme-text-secondary">
-          <span>{source.sourceType}</span>
+          <span>{getSourceTypeLabel(source.sourceType)}</span>
           <span>{Number(source.bytes || 0).toLocaleString()} bytes</span>
           <Status value={source.parseStatus} />
           {source.error && <span className="text-red-300">{source.error}</span>}
