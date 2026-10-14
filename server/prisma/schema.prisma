@@ -582,6 +582,8 @@ model meeting_jobs {
   stage        String?
   error        String?
   attempts     Int                  @default(0)
+  leaseOwner   String?
+  leaseUntil   DateTime?
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
   meeting      meetings?            @relation(fields: [meetingId], references: [id])
