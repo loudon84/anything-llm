@@ -61,7 +61,7 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 - [x] T3 资料解析／OCR、附件与补充资料、位置定位、索引和重建。
 - [x] T4 固定范围问答、澄清与待补资料、引用快照、历史和手动重答。
 - [x] T5 接口与运行接线：5a 资料／审计／服务衔接修正；5b 登录保护接口与后台运行。
-- [ ] T6 会议中心、详情、来源查看、问答和管理员配置页面。
+- [x] T6 会议中心、详情、来源查看、问答和管理员配置页面。
 - [ ] T7 完整流程联调、整体代码复核、部署说明和验收证据。
 
 ### Task 1: Persistence and lifecycle rules
@@ -153,10 +153,10 @@ Meeting Center: quarterly list, date interval auto-select then allow deselect, >
 Detail: Summary/Transcript editing and search, review approval, draft delete, two separate attachment panels originals preview/download only; supplements upload + draft-only delete/reupload and text delete/add, displayed limits/parse errors/retry. WAITING_CONTENT visible with supplement entry, query/review disabled. Source viewer locates paragraph/page/image/cell/slide, uses segments and download/preview with encoded IDs, snapshots distinct from current modified original.
 QA start dialog explicitly selects accessible Workspaces, default none, persisted immutable scope. Ask/clarify/reanswer states, disabled when scope unavailable, versions and source-change/new-source hints. Every citation displays source/meeting/date/coverage/review, opens snapshot and original locator; Workspace downgrade clearly says no precise location. Never render model text as unsafe HTML. Show service/partial failure distinct from evidence missing; supplementation target one selected meeting.
 
-- [ ] Add testable pure selection/citation helpers and meaningful focused tests via root Jest (or Node test ESM); max10, range auto-select and source-action rules.
-- [ ] Implement pages/styles following current app patterns; include keyboard labels, loading/error states and upload validation.
-- [ ] Run focused tests, scoped lint, `npm run build` in frontend; commit.
-- [ ] Provide screenshots if app can boot; no fake screenshot/live QA claim.
+- [x] Add testable pure selection/citation helpers and meaningful focused tests via root Jest (or Node test ESM); max10, range auto-select and source-action rules.
+- [x] Implement pages/styles following current app patterns; include keyboard labels, loading/error states and upload validation.
+- [x] Run focused tests, scoped lint, `npm run build` in frontend; commit.
+- [x] Record verification limits; isolated full-app UI/screenshots verification carried to Task7.
 
 ### Task 7: Integration and release evidence
 

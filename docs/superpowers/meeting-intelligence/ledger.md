@@ -32,7 +32,7 @@
 - [x] T3 Parsing / sources / index — complete (a24db03b..0f4cd881; scoped review clean)
 - [x] T4 Grounded QA / history — complete (aba37279..470ac235; scoped review clean)
 - [x] T5 API / runtime — complete (5a + 5b scoped reviews clean, GPT-6 Luna)
-- [ ] T6 React pages — pending
+- [x] T6 React pages — complete (cb52940a..5ad54b24, scoped review clean)
 - [ ] T7 Integration / review — pending
 
 
@@ -96,3 +96,13 @@
 - Task5b review:5Important findings(P1 provider-outputcontract, Workspaceoriginalresolverbootstrap, Chromaactualvectoridentity, resolvedstreamabort; P2 auth/roleJSONenvelope) returnedtooriginalGPT-6Luna fixround1/5. BoundedSSEminor includedwithstreamfix. PriorTask2/3/4/5a safeguards coveredbycompletedscopedreviews; externalLinux/live/semanticgates unchanged.
 - Task5b fixround1/5 committedb1387775:5Important+boundedSSEminor addressedperimplementer; positiveactualruntimeQA/chromavector/resolvedabort/defaultoriginal/authdenial regressions. 148meetingtests/16suites green; scopedrereviewpending.
 - Task5b fixround1/5:all5Important+SSEminor ADDRESSED,0open; b1387775 scoped spec/qualityrereviewPASS. Task5:complete(commits925a6bc3..b1387775,5a/5b reviews clean). Task6 startsReactpagesonfinalAPIcontracts.
+- Task6 interruption/resume:provider usage cap interruptedbefore finalreport/commit; userrequestedcontinue afterreset. Existingfrontendwork preserved; sameGPT-6Luna resumedfinalverification/report, no completedtaskredispatch.
+- Task6 committedcb52940a:5Nodehelpertests,scopedlint/format/fullVite+postbuildPASS. ExistingPiper/import/chunkwarningsrecorded; noappboot/screenshotsclaimed. Scopedreviewpending; finalUIexecutionownedTask7.
+- Task6 review8Important(remotepage/datecontract, coverageReactobjectcrash, approvedactionmatrix, absenttranscriptrange, provenance/revisionfields, pollingstateclobber, uploaderrorcleared, importlimits)+reanswerminor returnedoriginalGPT-6Luna fixround1/5. Narrowreadonlyprovenancemetadata seam allowedifrequiredbyactualhistorycontract; no lifecycle/ACL/schema redesign. UIboot stillTask7.
+- Ruling: Permit a narrow read-only meeting/citation provenance metadata seam in Task6 fixes if the existing responses cannot support deleted-history title/date/change display — PRD requires traceable metadata and retained historical citations, so frontend-only guessing is insufficient — cost if wrong: small extra response fields and regression coverage; no new lifecycle, permission or full-content version model.
+- Task6 fixround1 initialcommit2066a4c1:17frontendtests/scopedlint/format/fullbuildPASS perreport. Controllerhandoffcheck reportstillstatesapprovednewFILEblocked, contradictPRD180/new-supplementrule; returnedimmediatelysamefixwave(beforeindependentrereview)forcode+actionmatrixverification/correction. Finalfixheadpending.
+- Task7 confirmedintegrationgap: sources.upload transaction onlychecksactiveHash; afterdraftfiledelete→remainingcontentapprove, samehistoricalfileuploadcurrentlyacceptedonAPPROVED andautodowngraded. PRD180requiresreuploadsubmitDRAFT. Narrowhistoricalsame-meetingSUPFILEhashguard+realworkflowregressions assignedTask7; genuinelynewapprovedFILE additions remainallowed. Controllerread-onlycontractcheck,no codefix.
+- Task6 fixround1 finalHEADd382f1b3(2066a4c1+d382f1b3):8Important+reanswerminor addressedperimplementer; approvedgenuinelynewFILEadditioncorrected;17tests/scopedlint/format/fullbuildPASS. Scopedrereviewpending.
+- Task6 fixround1/5 rereview7of9ADDRESSED;2Importantremain(original#5 Workspacefreshness/revision/unverifiable display, #7 subsequentpollclearsuploaderror). No newbreakingfinding; returnedoriginalGPT-6Luna round2scopedfix. Meetingprovenance/coverage, remotepage/date, approvedactionmatrix, absenttranscript, filter/edits, importlimits/reanswer nowADDRESSED.
+- Task6 fixround2 committed5ad54b24:remainingWorkspaceprovenance/currentversionunverifiable+subsequentpolluploaderror addressedperimplementer.20Nodecases/scopedlint/format/buildPASS; scopedrereviewpending.
+- Task6 fixround2/5:bothremainingfindingsADDRESSED,0open;5ad54b24 scopedrereviewPASS. Task6:complete(commits7f73df17..5ad54b24,2fixrounds,20tests/buildPASS). ActualisolatedUIverificationcarriedTask7. Removedonlyowncompletedtaskdiffpackages(nonrecursive); retainedplan/ledger/reports andallcode.
