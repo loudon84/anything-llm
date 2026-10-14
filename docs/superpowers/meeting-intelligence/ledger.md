@@ -31,7 +31,7 @@
 - [x] T2 Tencent / jobs — complete (3e56ec60..520c1cf9; scoped review clean, 30 tests)
 - [x] T3 Parsing / sources / index — complete (a24db03b..0f4cd881; scoped review clean)
 - [x] T4 Grounded QA / history — complete (aba37279..470ac235; scoped review clean)
-- [ ] T5 API / runtime — in progress (5a safeguards then5b API, GPT-6 Luna)
+- [x] T5 API / runtime — complete (5a + 5b scoped reviews clean, GPT-6 Luna)
 - [ ] T6 React pages — pending
 - [ ] T7 Integration / review — pending
 
@@ -92,3 +92,7 @@
 - Task5a minor(deferred): identical-key originalmembership bind EEXIST canread beforefirstwritecomplete; actualDocument callers mintdistinctdocIDs, no demonstratedordinarymultiWorkspace regression. Finalwholebranchreviewmusttriage; seeTask5a rereview.
 - Task5a fixround2/5:409e66d8, F4resolved0blockingfindings;47focused/127allmeetinggreen; scoped spec/qualityPASS.
 - Task5a: complete(commits925a6bc3..409e66d8, reviewclean with1deferredminorforfinalreview). Task5b startsauthenticatedAPI/runtimeactualadapters.
+- Task5b committed7ee655c1:17suites/142tests green;43freshmigrations + realPrisma/Express smoke withfakeexternaladapters. AuthenticatedAPI/current-config adapters/HTTP+HTTPS runner lifecycle complete perimplementer; independentreviewpending. Live/Linux gates remain unverified.
+- Task5b review:5Important findings(P1 provider-outputcontract, Workspaceoriginalresolverbootstrap, Chromaactualvectoridentity, resolvedstreamabort; P2 auth/roleJSONenvelope) returnedtooriginalGPT-6Luna fixround1/5. BoundedSSEminor includedwithstreamfix. PriorTask2/3/4/5a safeguards coveredbycompletedscopedreviews; externalLinux/live/semanticgates unchanged.
+- Task5b fixround1/5 committedb1387775:5Important+boundedSSEminor addressedperimplementer; positiveactualruntimeQA/chromavector/resolvedabort/defaultoriginal/authdenial regressions. 148meetingtests/16suites green; scopedrereviewpending.
+- Task5b fixround1/5:all5Important+SSEminor ADDRESSED,0open; b1387775 scoped spec/qualityrereviewPASS. Task5:complete(commits925a6bc3..b1387775,5a/5b reviews clean). Task6 startsReactpagesonfinalAPIcontracts.

@@ -54,7 +54,7 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 
 
 ## Verified database constraint
-Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated; Task5b fresh isolated SQLite smoke applied all 43 current migrations. Tests that need real database should isolated temp copies/fixtures, not production.
 
 ## Import scope integration
 Scope from/to are numeric elapsed millisecond offsets (0 valid); attachmentIds selects externalFileIds. Omitted bounds mean full transcript, omitted attachments means all supported document artifacts. Derive selected duration from actual bounds. Check T2 report for finalized adapter result fields.
@@ -66,3 +66,7 @@ T3 nowOCRs pages lacking native text, but scan+native header on the SAME page ca
 ## Actual Linux runtime availability
 
 Controller environmentprobe: docker notinstalled/onPATH; wsl --list --quiet exits1 withWSLinstallinstruction, noavailableLinuxruntime. Do not installsystemDocker/WSL aspartcoding. WindowsautomatedfreshDB/runtime/buildverification mayproceed, Linuxfreshdeployment remains explicitreleaseverification requiringexternalLinuxhost, notclaimedpassed.
+
+## Runtime integration regressions
+
+Use finalized task-5b-report.md and its fix/review addenda. Add integration coverage for configuration changes between operations: same-dimensional embedding model A -> B must change the actual profile, reject old indexed data as a controlled index/profile failure, then explicit single-meeting rebuild restores querying. Capture the engine/profile consistently within one operation. Also change saved OCR endpoint/token and prove the next parse job uses the new configuration with a controlled local test service; no live secret/service needed. Task5b positive QA/actual Chroma/actual resolved OpenAI abort/current Workspace original/auth-denial regressions already exist, so reuse them rather than duplicate implementation tests. Validate provider adapters against actual existing field names where the integration needs them; a mocked .model field alone does not demonstrate the real model profile contract.

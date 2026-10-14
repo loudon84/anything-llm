@@ -62,7 +62,7 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 Existing frontend BrowserNative SpeechToText imports regenerator-runtime but frontend/package.json does not declare it; initial production build failed at that import. Add direct frontend dependency using version pinned in existing frontend/yarn.lock, preserve lockfile pattern; verify complete build. This is in your task scope. Initial piper browser-externalization warnings are baseline warnings, not caused by meetings.
 
 ## Verified database constraint
-Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated; Task5b fresh isolated SQLite smoke applied all 43 current migrations. Tests that need real database should isolated temp copies/fixtures, not production.
 
 ## Import scope integration
 Scope from/to are numeric elapsed millisecond offsets (0 valid); attachmentIds selects externalFileIds. Omitted bounds mean full transcript, omitted attachments means all supported document artifacts. Derive selected duration from actual bounds. Check T2 report for finalized adapter result fields.
@@ -81,3 +81,7 @@ Profilemismatch must have explicitmanualrecovery: meetingService.requestReindex(
 ## Selection interaction regression
 
 Date-rangeauto-selection caninclude>10matches/unavailablemetadata drafts. Usersmustbeabletodeselectthem: don'tdisablea checkedmetadata checkbox orrejecteverydeselectionwhilecountstill>10. Blockstartwithcount/unavailabilityreason, allowadjustment, never silentlytruncate/filterunavailable. Testauto20(includingmetadata)->deselect11->remaining9AVAILABLE->start; reverseddateintervalclearvalidation. Data dates comparebusiness-timezone consistently, existing [from,to) contract.
+
+## Task5b API handoff
+
+Read task-5b-report.md first for the exact request fields and response envelopes, then the final review/fix addendum if present. Runtime now uses current operation-scoped adapters; frontend must display returned domain/status errors without turning them into empty success. Source metadata intentionally omits local filePath/contentText; load authenticated segments/file routes for preview. Workspace originals are authenticated file streams, so use baseHeaders/blob fetch rather than bare unauthenticated anchors. All paths include application API base correctly as other models do. Do not claim live providers or Linux verified. Full application boot/UI evidence belongs here if achievable; external services may be isolated test substitutes with clear labels, never product fallback behavior.

@@ -60,7 +60,7 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 - [x] T2 腾讯会议 API、企业连接配置、手动导入和持久化后台任务。
 - [x] T3 资料解析／OCR、附件与补充资料、位置定位、索引和重建。
 - [x] T4 固定范围问答、澄清与待补资料、引用快照、历史和手动重答。
-- [ ] T5 接口与运行接线：5a 资料／审计／服务衔接修正；5b 登录保护接口与后台运行。
+- [x] T5 接口与运行接线：5a 资料／审计／服务衔接修正；5b 登录保护接口与后台运行。
 - [ ] T6 会议中心、详情、来源查看、问答和管理员配置页面。
 - [ ] T7 完整流程联调、整体代码复核、部署说明和验收证据。
 
@@ -139,9 +139,9 @@ API:
 
 Register fixed paths before `/:id`; parse numeric IDs, no content mutations with GET. Multipart max100MB disk/stream handling (avoid 10 concurrent huge buffers), filename sanitization/storage containment, cleanup rejected temp files. Original file download only local authorized stored path, no remote arbitrary proxy. Start runner on server boot and stop on shutdown using existing boot lifecycle; handlers IMPORT/PARSE_SOURCE/REINDEX. Resolve full dependencies, use existing embedder and LLM/router. Unit endpoint tests fake auth but actual service invocation; no unprotected secret routes.
 
-- [ ] RED tests status202 background, config redaction/admin gate, readonly originals, approved deletion rejection, 413 limits, fixed routes not captured by id, errors preserved.
-- [ ] Run `npx jest server/__tests__/meetings/endpoints.test.js --runInBand`.
-- [ ] Implement endpoints/runtime, test and commit; runtime smoke with generated Prisma fresh DB.
+- [x] RED tests status202 background, config redaction/admin gate, readonly originals, approved deletion rejection, 413 limits, fixed routes not captured by id, errors preserved.
+- [x] Run `npx jest server/__tests__/meetings/endpoints.test.js --runInBand`.
+- [x] Implement endpoints/runtime, test and commit; runtime smoke with generated Prisma fresh DB.
 
 ### Task 6: React meeting and QA pages
 
