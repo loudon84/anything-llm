@@ -58,9 +58,9 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 
 - [x] T1 Persistence and lifecycle rules (18 tests; review clean).
 - [x] T2 Tencent connector, encrypted configuration and durable import jobs (30 tests; review clean).
-- [ ] T3 Located parsing/OCR, source uploads, embedding index and reindex.
-- [ ] T4 Fixed-scope grounded QA, historical citations and reanswers.
-- [ ] T5 Authenticated Express API and runtime integration.
+- [x] T3 Located parsing/OCR, source uploads, embedding index and reindex.
+- [x] T4 Fixed-scope grounded QA, historical citations and reanswers.
+- [ ] T5 Authenticated Express API and runtime integration. Sequential subtasks: 5a service safeguards/original retention; 5b endpoints/runtime, each reviewed.
 - [ ] T6 React Meeting Center, detail, source viewer and QA pages.
 - [ ] T7 End-to-end integration, review fixes, deployment and test evidence.
 
@@ -103,10 +103,10 @@ Local TXT/MD paragraphs, DOCX/PPTX OOXML text + paragraph/slide location using a
 
 Uploads persisted under opaque generated name in storage/meetings, never original name as path. Limits plus SHA-256 active uniqueness checked transactionally; original files read-only, delete and reupload current DRAFT only, text no edit. Delete queues REINDEX immediately, last-source after cleanup => WAITING_CONTENT. New-upload failure retains existing index; deletion rebuild failure remains INDEX_FAILED. Reindex selects active SUCCESS sources and current revised summary/transcript, updates chunks and state atomically against generation; late worker cannot resurrect deleted source/meeting. New supplements downgrade APPROVED to DRAFT. Histories mark changed sources/new-source availability.
 
-- [ ] RED tests for rename duplicate, concurrent duplicate, original forbidden delete, last-source deletion, failed first supplement, failed upload after deletion, traversal name safe path, empty parser response, DOCX/PPTX/Excel locations and OCR config failure.
-- [ ] Run `npx jest server/__tests__/meetings/parser.test.js server/__tests__/meetings/sources.test.js server/__tests__/meetings/indexer.test.js --runInBand`.
-- [ ] Implement located parser, source jobs and embeddings; preserve source errors and snapshots.
-- [ ] Verify GREEN with real format fixture tests; commit and document local/remote service setup.
+- [x] RED tests for rename duplicate, concurrent duplicate, original forbidden delete, last-source deletion, failed first supplement, failed upload after deletion, traversal name safe path, empty parser response, DOCX/PPTX/Excel locations and OCR config failure.
+- [x] Run `npx jest server/__tests__/meetings/parser.test.js server/__tests__/meetings/sources.test.js server/__tests__/meetings/indexer.test.js --runInBand`.
+- [x] Implement located parser, source jobs and embeddings; preserve source errors and snapshots.
+- [x] Verify GREEN with real format fixture tests; commit and document local/remote service setup.
 
 ### Task 4: Fixed-scope grounded QA and history
 
@@ -116,10 +116,10 @@ Uploads persisted under opaque generated name in storage/meetings, never origina
 
 Require selected meetings 1..10 unique and AVAILABLE. Persist immutable sets; enforce conversation ownership using existing single/multiuser semantics and accessible Workspace check. On each question reretrieve selected active sources; prior answers only conversation reference, never independent evidence. LLM output validated structured JSON `{status:'ANSWERED'|'AWAITING_CLARIFICATION'|'AWAITING_SOURCES',text,missingInfo,citations:[{evidenceId,quote}]}`. Evidence IDs must belong to current retrieval and quotes substrings; answered with no citation rejected into controlled failure, never fake confidence. System instruction forbids unsupported facts, separates discussion/decision, conflict not resolved, prompts missing applicability, no exhaustiveness claim. Empty retrieval => AWAITING_SOURCES without model-call invention. Validate generations/source deletion again before publishing answer; interrupted model preserves partial text FAILED_INCOMPLETE with error. Store citation snapshots and source state; reanswer creates new row referencing previousAnswerId, never overwrite. Return stale/new-source flags from current state comparison.
 
-- [ ] RED tests: no evidence => pending, fabricated evidence rejected, conflict prompt, scope immutable, changed/deleted source during generation blocked, metadata draft blocked, snapshot persists after delete, reanswer new row, model failure not missing sources, explicit Workspace scope and access.
-- [ ] Run `npx jest server/__tests__/meetings/qa.test.js server/__tests__/meetings/grounding.test.js --runInBand`.
-- [ ] Implement service/adapters; cite source locator and approval/coverage snapshots.
-- [ ] GREEN and commit; report provider integration and any unresolved production verification.
+- [x] RED tests: no evidence => pending, fabricated evidence rejected, conflict prompt, scope immutable, changed/deleted source during generation blocked, metadata draft blocked, snapshot persists after delete, reanswer new row, model failure not missing sources, explicit Workspace scope and access.
+- [x] Run `npx jest server/__tests__/meetings/qa.test.js server/__tests__/meetings/grounding.test.js --runInBand`.
+- [x] Implement service/adapters; cite source locator and approval/coverage snapshots.
+- [x] GREEN and commit; report provider integration and any unresolved production verification.
 
 ### Task 5: Authenticated API and runtime wiring
 
@@ -167,6 +167,9 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 - [ ] Capture real test evidence and supported formats/services; record credentialless Tencent verification limits and unmeasured Linux/OCR/performance gates honestly.
 - [ ] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review.
 - [ ] Final deliverable links plan/TODO, code worktree and branch; do not claim Linux/live-release gate passed on Windows or absent credentials. Do not push/merge automatically.
+
+
+
 
 
 

@@ -58,3 +58,11 @@ Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for
 
 ## Import scope integration
 Scope from/to are numeric elapsed millisecond offsets (0 valid); attachmentIds selects externalFileIds. Omitted bounds mean full transcript, omitted attachments means all supported document artifacts. Derive selected duration from actual bounds. Check T2 report for finalized adapter result fields.
+
+## PDF hybrid same-page integration gap to verify/fix
+
+T3 nowOCRs pages lacking native text, but scan+native header on the SAME page can still skip body-image OCR. Add real PDF fixture page with native header plus imageXObject containing scannedbody, configuredOCRstub text; assert native+OCRcontent both indexed withpage provenance. Inspect pdf.js operator/image information (localinstalledpdf-parse) to trigger image/scanned-content OCR even when nativeheaderexists. PuretextPDF must remainlocal; mixedfile same-page mustnot silentlyomit scans. Necessary parserintegrationfix inTask7scope, report/lint/retestparser/index/source coverage. Don't guess nonexistent image text; requireconfiguredOCR and validatedactualOCRoutput.
+
+## Actual Linux runtime availability
+
+Controller environmentprobe: docker notinstalled/onPATH; wsl --list --quiet exits1 withWSLinstallinstruction, noavailableLinuxruntime. Do not installsystemDocker/WSL aspartcoding. WindowsautomatedfreshDB/runtime/buildverification mayproceed, Linuxfreshdeployment remains explicitreleaseverification requiringexternalLinuxhost, notclaimedpassed.

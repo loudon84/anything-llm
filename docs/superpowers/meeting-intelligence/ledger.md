@@ -30,8 +30,8 @@
 - [x] T1 Persistence / lifecycle — complete (cca287a0..b1cadb8b; scoped review clean, 18 tests)
 - [x] T2 Tencent / jobs — complete (3e56ec60..520c1cf9; scoped review clean, 30 tests)
 - [x] T3 Parsing / sources / index — complete (a24db03b..0f4cd881; scoped review clean)
-- [ ] T4 Grounded QA / history — in progress (GPT-6 Luna)
-- [ ] T5 API / runtime — pending
+- [x] T4 Grounded QA / history — complete (aba37279..470ac235; scoped review clean)
+- [ ] T5 API / runtime — in progress (5a safeguards then5b API, GPT-6 Luna)
 - [ ] T6 React pages — pending
 - [ ] T7 Integration / review — pending
 
@@ -71,3 +71,15 @@
 
 - Task 3: fix round 2/5 (PDF multi-segment loss addressed, zero open; commit0f4cd881; scoped rereview spec and quality PASS).
 - Task 3: complete (commits8a7fd142..0f4cd881, review clean). Retained current source text, original locators and historical snapshots align.
+- Task5 integration inspection: existing indexer drops incompatible embedding dimensions/corruption as negative similarity. Task5 must add controlled failure/profile handling; service/index failure cannot masquerade as missing evidence per PRD.
+- Ruling: Retain new Workspace upload originals with a central existing collector API hook and authenticated meeting citation file route — collector currently deletes originals, PRD requires opening them on fresh deployment — cost if wrong: additional storage and a small shared-upload change; no old-file recovery claim.
+- Task4 committedaba37279:96 meeting tests12focusedgreen. Independentreview5findings(availabilityrace,optionalWorkspace,followup/clarificationretrieval,clarificationpersistence,sourcehints) returned to sameGPT-6Luna fixround1/5. Minimaladditive clarification/requestcontextschema authorized; prioranswers remain non-evidence.
+- Ruling: Keep soft-deleted supplementary originals as read-only archives consistently with whole-meeting deletion — PRD retains historical supplementary materials and frees activequota only — cost if wrong: archive storage grows; no hard-delete/privacy-erasure feature added.
+- Task5 handoff inspection found T3 blanketdraft check before classification blocks approvedSUPPLEMENT_TEXT deletion despite centralized policy. Correct in source/audit integration, regression requested; approvedFILE remainsstrictrejection.
+- Task5 integration inspection: filling absent summary/transcript fields queuesREINDEX withoutsource so never becomesqueryable; clearingnull canretainoldsource. Add missingtextsource inrevise tx and explicitclearing/validation regression duringlifecycle/APIwiring.
+- Execution refinement: Task5 split sequentially into5a service integration/retention/audit/profile safeguards, then5b authenticated endpoints/runtime. Both implementersGPT-6Luna; separate task review before dependents, no parallel implementation. Keeps surfaced cross-module fixes reviewable without expanding PRDscope.
+- Task7 known parsing integration gap: same PDFpage nativeheader+scannedbody bypasses currentempty-page OCRtrigger. Mandatory realfixture/assertion and minimalimageoperator-aware fix carried toTask7, not silently acceptedasrelease-ready.
+- Environment read-only probe: Docker unavailable, WSLlist exits1/installinstruction. No Linux runtime available locally; actualLinuxfreshdeployment remains externalreleasegate, no systemsoftware installation performed.
+
+- Task4: fixround1/5 (all5 addressed,0open; commit470ac235;18focused/102allgreen,43migrationsfreshinitializedDBpassed).
+- Task4: complete(commits3955577f..470ac235, spec/qualityrereviewPASS). SourceState envelope {manifest,citedSources}, clarificationpersisted, scopeState independent; carriedthroughsubsequentbriefs.
