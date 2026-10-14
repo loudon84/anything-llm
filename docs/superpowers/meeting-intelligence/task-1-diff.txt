@@ -1,0 +1,763 @@
+cca287a0 Add meeting lifecycle persistence
+ .../meeting-intelligence/task-1-report.md          |  13 ++
+ server/__tests__/meetings/lifecycle.test.js        |  99 +++++++++++++
+ server/__tests__/meetings/policy.test.js           |  57 ++++++++
+ server/modules/meetings/constants.js               |  19 +++
+ server/modules/meetings/errors.js                  |  10 ++
+ server/modules/meetings/meetingService.js          | 153 +++++++++++++++++++++
+ server/modules/meetings/policy.js                  |  81 +++++++++++
+ .../migration.sql                                  | 122 ++++++++++++++++
+ server/prisma/schema.prisma                        | 134 +++++++++++++++++-
+ 9 files changed, 687 insertions(+), 1 deletion(-)
+diff --git a/docs/superpowers/meeting-intelligence/task-1-report.md b/docs/superpowers/meeting-intelligence/task-1-report.md
+new file mode 100644
+index 00000000..1a7982ec
+--- /dev/null
++++ b/docs/superpowers/meeting-intelligence/task-1-report.md
+@@ -0,0 +1,13 @@
++# Task 1 implementation report
++
++Implemented the meeting persistence and lifecycle layer using the shared Task 1 contracts. Added the seven Prisma models and additive SQLite migration, lifecycle constants/errors/policies, and an injected-Prisma meeting service. Active source identity is protected by the composite `(meetingId, activeHash)` unique key; meeting import identity uses a nullable unique `activeKey`. Metadata creation checks active meetings and active import reservations in a transaction. Mutations check lifecycle state and invoke the audit callback.
++
++The business timezone is `Asia/Shanghai`. Quarter assignment uses the local month in that timezone. Meeting/transcript time intervals use `[from, to)`, with `from` included and `to` excluded. All persisted JSON-like contract fields remain serialized strings.
++
++## RED/GREEN evidence
++
++- RED: `npx jest server/__tests__/meetings/policy.test.js server/__tests__/meetings/lifecycle.test.js --runInBand` failed because the requested meeting policy and service modules did not exist; both suites reported the expected module-resolution failure before implementation.
++- GREEN: the same command passed: 2 suites, 11 tests.
++- Schema: `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma` passed with “The schema ... is valid”.
++
++No shared contract changes were made. The migration was validated through Prisma schema validation but was not applied to a live or existing database. Native/server runtime integration was outside Task 1 verification.
+diff --git a/server/__tests__/meetings/lifecycle.test.js b/server/__tests__/meetings/lifecycle.test.js
+new file mode 100644
+index 00000000..e8ad96a4
+--- /dev/null
++++ b/server/__tests__/meetings/lifecycle.test.js
+@@ -0,0 +1,99 @@
++const { createMeetingService } = require("../../modules/meetings/meetingService");
++
++function fakePrisma(seed = {}) {
++  const state = {
++    meetings: [...(seed.meetings || [])],
++    meeting_sources: [...(seed.meeting_sources || [])],
++    meeting_chunks: [...(seed.meeting_chunks || [])],
++    meeting_jobs: [...(seed.meeting_jobs || [])],
++    nextMeetingId: 1,
++    nextJobId: 1,
++  };
++  const matches = (row, where = {}) => Object.entries(where).every(([key, value]) => {
++    if (value && typeof value === "object" && "in" in value) return value.in.includes(row[key]);
++    return row[key] === value;
++  });
++  const delegate = (collection) => ({
++    findMany: async ({ where = {} } = {}) => state[collection].filter((row) => matches(row, where)),
++    findFirst: async ({ where = {} } = {}) => state[collection].find((row) => matches(row, where)) || null,
++    findUnique: async ({ where = {} } = {}) => state[collection].find((row) => matches(row, where)) || null,
++    create: async ({ data }) => {
++      const row = { id: collection === "meetings" ? state.nextMeetingId++ : state.nextJobId++, ...data };
++      state[collection].push(row);
++      return row;
++    },
++    update: async ({ where, data }) => {
++      const row = state[collection].find((candidate) => matches(candidate, where));
++      if (!row) throw new Error("record not found");
++      Object.assign(row, data);
++      return row;
++    },
++    updateMany: async ({ where = {}, data }) => {
++      const rows = state[collection].filter((row) => matches(row, where));
++      rows.forEach((row) => Object.assign(row, data));
++      return { count: rows.length };
++    },
++    deleteMany: async ({ where = {} } = {}) => {
++      const rows = state[collection].filter((row) => matches(row, where));
++      state[collection] = state[collection].filter((row) => !rows.includes(row));
++      return { count: rows.length };
++    },
++  });
++  const db = {
++    meetings: delegate("meetings"),
++    meeting_sources: delegate("meeting_sources"),
++    meeting_chunks: delegate("meeting_chunks"),
++    meeting_jobs: delegate("meeting_jobs"),
++    $transaction: async (callback) => callback(db),
++  };
++  return { db, state };
++}
++
++const metadata = (externalId, overrides = {}) => ({
++  connectionId: 1,
++  externalId,
++  title: `Meeting ${externalId}`,
++  startTime: new Date("2026-04-01T02:00:00.000Z"),
++  endTime: new Date("2026-04-01T03:00:00.000Z"),
++  ...overrides,
++});
++
++describe("meeting persistence lifecycle", () => {
++  test("rejects the 201st quarterly meeting, counting metadata-only drafts", async () => {
++    const { db } = fakePrisma({ meetings: Array.from({ length: 200 }, (_, id) => ({
++      id: id + 1, connectionId: 1, quarter: "2026-Q2", deletedAt: null,
++    })) });
++    const service = createMeetingService({ prisma: db });
++    await expect(service.createMetadata(metadata("new"), 5))
++      .rejects.toMatchObject({ code: "MEETING_QUARTER_LIMIT" });
++  });
++
++  test("creates metadata-only meetings as waiting content and refuses approval", async () => {
++    const { db } = fakePrisma();
++    const service = createMeetingService({ prisma: db });
++    const meeting = await service.createMetadata(metadata("metadata"), 5);
++    expect(meeting.retrievalStatus).toBe("WAITING_CONTENT");
++    await expect(service.approve(meeting.id, 5)).rejects.toMatchObject({ code: "MEETING_NOT_AVAILABLE" });
++  });
++
++  test("soft deletes a draft and reimport creates a new identity", async () => {
++    const { db, state } = fakePrisma();
++    const service = createMeetingService({ prisma: db });
++    const first = await service.createMetadata(metadata("same"), 5);
++    await service.softDelete(first.id, 5);
++    const second = await service.createMetadata(metadata("same"), 5);
++    expect(second.id).not.toBe(first.id);
++    expect(state.meetings[0]).toMatchObject({ retrievalStatus: "DELETED", activeKey: null });
++  });
++
++  test("revision returns to draft, pauses retrieval, and queues reindexing", async () => {
++    const { db, state } = fakePrisma();
++    const service = createMeetingService({ prisma: db });
++    const meeting = await service.createMetadata(metadata("revision"), 5);
++    Object.assign(meeting, { retrievalStatus: "AVAILABLE", reviewStatus: "APPROVED", generation: 1 });
++    const revised = await service.revise(meeting.id, { summary: "Updated summary" }, 5);
++    expect(revised).toMatchObject({ reviewStatus: "DRAFT", retrievalStatus: "INDEXING", generation: 2 });
++    expect(state.meeting_jobs).toHaveLength(1);
++    expect(state.meeting_jobs[0]).toMatchObject({ kind: "REINDEX", meetingId: meeting.id, status: "CREATED" });
++  });
++});
+diff --git a/server/__tests__/meetings/policy.test.js b/server/__tests__/meetings/policy.test.js
+new file mode 100644
+index 00000000..ef79569d
+--- /dev/null
++++ b/server/__tests__/meetings/policy.test.js
+@@ -0,0 +1,57 @@
++const {
++  LIMITS,
++  REVIEW,
++  RETRIEVAL,
++  quarterFor,
++  validateScope,
++  assertQueryable,
++  assertSourceDeletion,
++  assertFileLimits,
++} = require("../../modules/meetings/policy");
++
++describe("meeting lifecycle policies", () => {
++  test("assigns quarters in the Asia/Shanghai business timezone", () => {
++    expect(quarterFor(new Date("2026-03-31T16:30:00.000Z"))).toBe("2026-Q2");
++  });
++
++  test("rejects the 201st active meeting in a quarter", () => {
++    expect(LIMITS.meetingsPerQuarter).toBe(200);
++  });
++
++  test("rejects scopes containing more than ten selected meetings", () => {
++    expect(() => validateScope({ meetingIds: Array.from({ length: 11 }, (_, i) => i + 1) }))
++      .toThrow(expect.objectContaining({ code: "MEETING_SCOPE_LIMIT" }));
++  });
++
++  test("rejects transcript scopes longer than three hours", () => {
++    expect(() => validateScope({ durationMs: 3 * 60 * 60 * 1000 + 1 }))
++      .toThrow(expect.objectContaining({ code: "TRANSCRIPT_SCOPE_LIMIT" }));
++  });
++
++  test("rejects file and meeting byte/count limits", () => {
++    expect(() => assertFileLimits([], { name: "large", bytes: 100_000_001 }))
++      .toThrow(expect.objectContaining({ code: "FILE_SIZE_LIMIT" }));
++    expect(() => assertFileLimits(Array.from({ length: 20 }, () => ({ bytes: 1 })), { name: "one-more", bytes: 1 }))
++      .toThrow(expect.objectContaining({ code: "MEETING_FILE_COUNT_LIMIT" }));
++    expect(() => assertFileLimits([{ bytes: 500_000_000 }], { name: "too-big", bytes: 1 }))
++      .toThrow(expect.objectContaining({ code: "MEETING_SIZE_LIMIT" }));
++  });
++
++  test("blocks query unless every selected meeting is available", () => {
++    expect(() => assertQueryable([
++      { id: 1, retrievalStatus: RETRIEVAL.AVAILABLE },
++      { id: 2, retrievalStatus: RETRIEVAL.WAITING_CONTENT },
++    ])).toThrow(expect.objectContaining({ code: "MEETING_UNAVAILABLE" }));
++  });
++
++  test("prevents deletion of original and approved supplemental sources", () => {
++    expect(() => assertSourceDeletion(
++      { reviewStatus: REVIEW.DRAFT },
++      { sourceType: "TENCENT_ORIGINAL" },
++    )).toThrow(expect.objectContaining({ code: "SOURCE_IMMUTABLE" }));
++    expect(() => assertSourceDeletion(
++      { reviewStatus: REVIEW.APPROVED },
++      { sourceType: "SUPPLEMENT_FILE" },
++    )).toThrow(expect.objectContaining({ code: "SOURCE_IMMUTABLE" }));
++  });
++});
+diff --git a/server/modules/meetings/constants.js b/server/modules/meetings/constants.js
+new file mode 100644
+index 00000000..a08119ed
+--- /dev/null
++++ b/server/modules/meetings/constants.js
+@@ -0,0 +1,19 @@
++const LIMITS = Object.freeze({
++  meetingsPerQuarter: 200,
++  selectedMeetings: 10,
++  transcriptDurationMs: 3 * 60 * 60 * 1000,
++  fileBytes: 100_000_000,
++  filesPerMeeting: 20,
++  meetingBytes: 500_000_000,
++});
++
++const REVIEW = Object.freeze({ DRAFT: "DRAFT", APPROVED: "APPROVED" });
++const RETRIEVAL = Object.freeze({
++  WAITING_CONTENT: "WAITING_CONTENT",
++  AVAILABLE: "AVAILABLE",
++  INDEXING: "INDEXING",
++  INDEX_FAILED: "INDEX_FAILED",
++  DELETED: "DELETED",
++});
++
++module.exports = { LIMITS, REVIEW, RETRIEVAL };
+diff --git a/server/modules/meetings/errors.js b/server/modules/meetings/errors.js
+new file mode 100644
+index 00000000..d2c0e20e
+--- /dev/null
++++ b/server/modules/meetings/errors.js
+@@ -0,0 +1,10 @@
++class MeetingError extends Error {
++  constructor(message, code, status = 400) {
++    super(message);
++    this.name = "MeetingError";
++    this.code = code;
++    this.status = status;
++  }
++}
++
++module.exports = { MeetingError };
+diff --git a/server/modules/meetings/meetingService.js b/server/modules/meetings/meetingService.js
+new file mode 100644
+index 00000000..511cfd33
+--- /dev/null
++++ b/server/modules/meetings/meetingService.js
+@@ -0,0 +1,153 @@
++const { MeetingError } = require("./errors");
++const { LIMITS, REVIEW, RETRIEVAL, quarterFor } = require("./policy");
++
++const activeMeetingWhere = { deletedAt: null };
++const now = () => new Date();
++
++function createMeetingService({ prisma, audit = async () => {} } = {}) {
++  if (!prisma) throw new TypeError("createMeetingService requires an injected Prisma client");
++
++  async function transaction(callback) {
++    return typeof prisma.$transaction === "function" ? prisma.$transaction(callback) : callback(prisma);
++  }
++
++  async function findMeeting(db, id) {
++    const meeting = await db.meetings.findUnique({ where: { id: Number(id) } });
++    if (!meeting || meeting.retrievalStatus === RETRIEVAL.DELETED) {
++      throw new MeetingError("Meeting not found", "MEETING_NOT_FOUND", 404);
++    }
++    return meeting;
++  }
++
++  async function auditMutation(action, meeting, userId, details = {}) {
++    await audit({ action, meetingId: meeting.id, userId: userId ?? null, ...details });
++  }
++
++  return {
++    async list(filters = {}) {
++      return prisma.meetings.findMany({ where: { ...filters, ...activeMeetingWhere } });
++    },
++
++    async get(id) {
++      return findMeeting(prisma, id);
++    },
++
++    async createMetadata(data, userId) {
++      const startTime = new Date(data.startTime);
++      if (Number.isNaN(startTime.getTime())) throw new MeetingError("A valid meeting start time is required", "INVALID_DATE");
++      const quarter = data.quarter || quarterFor(startTime);
++      const activeKey = `${data.connectionId}:${data.externalId}`;
++      try {
++        return await transaction(async (db) => {
++          const duplicate = await db.meetings.findUnique({ where: { activeKey } });
++          if (duplicate) throw new MeetingError("This meeting is already imported", "MEETING_DUPLICATE", 409);
++
++          const existing = await db.meetings.findMany({ where: { quarter, deletedAt: null } });
++          const activeKeys = new Set(existing.map((meeting) => meeting.activeKey).filter(Boolean));
++          const reservations = await db.meeting_jobs.findMany({
++            where: { quarter, kind: "IMPORT", status: { in: ["CREATED", "PROCESSING"] } },
++          });
++          const reservationCount = reservations.filter((job) => !job.activeKey || !activeKeys.has(job.activeKey)).length;
++          if (existing.length + reservationCount >= LIMITS.meetingsPerQuarter) {
++            throw new MeetingError("The quarterly meeting limit has been reached", "MEETING_QUARTER_LIMIT", 409);
++          }
++
++          const meeting = await db.meetings.create({ data: {
++            connectionId: Number(data.connectionId),
++            externalId: String(data.externalId),
++            activeKey,
++            title: String(data.title || "").trim(),
++            startTime,
++            endTime: data.endTime ? new Date(data.endTime) : null,
++            quarter,
++            reviewStatus: REVIEW.DRAFT,
++            retrievalStatus: RETRIEVAL.WAITING_CONTENT,
++            summary: data.summary ?? null,
++            transcript: data.transcript ?? null,
++            coverage: data.coverage || "{}",
++            generation: 0,
++            deletedAt: null,
++            createdBy: userId ?? null,
++          } });
++          await auditMutation("MEETING_METADATA_CREATED", meeting, userId);
++          return meeting;
++        });
++      } catch (error) {
++        if (error.code === "P2002") throw new MeetingError("This meeting is already imported", "MEETING_DUPLICATE", 409);
++        throw error;
++      }
++    },
++
++    async approve(id, userId) {
++      return transaction(async (db) => {
++        const meeting = await findMeeting(db, id);
++        if (meeting.retrievalStatus !== RETRIEVAL.AVAILABLE) {
++          throw new MeetingError("Meeting content must be indexed before approval", "MEETING_NOT_AVAILABLE", 409);
++        }
++        const [sources, jobs] = await Promise.all([
++          db.meeting_sources.findMany({ where: { meetingId: meeting.id, deletedAt: null } }),
++          db.meeting_jobs.findMany({ where: { meetingId: meeting.id } }),
++        ]);
++        if (sources.some((source) => source.parseStatus !== "SUCCESS") ||
++            jobs.some((job) => ["CREATED", "PROCESSING", "FAILED"].includes(job.status) || job.error)) {
++          throw new MeetingError("Meeting has unresolved source or job errors", "MEETING_UNRESOLVED_WORK", 409);
++        }
++        const updated = await db.meetings.update({ where: { id: meeting.id }, data: {
++          reviewStatus: REVIEW.APPROVED, reviewedBy: userId ?? null, reviewedAt: now(),
++        } });
++        await auditMutation("MEETING_APPROVED", updated, userId);
++        return updated;
++      });
++    },
++
++    async softDelete(id, userId) {
++      return transaction(async (db) => {
++        const meeting = await findMeeting(db, id);
++        if (meeting.reviewStatus !== REVIEW.DRAFT) {
++          throw new MeetingError("Only draft meetings can be deleted", "MEETING_IMMUTABLE", 409);
++        }
++        const deletedAt = now();
++        const updated = await db.meetings.update({ where: { id: meeting.id }, data: {
++          activeKey: null, retrievalStatus: RETRIEVAL.DELETED, deletedAt,
++        } });
++        await db.meeting_sources.updateMany({
++          where: { meetingId: meeting.id, deletedAt: null }, data: { deletedAt, activeHash: null },
++        });
++        await db.meeting_chunks.deleteMany({ where: { meetingId: meeting.id } });
++        await auditMutation("MEETING_DELETED", updated, userId);
++        return updated;
++      });
++    },
++
++    async revise(id, changes = {}, userId) {
++      const hasSummary = Object.prototype.hasOwnProperty.call(changes, "summary");
++      const hasTranscript = Object.prototype.hasOwnProperty.call(changes, "transcript");
++      if (!hasSummary && !hasTranscript) throw new MeetingError("A summary or transcript revision is required", "EMPTY_REVISION");
++      return transaction(async (db) => {
++        const meeting = await findMeeting(db, id);
++        if (meeting.reviewStatus !== REVIEW.DRAFT && meeting.reviewStatus !== REVIEW.APPROVED) {
++          throw new MeetingError("Meeting cannot be revised in its current state", "MEETING_IMMUTABLE", 409);
++        }
++        const generation = Number(meeting.generation || 0) + 1;
++        const updated = await db.meetings.update({ where: { id: meeting.id }, data: {
++          ...(hasSummary ? { summary: changes.summary } : {}),
++          ...(hasTranscript ? { transcript: changes.transcript } : {}),
++          generation,
++          reviewStatus: REVIEW.DRAFT,
++          reviewedBy: null,
++          reviewedAt: null,
++          retrievalStatus: RETRIEVAL.INDEXING,
++        } });
++        await db.meeting_jobs.create({ data: {
++          kind: "REINDEX", meetingId: meeting.id, connectionId: meeting.connectionId,
++          externalId: meeting.externalId, activeKey: `REINDEX:${meeting.id}:${generation}`,
++          quarter: meeting.quarter, payload: JSON.stringify({ generation }), status: "CREATED", attempts: 0,
++        } });
++        await auditMutation("MEETING_REVISED", updated, userId, { generation });
++        return updated;
++      });
++    },
++  };
++}
++
++module.exports = { createMeetingService };
+diff --git a/server/modules/meetings/policy.js b/server/modules/meetings/policy.js
+new file mode 100644
+index 00000000..3078b791
+--- /dev/null
++++ b/server/modules/meetings/policy.js
+@@ -0,0 +1,81 @@
++const { LIMITS, REVIEW, RETRIEVAL } = require("./constants");
++const { MeetingError } = require("./errors");
++
++function shanghaiParts(date) {
++  const value = date instanceof Date ? date : new Date(date);
++  if (Number.isNaN(value.getTime())) throw new MeetingError("A valid date is required", "INVALID_DATE");
++  const parts = new Intl.DateTimeFormat("en-US", {
++    timeZone: "Asia/Shanghai", year: "numeric", month: "numeric",
++  }).formatToParts(value);
++  return Object.fromEntries(parts.map(({ type, value: part }) => [type, Number(part)]));
++}
++
++function quarterFor(date) {
++  const { year, month } = shanghaiParts(date);
++  return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
++}
++
++function validateScope(scope = {}) {
++  const ids = Array.isArray(scope) ? scope : (scope.meetingIds || scope.meetings || []);
++  const uniqueIds = new Set(ids.map((meeting) => typeof meeting === "object" ? meeting.id : meeting));
++  if (uniqueIds.size > LIMITS.selectedMeetings) {
++    throw new MeetingError("Select no more than ten meetings", "MEETING_SCOPE_LIMIT");
++  }
++
++  let duration = scope.durationMs;
++  const from = scope.from || scope.startTime;
++  const to = scope.to || scope.endTime;
++  if (duration == null && from != null && to != null) duration = new Date(to).getTime() - new Date(from).getTime();
++  if (duration != null && (!Number.isFinite(Number(duration)) || Number(duration) < 0)) {
++    throw new MeetingError("A valid transcript time interval is required", "INVALID_TRANSCRIPT_SCOPE");
++  }
++  if (duration > LIMITS.transcriptDurationMs) {
++    throw new MeetingError("Transcript selection cannot exceed three hours", "TRANSCRIPT_SCOPE_LIMIT");
++  }
++  return scope;
++}
++
++function assertQueryable(meetings) {
++  const unavailable = (meetings || []).filter((meeting) => meeting.retrievalStatus !== RETRIEVAL.AVAILABLE);
++  if (unavailable.length) {
++    throw new MeetingError("Every selected meeting must be available before querying", "MEETING_UNAVAILABLE", 409);
++  }
++  return meetings;
++}
++
++function assertSourceDeletion(meeting, source) {
++  if (source.sourceType === "TENCENT_ORIGINAL") {
++    throw new MeetingError("Original meeting sources cannot be deleted", "SOURCE_IMMUTABLE", 409);
++  }
++  if (meeting.reviewStatus !== REVIEW.DRAFT || !["SUPPLEMENT_FILE", "SUPPLEMENT_TEXT"].includes(source.sourceType)) {
++    throw new MeetingError("Only supplemental sources in a draft can be deleted", "SOURCE_IMMUTABLE", 409);
++  }
++  return true;
++}
++
++function assertFileLimits(existing = [], incoming = []) {
++  const current = Array.isArray(existing) ? existing : [];
++  const additions = Array.isArray(incoming) ? incoming : [incoming];
++  const files = [...current.filter((file) => !file.deletedAt), ...additions];
++  if (additions.some((file) => Number(file.bytes || 0) > LIMITS.fileBytes)) {
++    throw new MeetingError("Each file must be 100 MB or smaller", "FILE_SIZE_LIMIT", 413);
++  }
++  if (files.length > LIMITS.filesPerMeeting) {
++    throw new MeetingError("A meeting can have no more than 20 active files", "MEETING_FILE_COUNT_LIMIT", 413);
++  }
++  if (files.reduce((sum, file) => sum + Number(file.bytes || 0), 0) > LIMITS.meetingBytes) {
++    throw new MeetingError("A meeting can contain no more than 500 MB of files", "MEETING_SIZE_LIMIT", 413);
++  }
++  return true;
++}
++
++module.exports = {
++  LIMITS,
++  REVIEW,
++  RETRIEVAL,
++  quarterFor,
++  validateScope,
++  assertQueryable,
++  assertSourceDeletion,
++  assertFileLimits,
++};
+diff --git a/server/prisma/migrations/20261014000000_meeting_intelligence/migration.sql b/server/prisma/migrations/20261014000000_meeting_intelligence/migration.sql
+new file mode 100644
+index 00000000..e3ff767f
+--- /dev/null
++++ b/server/prisma/migrations/20261014000000_meeting_intelligence/migration.sql
+@@ -0,0 +1,122 @@
++CREATE TABLE "meeting_connections" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "name" TEXT NOT NULL,
++    "config" TEXT NOT NULL,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" DATETIME NOT NULL
++);
++
++CREATE TABLE "meetings" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "connectionId" INTEGER NOT NULL,
++    "externalId" TEXT NOT NULL,
++    "activeKey" TEXT,
++    "title" TEXT NOT NULL,
++    "startTime" DATETIME NOT NULL,
++    "endTime" DATETIME,
++    "quarter" TEXT NOT NULL,
++    "reviewStatus" TEXT NOT NULL,
++    "retrievalStatus" TEXT NOT NULL,
++    "summary" TEXT,
++    "transcript" TEXT,
++    "coverage" TEXT NOT NULL,
++    "generation" INTEGER NOT NULL DEFAULT 0,
++    "deletedAt" DATETIME,
++    "createdBy" INTEGER,
++    "reviewedBy" INTEGER,
++    "reviewedAt" DATETIME,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" DATETIME NOT NULL,
++    CONSTRAINT "meetings_connectionId_fkey" FOREIGN KEY ("connectionId") REFERENCES "meeting_connections" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
++);
++
++CREATE TABLE "meeting_sources" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "meetingId" INTEGER NOT NULL,
++    "sourceType" TEXT NOT NULL,
++    "name" TEXT NOT NULL,
++    "contentHash" TEXT,
++    "activeHash" TEXT,
++    "bytes" INTEGER NOT NULL DEFAULT 0,
++    "filePath" TEXT,
++    "contentText" TEXT,
++    "segments" TEXT,
++    "parseStatus" TEXT NOT NULL,
++    "error" TEXT,
++    "deletedAt" DATETIME,
++    "createdBy" INTEGER,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" DATETIME NOT NULL,
++    CONSTRAINT "meeting_sources_meetingId_fkey" FOREIGN KEY ("meetingId") REFERENCES "meetings" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
++);
++
++CREATE TABLE "meeting_chunks" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "meetingId" INTEGER NOT NULL,
++    "sourceId" INTEGER NOT NULL,
++    "text" TEXT NOT NULL,
++    "location" TEXT NOT NULL,
++    "embedding" TEXT NOT NULL,
++    "generation" INTEGER NOT NULL,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "meeting_chunks_meetingId_fkey" FOREIGN KEY ("meetingId") REFERENCES "meetings" ("id") ON DELETE RESTRICT ON UPDATE CASCADE,
++    CONSTRAINT "meeting_chunks_sourceId_fkey" FOREIGN KEY ("sourceId") REFERENCES "meeting_sources" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
++);
++
++CREATE TABLE "meeting_jobs" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "kind" TEXT NOT NULL,
++    "meetingId" INTEGER,
++    "connectionId" INTEGER,
++    "externalId" TEXT,
++    "activeKey" TEXT,
++    "quarter" TEXT,
++    "payload" TEXT NOT NULL,
++    "status" TEXT NOT NULL,
++    "stage" TEXT,
++    "error" TEXT,
++    "attempts" INTEGER NOT NULL DEFAULT 0,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" DATETIME NOT NULL,
++    CONSTRAINT "meeting_jobs_meetingId_fkey" FOREIGN KEY ("meetingId") REFERENCES "meetings" ("id") ON DELETE RESTRICT ON UPDATE CASCADE,
++    CONSTRAINT "meeting_jobs_connectionId_fkey" FOREIGN KEY ("connectionId") REFERENCES "meeting_connections" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
++);
++
++CREATE TABLE "meeting_conversations" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "meetingIds" TEXT NOT NULL,
++    "workspaceIds" TEXT NOT NULL,
++    "createdBy" INTEGER,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
++);
++
++CREATE TABLE "meeting_answers" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "conversationId" INTEGER NOT NULL,
++    "question" TEXT NOT NULL,
++    "status" TEXT NOT NULL,
++    "text" TEXT,
++    "missingInfo" TEXT,
++    "citations" TEXT NOT NULL,
++    "sourceState" TEXT NOT NULL,
++    "previousAnswerId" INTEGER,
++    "error" TEXT,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "meeting_answers_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "meeting_conversations" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
++);
++
++CREATE UNIQUE INDEX "meetings_activeKey_key" ON "meetings"("activeKey");
++CREATE INDEX "meetings_quarter_deletedAt_idx" ON "meetings"("quarter", "deletedAt");
++CREATE INDEX "meetings_connectionId_externalId_idx" ON "meetings"("connectionId", "externalId");
++CREATE INDEX "meetings_retrievalStatus_reviewStatus_idx" ON "meetings"("retrievalStatus", "reviewStatus");
++CREATE UNIQUE INDEX "meeting_sources_meetingId_activeHash_key" ON "meeting_sources"("meetingId", "activeHash");
++CREATE INDEX "meeting_sources_meetingId_deletedAt_idx" ON "meeting_sources"("meetingId", "deletedAt");
++CREATE INDEX "meeting_sources_contentHash_idx" ON "meeting_sources"("contentHash");
++CREATE INDEX "meeting_chunks_meetingId_generation_idx" ON "meeting_chunks"("meetingId", "generation");
++CREATE INDEX "meeting_chunks_sourceId_idx" ON "meeting_chunks"("sourceId");
++CREATE UNIQUE INDEX "meeting_jobs_activeKey_key" ON "meeting_jobs"("activeKey");
++CREATE INDEX "meeting_jobs_status_kind_idx" ON "meeting_jobs"("status", "kind");
++CREATE INDEX "meeting_jobs_meetingId_status_idx" ON "meeting_jobs"("meetingId", "status");
++CREATE INDEX "meeting_jobs_quarter_status_idx" ON "meeting_jobs"("quarter", "status");
++CREATE INDEX "meeting_answers_conversationId_createdAt_idx" ON "meeting_answers"("conversationId", "createdAt");
++CREATE INDEX "meeting_answers_previousAnswerId_idx" ON "meeting_answers"("previousAnswerId");
+diff --git a/server/prisma/schema.prisma b/server/prisma/schema.prisma
+index 65cfd6ca..bba9a42f 100644
+--- a/server/prisma/schema.prisma
++++ b/server/prisma/schema.prisma
+@@ -478,11 +478,143 @@ model model_router_rules {
+   route_provider   String
+   route_model      String
+   created_by       Int?
+   createdAt        DateTime      @default(now())
+   lastUpdatedAt    DateTime      @default(now())
+   router           model_routers @relation(fields: [router_id], references: [id], onDelete: Cascade)
+ 
+   @@unique([router_id, title])
+   @@index([router_id])
+   @@index([router_id, enabled, priority])
+-}
+\ No newline at end of file
++}
++
++model meeting_connections {
++  id        Int       @id @default(autoincrement())
++  name      String
++  config    String
++  createdAt DateTime  @default(now())
++  updatedAt DateTime  @updatedAt
++  meetings  meetings[]
++  jobs      meeting_jobs[]
++}
++
++model meetings {
++  id              Int              @id @default(autoincrement())
++  connectionId    Int
++  externalId      String
++  activeKey       String?          @unique
++  title           String
++  startTime       DateTime
++  endTime         DateTime?
++  quarter         String
++  reviewStatus    String
++  retrievalStatus String
++  summary         String?
++  transcript      String?
++  coverage        String
++  generation      Int              @default(0)
++  deletedAt       DateTime?
++  createdBy       Int?
++  reviewedBy      Int?
++  reviewedAt      DateTime?
++  createdAt       DateTime         @default(now())
++  updatedAt       DateTime         @updatedAt
++  connection      meeting_connections @relation(fields: [connectionId], references: [id])
++  sources         meeting_sources[]
++  chunks          meeting_chunks[]
++  jobs            meeting_jobs[]
++
++  @@index([quarter, deletedAt])
++  @@index([connectionId, externalId])
++  @@index([retrievalStatus, reviewStatus])
++}
++
++model meeting_sources {
++  id          Int              @id @default(autoincrement())
++  meetingId   Int
++  sourceType  String
++  name        String
++  contentHash String?
++  activeHash  String?
++  bytes       Int              @default(0)
++  filePath    String?
++  contentText String?
++  segments    String?
++  parseStatus String
++  error       String?
++  deletedAt   DateTime?
++  createdBy   Int?
++  createdAt   DateTime         @default(now())
++  updatedAt   DateTime         @updatedAt
++  meeting     meetings         @relation(fields: [meetingId], references: [id])
++  chunks      meeting_chunks[]
++
++  @@unique([meetingId, activeHash])
++  @@index([meetingId, deletedAt])
++  @@index([contentHash])
++}
++
++model meeting_chunks {
++  id         Int            @id @default(autoincrement())
++  meetingId  Int
++  sourceId   Int
++  text       String
++  location   String
++  embedding  String
++  generation Int
++  createdAt  DateTime       @default(now())
++  meeting    meetings       @relation(fields: [meetingId], references: [id])
++  source     meeting_sources @relation(fields: [sourceId], references: [id])
++
++  @@index([meetingId, generation])
++  @@index([sourceId])
++}
++
++model meeting_jobs {
++  id           Int                  @id @default(autoincrement())
++  kind         String
++  meetingId    Int?
++  connectionId Int?
++  externalId   String?
++  activeKey    String?              @unique
++  quarter      String?
++  payload      String
++  status       String
++  stage        String?
++  error        String?
++  attempts     Int                  @default(0)
++  createdAt    DateTime             @default(now())
++  updatedAt    DateTime             @updatedAt
++  meeting      meetings?            @relation(fields: [meetingId], references: [id])
++  connection   meeting_connections? @relation(fields: [connectionId], references: [id])
++
++  @@index([status, kind])
++  @@index([meetingId, status])
++  @@index([quarter, status])
++}
++
++model meeting_conversations {
++  id          Int               @id @default(autoincrement())
++  meetingIds  String
++  workspaceIds String
++  createdBy   Int?
++  createdAt   DateTime          @default(now())
++  answers     meeting_answers[]
++}
++
++model meeting_answers {
++  id              Int                   @id @default(autoincrement())
++  conversationId  Int
++  question        String
++  status          String
++  text            String?
++  missingInfo     String?
++  citations       String
++  sourceState     String
++  previousAnswerId Int?
++  error           String?
++  createdAt       DateTime              @default(now())
++  conversation    meeting_conversations @relation(fields: [conversationId], references: [id])
++
++  @@index([conversationId, createdAt])
++  @@index([previousAnswerId])
++}

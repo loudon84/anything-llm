@@ -54,7 +54,7 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 
 ## TODO ledger
 
-- [ ] T1 Persistence and lifecycle rules.
+- [x] T1 Persistence and lifecycle rules (18 tests; review clean).
 - [ ] T2 Tencent connector, encrypted configuration and durable import jobs.
 - [ ] T3 Located parsing/OCR, source uploads, embedding index and reindex.
 - [ ] T4 Fixed-scope grounded QA, historical citations and reanswers.
@@ -165,3 +165,4 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 - [ ] Capture real test evidence and supported formats/services; record credentialless Tencent verification limits and unmeasured Linux/OCR/performance gates honestly.
 - [ ] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review.
 - [ ] Final deliverable links plan/TODO, code worktree and branch; do not claim Linux/live-release gate passed on Windows or absent credentials. Do not push/merge automatically.
+

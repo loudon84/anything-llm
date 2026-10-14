@@ -57,3 +57,6 @@ Uploads persisted under opaque generated name in storage/meetings, never origina
 - [ ] Implement located parser, source jobs and embeddings; preserve source errors and snapshots.
 - [ ] Verify GREEN with real format fixture tests; commit and document local/remote service setup.
 
+
+## Verified database constraint
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.

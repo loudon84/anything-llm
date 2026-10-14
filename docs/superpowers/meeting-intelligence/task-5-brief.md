@@ -64,3 +64,6 @@ Register fixed paths before `/:id`; parse numeric IDs, no content mutations with
 - [ ] Run `npx jest server/__tests__/meetings/endpoints.test.js --runInBand`.
 - [ ] Implement endpoints/runtime, test and commit; runtime smoke with generated Prisma fresh DB.
 
+
+## Verified database constraint
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.

@@ -52,3 +52,6 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 - [ ] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review.
 - [ ] Final deliverable links plan/TODO, code worktree and branch; do not claim Linux/live-release gate passed on Windows or absent credentials. Do not push/merge automatically.
 
+
+## Verified database constraint
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.

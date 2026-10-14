@@ -57,3 +57,9 @@ Queue import reserves duplicate identity and quarter capacity transactionally; l
 - [ ] Implement connector/config/importer/runner; dependencies injectable, no real account calls in tests.
 - [ ] Verify GREEN and commit; report official URLs and remaining live-account verification separately.
 
+
+## Research available
+Official report exists at prd/tencent-meeting-api-research.md. User/enterprise API scope is account-specific: configure required operator/user identifier, do not claim app credentials alone enumerate all enterprise meetings. Downloadable Tencent recording-derived transcript/minutes artifacts are distinct from arbitrary business attachments; retain actual type/source and let user supplements handle unavailable business files. Do not ingest video/audio as supported document formats. Canonical signing from report must be checked against original official page before fixtures. All real credential access remains unverified.
+
+## Verified database constraint
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.

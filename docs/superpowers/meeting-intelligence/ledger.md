@@ -27,10 +27,23 @@
 
 ## Tasks
 
-- [ ] T1 Persistence / lifecycle — pending
-- [ ] T2 Tencent / jobs — pending
+- [x] T1 Persistence / lifecycle — complete (cca287a0..b1cadb8b; scoped review clean, 18 tests)
+- [ ] T2 Tencent / jobs — in progress (GPT-6 Luna)
 - [ ] T3 Parsing / sources / index — pending
 - [ ] T4 Grounded QA / history — pending
 - [ ] T5 API / runtime — pending
 - [ ] T6 React pages — pending
 - [ ] T7 Integration / review — pending
+
+
+- Baseline setup: npm installed with lifecycle scripts disabled; Prisma client generated explicitly after baseline missing-client failure. Root selected regression rerun pending. Frontend baseline production build pending.
+
+- Baseline frontend build failed before feature changes: existing BrowserNative imports undeclared regenerator-runtime. T6 owns adding direct dependency (version from existing yarn.lock) and build retest; existing piper browser-externalization warnings separately recorded.
+
+- Baseline selected regression: 2 suites / 52 tests passed after Prisma generate. Test output includes existing EncryptionManager initialization log. No product code change required for that setup issue.
+
+- T1 fix round 1/5: reviewer found caller quarter bypass, unnormalized duplicate key and missing real DB race evidence. Parent added self-reservation quota check (199 meetings + own import reservation must still finalize the 200th). Fix returned to GPT-6 Luna implementer.
+- Local DB smoke: Prisma client generated; all 41 migrations applied successfully to fresh ignored worktree SQLite DB. Initial migrate failed on missing database file; Prisma connect created the empty file and deploy succeeded.
+
+- T1 fix round1 implemented: 18 tests including real temporary SQLite concurrent duplicate and final-quarter-slot tests pass. Scoped rereview pending; generated SQLite createMany unavailable, all downstream briefs note this.
+

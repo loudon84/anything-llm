@@ -57,3 +57,9 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 - [ ] Run focused tests, scoped lint, `npm run build` in frontend; commit.
 - [ ] Provide screenshots if app can boot; no fake screenshot/live QA claim.
 
+
+## Baseline build prerequisite
+Existing frontend BrowserNative SpeechToText imports regenerator-runtime but frontend/package.json does not declare it; initial production build failed at that import. Add direct frontend dependency using version pinned in existing frontend/yarn.lock, preserve lockfile pattern; verify complete build. This is in your task scope. Initial piper browser-externalization warnings are baseline warnings, not caused by meetings.
+
+## Verified database constraint
+Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
