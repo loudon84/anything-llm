@@ -135,3 +135,29 @@ Task4 generate currentlyreceives system,prompt,question,clarification,evidence; 
 ## Final Task4 handoff (470ac235)
 
 Read task-4-report.md updatedinterfaces. meeting_answers hasnullableclarification field; migration20261014020000, total43migrations. sourceState is JSONobject {manifest,citedSources}, supports priorarrayread forintermediatefixtures. CurrentgetConversation/history expose scopeState:{available,blockedReason}, separatefrom answerstale/newSources. QA's llm.generate gets system,prompt,question,clarification,evidence; provider/runtimeUserintegration mayadduserId. WorkspaceRetriever has resolve/search currently; Task5a mayadd injected source-state/evidencevalidation methods forruntime actualWorkspacefreshness, preserving currentfactory. Prioranswerquestion/missingInfo/clarification used onlyboundedconversationalreference; oldanswertext/citations never evidence. Add actualWorkspace metadata to citation snapshot whitelist forsourceid/revision/approvedoriginalhref as needed, not arbitraryfilesystempath. RuntimeTask5b consumes contracts fromTask5a report; UI uses explicitscopeState andsavedclarification ratherthanreconstructingfromsourceState.
+
+## Configuration read visibility ruling
+
+GETconfig is authenticated: admins receive complete redacted nonsecretsettings/hints forSettingsUI; otherusers receive onlyprimary connectionid/name/configured/capabilities status needed byCenter/manualimport, nooperatorIDs/serviceURLs/credentialhints. PUTalwaysadmin. No extraAPIneeded, response{config} stable. Backendmustapplyreadprojection notmerelyhiddenUI; testdefaultuserread vsadminread, secretneverreturned. Existing authsingle-user mode actsadmin asappdoes. Task6Center mustwork withminimalstatusconfig; Settings protectedadmin.
+
+## Manual embedding rebuild recovery
+
+Profilemismatch must have explicitmanualrecovery: meetingService.requestReindex(id,userId) (or report equivalent) atomic durableREINDEX job/block/dedup, preservesreviewstate ifcontentunchanged; neverautoembeddingallmeetings/providerfallback. Testoldprofilecontrolledfailure->manualrebuildnewprofile->queryable. Task5b adds POST /meetings/:id/reindex =>202job; Task6 exposesretry/rebuildaction when needed withclearjobstate. Useexistingrunner/reindex, notnewpipeline.
+
+## Stable operation versus current configuration
+
+Task5a indexer captures profileId atfactoryconstruction. Runtime mustcreate operation-scoped indexer/embedder from currentconfiguredengine/model/profile (request/job), not oneboot-time singleton with newenginecalls but oldprofileId. Snapshotconsistent engine+profile for oneoperation; subsequentjobs/questions honor adminconfigurationchanges. Include same-dimensional differentmodel profile regression through runtimeadapter (dimensionguardalone missesit). OAuth/Tencentsettings OCRalso readcurrentconfig asrequired. No uncontrolledoldservice continuation on subsequentcalls afterconfigsave.
+
+## Real Workspace revision verification
+
+workspace_documents.lastUpdatedAt is @default(now), not @updatedAt. Confirm actualDocument/syncupdate paths advance revision or replace docId; don't assume anycontentchange automaticallyupdates thisfield. Runtimeevidence revision must actuallytrack indexed/currentsource content, add contentrevision/hash adapter ifnecessary with5a comparisoncontract. Inspect realvectorprovider source shape (someparseChunkSource projectiondropsdocId) and map exactcurrentworkspace_documents membership from actual stablemetadata, nofilenameguess. Tests should use realistic provider source shapes and genuine metadata/content update lifecycle.
+
+## External error text privacy boundary
+
+Do notpersist/return raw SDKresponse bodies, authorizationheaders or credential-bearing URLs inpublicanswer/joberrors. Runtime externalprovider wrappers return controlledstage/code/status and scrub knownconfiguredsecretvalues; preserve partialanswertext asFAILED_INCOMPLETE separately. Use syntheticcredential-echoerror regression (neverrealcredentials). Controlleddomain messages (limits/noevidence/citationvalidation) remain useful; diagnostics cannotleak Tencent/OCR/providersecretstoemployees.
+
+## Reviewed Task5a handoff (409e66d8)
+
+Read task-5a-report.md finalrounds. Indexer exposes prepare/reindex/search/profileId/validateIndex; embeddingobjectenvelope{profileId,vector}, preparedimports also carryprofileId. getArchivedSource returns source plusdeleted,meetingDeleted,readOnly. Bufferedupload or{ name,tempPath } withtrustedUploadRoot; servicecleansservertempfiles safely. requestReindex(id,userId,profileId) returnsdurablejob, preserveapproval. Source segments JSONenvelope preserved. WorkspaceRetriever {lookupWorkspace,searchWorkspace,lookupDocument} resolve/search/validateEvidence; db nowforwardedtoWorkspaceACLlookup; historyWorkspacecitations validatedfreshness. CollectorflatJSON top-levelworkspaceOriginalId persisted; workspace_documents.metadata includesworkspaceOriginalId; originals.resolve({referenceId,workspaceId,docId}) returnsfilePath/fileName aftergenuineidentity+membershipbinding. SourceServiceparserstaticinjection meansruntime mustcreatefreshparserfromgetPrivate onoperation; noactualdynamic-useverifiedyet. getPublic returns savednonsecretTencent appId/sdkId/userId/operatorId/operatorIdType plusservices.ocr {url,configured,tokenPresent}, masks credentials. OCRURLexactHTTP(S)/parse(/optional), userinfoinvalidgeneric; tokenBearer encrypted. Runtimeactualprovider/Workspace wrappers areyourtask.
+
+Realprovider sources mayuseone documentIDformultiple chunks. Return distinctevidenceIDs fromactualchunkIDs orstableinternaldocument+quotehash+ordinal, separatefromdocumentId/currentrevision; don'toverwriteevidenceMap sofirstchunkcitationisrejected. Preserveactualdocumentidentity/provenance, nofilenameguess or inventedoriginlinks. Include multi-chunk-same-doc fixture fromrealprovider projection.

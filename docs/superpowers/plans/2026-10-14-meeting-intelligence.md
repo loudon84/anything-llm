@@ -1,4 +1,4 @@
-# Meeting Intelligence Implementation Plan
+# 会议知识检索实施计划与 TODO
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -56,13 +56,13 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 
 ## TODO ledger
 
-- [x] T1 Persistence and lifecycle rules (18 tests; review clean).
-- [x] T2 Tencent connector, encrypted configuration and durable import jobs (30 tests; review clean).
-- [x] T3 Located parsing/OCR, source uploads, embedding index and reindex.
-- [x] T4 Fixed-scope grounded QA, historical citations and reanswers.
-- [ ] T5 Authenticated Express API and runtime integration. Sequential subtasks: 5a service safeguards/original retention; 5b endpoints/runtime, each reviewed.
-- [ ] T6 React Meeting Center, detail, source viewer and QA pages.
-- [ ] T7 End-to-end integration, review fixes, deployment and test evidence.
+- [x] T1 会议数据、草稿／核准／删除、季度限额和并发去重。
+- [x] T2 腾讯会议 API、企业连接配置、手动导入和持久化后台任务。
+- [x] T3 资料解析／OCR、附件与补充资料、位置定位、索引和重建。
+- [x] T4 固定范围问答、澄清与待补资料、引用快照、历史和手动重答。
+- [ ] T5 接口与运行接线：5a 资料／审计／服务衔接修正；5b 登录保护接口与后台运行。
+- [ ] T6 会议中心、详情、来源查看、问答和管理员配置页面。
+- [ ] T7 完整流程联调、整体代码复核、部署说明和验收证据。
 
 ### Task 1: Persistence and lifecycle rules
 
@@ -167,6 +167,7 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 - [ ] Capture real test evidence and supported formats/services; record credentialless Tencent verification limits and unmeasured Linux/OCR/performance gates honestly.
 - [ ] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review.
 - [ ] Final deliverable links plan/TODO, code worktree and branch; do not claim Linux/live-release gate passed on Windows or absent credentials. Do not push/merge automatically.
+
 
 
 

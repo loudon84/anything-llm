@@ -73,3 +73,11 @@ Tencent client adds describeMeeting(externalId,{startTime,endTime}), sharing pri
 ## Final Task4 handoff (470ac235)
 
 Read task-4-report.md updatedinterfaces. meeting_answers hasnullableclarification field; migration20261014020000, total43migrations. sourceState is JSONobject {manifest,citedSources}, supports priorarrayread forintermediatefixtures. CurrentgetConversation/history expose scopeState:{available,blockedReason}, separatefrom answerstale/newSources. QA's llm.generate gets system,prompt,question,clarification,evidence; provider/runtimeUserintegration mayadduserId. WorkspaceRetriever has resolve/search currently; Task5a mayadd injected source-state/evidencevalidation methods forruntime actualWorkspacefreshness, preserving currentfactory. Prioranswerquestion/missingInfo/clarification used onlyboundedconversationalreference; oldanswertext/citations never evidence. Add actualWorkspace metadata to citation snapshot whitelist forsourceid/revision/approvedoriginalhref as needed, not arbitraryfilesystempath. RuntimeTask5b consumes contracts fromTask5a report; UI uses explicitscopeState andsavedclarification ratherthanreconstructingfromsourceState.
+
+## Manual embedding rebuild recovery
+
+Profilemismatch must have explicitmanualrecovery: meetingService.requestReindex(id,userId) (or report equivalent) atomic durableREINDEX job/block/dedup, preservesreviewstate ifcontentunchanged; neverautoembeddingallmeetings/providerfallback. Testoldprofilecontrolledfailure->manualrebuildnewprofile->queryable. Task5b adds POST /meetings/:id/reindex =>202job; Task6 exposesretry/rebuildaction when needed withclearjobstate. Useexistingrunner/reindex, notnewpipeline.
+
+## Selection interaction regression
+
+Date-rangeauto-selection caninclude>10matches/unavailablemetadata drafts. Usersmustbeabletodeselectthem: don'tdisablea checkedmetadata checkbox orrejecteverydeselectionwhilecountstill>10. Blockstartwithcount/unavailabilityreason, allowadjustment, never silentlytruncate/filterunavailable. Testauto20(includingmetadata)->deselect11->remaining9AVAILABLE->start; reverseddateintervalclearvalidation. Data dates comparebusiness-timezone consistently, existing [from,to) contract.

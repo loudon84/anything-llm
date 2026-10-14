@@ -105,3 +105,13 @@ Minimal jobs.js/importer.js edits explicitly allowed: enqueue/retry and metadata
 ## Final Task4 handoff (470ac235)
 
 Read task-4-report.md updatedinterfaces. meeting_answers hasnullableclarification field; migration20261014020000, total43migrations. sourceState is JSONobject {manifest,citedSources}, supports priorarrayread forintermediatefixtures. CurrentgetConversation/history expose scopeState:{available,blockedReason}, separatefrom answerstale/newSources. QA's llm.generate gets system,prompt,question,clarification,evidence; provider/runtimeUserintegration mayadduserId. WorkspaceRetriever has resolve/search currently; Task5a mayadd injected source-state/evidencevalidation methods forruntime actualWorkspacefreshness, preserving currentfactory. Prioranswerquestion/missingInfo/clarification used onlyboundedconversationalreference; oldanswertext/citations never evidence. Add actualWorkspace metadata to citation snapshot whitelist forsourceid/revision/approvedoriginalhref as needed, not arbitraryfilesystempath. RuntimeTask5b consumes contracts fromTask5a report; UI uses explicitscopeState andsavedclarification ratherthanreconstructingfromsourceState.
+
+## Physical quarterly archive user constraint
+
+User explicitlysaid季度存档目录, notonlyDBquarter label. Newmeetingoriginal file storage follows <storageRoot>/<validated YYYY-Qn>/<internalmeetingId>/<generated UUID+extension>. Include currentdraft/archivedsources in originalquarter; newreimportdifferentinternaldirectory. Derivequarterbyexistingpolicy/startTime, validateallcomponents/storagecontainment, filenameonlydisplay. No oldmigrationrequiredforfreshdeployment. FileoriginalView remainsauthenticated+contained, optionallysupportsintermediateflatfixtures. Pathfixtureassertion required. This is originaluserconstraint.
+
+## Manual embedding rebuild recovery
+
+Profilemismatch must have explicitmanualrecovery: meetingService.requestReindex(id,userId) (or report equivalent) atomic durableREINDEX job/block/dedup, preservesreviewstate ifcontentunchanged; neverautoembeddingallmeetings/providerfallback. Testoldprofilecontrolledfailure->manualrebuildnewprofile->queryable. Task5b adds POST /meetings/:id/reindex =>202job; Task6 exposesretry/rebuildaction when needed withclearjobstate. Useexistingrunner/reindex, notnewpipeline.
+
+Originalreader mustnotauthorize arbitrarymetadata.originalFile purelybyUUIDpathcontainment; bindreference to genuineparseddocument via trustedmanifest/DBmapping/authenticatedsignedreference. Forge/crossdocument testrequired, Task5b adds currentWorkspaceACL/membership checks assecondboundary.
