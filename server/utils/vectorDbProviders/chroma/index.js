@@ -165,7 +165,12 @@ class Chroma extends VectorDatabase {
       }
 
       result.contextTexts.push(response.documents[0][i]);
-      result.sourceDocuments.push(response.metadatas[0][i]);
+      result.sourceDocuments.push({
+        ...response.metadatas[0][i],
+        // Preserve the actual collection vector ID. Stored metadata.id is the
+        // parsed-document ID and cannot be joined to document_vectors.
+        vectorId: response.ids[0][i],
+      });
       result.scores.push(similarity);
     });
 

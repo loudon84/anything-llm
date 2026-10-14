@@ -46,6 +46,58 @@ function publicError(error) {
   };
 }
 
+function withMiddlewareErrorEnvelope(middleware, code, fallbackMessage) {
+  return function meetingMiddlewareWithErrorEnvelope(req, res, next) {
+    const originalJson = res.json;
+    const originalSendStatus = res.sendStatus;
+    let continued = false;
+    let restored = false;
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      res.json = originalJson;
+      if (originalSendStatus) res.sendStatus = originalSendStatus;
+    };
+    const deny = (status, body) => {
+      restore();
+      const message =
+        typeof body?.error === "string" && body.error.length > 0
+          ? body.error
+          : fallbackMessage;
+      res.status(status);
+      return originalJson.call(res, { error: message, code });
+    };
+
+    res.json = function normalizedJson(body, ...args) {
+      if (continued) return originalJson.call(this, body, ...args);
+      return deny(res.statusCode || 401, body);
+    };
+    if (originalSendStatus) {
+      res.sendStatus = function normalizedSendStatus(status) {
+        if (continued) return originalSendStatus.call(this, status);
+        return deny(status, null);
+      };
+    }
+
+    const continueRequest = (error) => {
+      continued = true;
+      restore();
+      return next(error);
+    };
+    try {
+      return Promise.resolve(middleware(req, res, continueRequest)).catch(
+        (error) => {
+          restore();
+          next(error);
+        }
+      );
+    } catch (error) {
+      restore();
+      return next(error);
+    }
+  };
+}
+
 function createMeetingsEndpoints(
   router,
   {
@@ -73,6 +125,8 @@ function createMeetingsEndpoints(
     throw new TypeError(
       "createMeetingsEndpoints requires router, runtime, and prisma"
     );
+  const workspaceOriginalResolver =
+    originals || runtime.getWorkspaceOriginals?.() || null;
   fs.mkdirSync(uploadRoot, { recursive: true });
   const upload = multer({
     storage: multer.diskStorage({
@@ -108,7 +162,13 @@ function createMeetingsEndpoints(
         fs.promises.rm(req.file.path, { force: true }).catch(() => {});
       return res.status(failure.status).json(failure.body);
     });
-  const auth = [authenticate];
+  const auth = [
+    withMiddlewareErrorEnvelope(
+      authenticate,
+      "AUTHENTICATION_REQUIRED",
+      "Authentication required"
+    ),
+  ];
   const route = (method, suffix, roles, handler, middleware = []) =>
     router[method](
       "/meetings" + suffix,
@@ -131,7 +191,11 @@ function createMeetingsEndpoints(
       }
     );
   const STREAMED = Symbol("streamed response");
-  const admin = requireAdmin;
+  const admin = withMiddlewareErrorEnvelope(
+    requireAdmin,
+    "ADMIN_REQUIRED",
+    "Administrator role required"
+  );
   const noRole = null;
   const reqBody = (req) =>
     req.body && typeof req.body === "object" ? req.body : {};
@@ -315,13 +379,13 @@ function createMeetingsEndpoints(
         typeof document.metadata === "string"
           ? JSON.parse(document.metadata || "{}")
           : document.metadata || {};
-      if (!metadata.workspaceOriginalId || !originals)
+      if (!metadata.workspaceOriginalId || !workspaceOriginalResolver)
         throw new MeetingError(
           "Original file is unavailable",
           "SOURCE_FILE_UNAVAILABLE",
           404
         );
-      const original = await originals.resolve({
+      const original = await workspaceOriginalResolver.resolve({
         referenceId: metadata.workspaceOriginalId,
         workspaceId,
         docId: document.docId,

@@ -12,6 +12,8 @@ const { createWorkspaceRetriever } = require("./retrieval");
 const { createParser } = require("./parser");
 const { createTencentClient } = require("./tencent");
 const { MeetingError } = require("./errors");
+const MAX_STREAM_EVENT_BYTES = 64 * 1024;
+const MAX_STREAM_PARTIAL_BYTES = 64 * 1024;
 
 function createWorkspaceSearchAdapter({
   prisma,
@@ -46,7 +48,7 @@ function createWorkspaceSearchAdapter({
     const evidence = [];
     for (const projected of result?.sources || []) {
       const metadata = projected?.metadata || projected || {};
-      const vectorId = String(metadata.id || metadata.vectorId || "");
+      const vectorId = String(metadata.vectorId || metadata.id || "");
       if (!vectorId) continue;
       const vectorRows = await prisma.document_vectors.findMany({
         where: { vectorId },
@@ -144,6 +146,85 @@ function workspaceLocation(metadata = {}) {
   }
   if (!types.has(type)) return null;
   return { type, ...values };
+}
+
+function createBoundedSseSink({
+  maxBufferedBytes = MAX_STREAM_EVENT_BYTES,
+  maxPartialBytes = MAX_STREAM_PARTIAL_BYTES,
+} = {}) {
+  const sink = new EventEmitter();
+  sink.writableEnded = false;
+  sink.destroyed = false;
+  const state = {
+    completed: false,
+    failed: false,
+    failureCode: null,
+    partialText: "",
+    bufferedBytes: 0,
+    peakBufferedBytes: 0,
+  };
+  let buffer = "";
+  const markFailure = (code) => {
+    state.failed = true;
+    state.failureCode ||= code;
+  };
+  const appendPartial = (value) => {
+    const remaining = maxPartialBytes - Buffer.byteLength(state.partialText);
+    if (remaining <= 0) return;
+    const chunk = Buffer.from(String(value)).subarray(0, remaining);
+    let text = chunk.toString("utf8");
+    if (text.endsWith("\uFFFD")) text = text.slice(0, -1);
+    state.partialText += text;
+  };
+  const processFrame = (frame) => {
+    if (Buffer.byteLength(frame) > maxBufferedBytes) {
+      markFailure("STREAM_EVENT_TOO_LARGE");
+      return;
+    }
+    for (const line of frame.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      let event;
+      try {
+        event = JSON.parse(line.slice(6));
+      } catch {
+        continue;
+      }
+      if (typeof event.textResponse === "string")
+        appendPartial(event.textResponse);
+      if (event.type === "abort" || event.error)
+        markFailure("STREAM_PROVIDER_ABORTED");
+      if (
+        event.type === "textResponseChunk" &&
+        event.close === true &&
+        !event.error
+      )
+        state.completed = true;
+    }
+  };
+  sink.write = (wire) => {
+    const pending = buffer + String(wire);
+    buffer = "";
+    let start = 0;
+    let separator = pending.indexOf("\n\n", start);
+    while (separator >= 0) {
+      processFrame(pending.slice(start, separator));
+      start = separator + 2;
+      separator = pending.indexOf("\n\n", start);
+    }
+    buffer = pending.slice(start);
+    state.bufferedBytes = Buffer.byteLength(buffer);
+    state.peakBufferedBytes = Math.max(
+      state.peakBufferedBytes,
+      state.bufferedBytes
+    );
+    if (state.bufferedBytes > maxBufferedBytes) {
+      buffer = "";
+      state.bufferedBytes = 0;
+      markFailure("STREAM_EVENT_TOO_LARGE");
+    }
+    return !state.failed;
+  };
+  return { sink, state };
 }
 
 function createMeetingRuntime({
@@ -442,49 +523,41 @@ function createMeetingRuntime({
             connector.streamGetChatCompletion &&
             connector.handleStream
           ) {
-            const sink = new EventEmitter();
-            sink.writableEnded = false;
-            sink.destroyed = false;
-            sink.write = (wire) => {
-              sink.emit("data", wire);
-              return true;
-            };
-            const events = [];
-            sink.on("data", (wire) => {
-              for (const line of String(wire).split("\n"))
-                if (line.startsWith("data: ")) {
-                  try {
-                    events.push(JSON.parse(line.slice(6)));
-                  } catch {
-                    /* ignore malformed provider event */
-                  }
-                }
-            });
-            const stream = await connector.streamGetChatCompletion(messages, {
-              user,
-            });
-            const text = await connector.handleStream(sink, stream, {
-              uuid: crypto.randomUUID(),
-            });
-            const failure = events.find(
-              (event) => event.type === "abort" || event.error
-            );
-            if (failure) {
+            const { sink, state } = createBoundedSseSink();
+            let text;
+            try {
+              const stream = await connector.streamGetChatCompletion(messages, {
+                user,
+              });
+              text = await connector.handleStream(sink, stream, {
+                uuid: crypto.randomUUID(),
+              });
+            } catch {
               const error = new MeetingError(
                 "Language model stream failed",
                 "MEETING_LLM_FAILED",
                 502
               );
-              if (text) error.partialText = String(text);
+              if (state.partialText) error.partialText = state.partialText;
               throw error;
             }
-            return { textResponse: text };
+            if (state.failed || !state.completed) {
+              const error = new MeetingError(
+                "Language model stream did not complete",
+                state.failed ? "MEETING_LLM_FAILED" : "MEETING_LLM_INCOMPLETE",
+                502
+              );
+              const partial = state.partialText;
+              if (partial) error.partialText = partial;
+              throw error;
+            }
+            return text;
           }
           const result = await connector.getChatCompletion(messages, {
             user,
             temperature: 0,
           });
-          return { textResponse: result?.textResponse };
+          return result?.textResponse;
         } catch (error) {
           if (error instanceof MeetingError) throw error;
           throw new MeetingError(
@@ -523,6 +596,7 @@ function createMeetingRuntime({
     remote,
     qa,
     lookupWorkspace,
+    getWorkspaceOriginals: getOriginals,
     async listJobs(filters = {}) {
       const where = {};
       if (filters.status) where.status = String(filters.status);
@@ -623,4 +697,5 @@ module.exports = {
   createMeetingRuntime,
   createWorkspaceSearchAdapter,
   workspaceLocation,
+  createBoundedSseSink,
 };

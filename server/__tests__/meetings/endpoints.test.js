@@ -1,8 +1,18 @@
+jest.mock("../../models/systemSettings", () => ({
+  SystemSettings: { isMultiUserMode: jest.fn(async () => true) },
+}));
+
 const {
   createMeetingsEndpoints,
   MAX_UPLOAD_BYTES,
 } = require("../../endpoints/meetings");
 const { MeetingError } = require("../../modules/meetings/errors");
+const { validatedRequest } = require("../../utils/middleware/validatedRequest");
+const {
+  flexUserRoleValid,
+  ROLES,
+} = require("../../utils/middleware/multiUserProtected");
+const { SystemSettings } = require("../../models/systemSettings");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -99,7 +109,109 @@ async function invoke(
   return response;
 }
 
+async function invokeMiddlewareChain(route, options = {}) {
+  const params = options.params || {};
+  const body = options.body || {};
+  const request = {
+    params,
+    body,
+    query: {},
+    header: () => options.authorization || null,
+  };
+  const response = {
+    locals: {},
+    statusCode: 200,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(value) {
+      this.value = value;
+      this.finished = true;
+      return this;
+    },
+    sendStatus(code) {
+      this.statusCode = code;
+      this.value = String(code);
+      this.finished = true;
+      return this;
+    },
+    end() {
+      this.finished = true;
+      return this;
+    },
+  };
+  const middleware = route.middleware;
+  const dispatch = (index) => {
+    if (response.finished) return Promise.resolve();
+    if (index >= middleware.length) return route.handler(request, response);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const next = (error) => {
+        if (settled) return;
+        settled = true;
+        if (error) return reject(error);
+        Promise.resolve(dispatch(index + 1)).then(resolve, reject);
+      };
+      Promise.resolve(middleware[index](request, response, next))
+        .then(() => {
+          if (response.finished && !settled) {
+            settled = true;
+            resolve();
+          }
+        })
+        .catch(reject);
+    });
+  };
+  await dispatch(0);
+  return response;
+}
+
 describe("authenticated meeting endpoints", () => {
+  test("wraps the actual authentication denial in the stable JSON envelope", async () => {
+    SystemSettings.isMultiUserMode.mockResolvedValue(true);
+    const { routes } = setup({}, {}, { authenticate: validatedRequest });
+    const route = routes.find(
+      (item) => item.method === "get" && item.path === "/meetings/config"
+    );
+
+    const response = await invokeMiddlewareChain(route);
+
+    expect(response.statusCode).toBe(401);
+    expect(response.value).toEqual({
+      error: "No auth token found.",
+      code: "AUTHENTICATION_REQUIRED",
+    });
+  });
+
+  test("wraps the actual admin role denial without bypassing the role check", async () => {
+    SystemSettings.isMultiUserMode.mockResolvedValue(true);
+    const authenticateAsEmployee = (_req, res, next) => {
+      res.locals.multiUserMode = true;
+      res.locals.user = { id: 8, role: ROLES.default };
+      next();
+    };
+    const { routes } = setup(
+      {},
+      {},
+      {
+        authenticate: authenticateAsEmployee,
+        requireAdmin: flexUserRoleValid([ROLES.admin]),
+      }
+    );
+    const route = routes.find(
+      (item) => item.method === "put" && item.path === "/meetings/config"
+    );
+
+    const response = await invokeMiddlewareChain(route);
+
+    expect(response.statusCode).toBe(401);
+    expect(response.value).toEqual({
+      error: "Administrator role required",
+      code: "ADMIN_REQUIRED",
+    });
+  });
+
   test("fixed routes register before numeric meeting routes", () => {
     const { routes } = setup();
     const fixed = routes.findIndex(
@@ -312,6 +424,73 @@ describe("authenticated meeting endpoints", () => {
         response
       );
       expect(Buffer.concat(pieces).toString()).toBe("retained original");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("uses the runtime's registered Workspace original resolver by default", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "meeting-runtime-originals-")
+    );
+    const filePath = path.join(root, "retained.pdf");
+    fs.writeFileSync(filePath, "runtime-bound original");
+    const originals = {
+      resolve: jest.fn(async ({ referenceId, workspaceId, docId }) =>
+        referenceId === "bound-ref" && workspaceId === 3 && docId === "doc-1"
+          ? { filePath, fileName: "retained.pdf" }
+          : null
+      ),
+    };
+    try {
+      const { routes } = setup(
+        {
+          lookupWorkspace: async () => ({ id: 3 }),
+          getWorkspaceOriginals: () => originals,
+        },
+        {
+          workspace_documents: {
+            findFirst: async () => ({
+              docId: "doc-1",
+              metadata: JSON.stringify({ workspaceOriginalId: "bound-ref" }),
+            }),
+          },
+        },
+        { workspaceOriginalsRoot: root }
+      );
+      const response = new PassThrough();
+      response.locals = {
+        user: { id: 8, role: "default" },
+        multiUserMode: true,
+      };
+      response.status = (code) => {
+        response.statusCode = code;
+        return response;
+      };
+      response.json = (value) => {
+        response.value = value;
+        return response;
+      };
+      response.setHeader = () => {};
+      response.type = () => response;
+      const pieces = [];
+      response.on("data", (piece) => pieces.push(piece));
+      const route = routes.find(
+        (item) =>
+          item.method === "get" &&
+          item.path ===
+            "/meetings/workspaces/:workspaceId/sources/:documentId/file"
+      );
+      await route.handler(
+        { params: { workspaceId: "3", documentId: "doc-1" }, query: {} },
+        response
+      );
+      expect(originals.resolve).toHaveBeenCalledWith({
+        referenceId: "bound-ref",
+        workspaceId: 3,
+        docId: "doc-1",
+      });
+      expect(Buffer.concat(pieces).toString()).toBe("runtime-bound original");
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
