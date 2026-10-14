@@ -70,6 +70,18 @@ export function SourceTextPreview({ text }) {
   );
 }
 
+export function WorkspaceSourcePreview({ previewText, previewUrl }) {
+  if (previewText !== null && previewText !== undefined)
+    return <SourceTextPreview text={previewText} />;
+  if (previewUrl)
+    return (
+      <div className="mt-4">
+        <EmbeddedSourcePreview title="当前工作区文件预览" src={previewUrl} />
+      </div>
+    );
+  return null;
+}
+
 export function EmbeddedSourcePreview({ src, title }) {
   return (
     <iframe
@@ -259,14 +271,10 @@ export default function MeetingSourceViewer() {
               下载当前文件
             </Button>
           </div>
-          {previewUrl && (
-            <div className="mt-4">
-              <EmbeddedSourcePreview
-                title="当前工作区文件预览"
-                src={previewUrl}
-              />
-            </div>
-          )}
+          <WorkspaceSourcePreview
+            previewText={previewText}
+            previewUrl={previewUrl}
+          />
         </Panel>
       ) : (
         <>

@@ -226,54 +226,71 @@ async function spreadsheetCells(buffer) {
   return segments;
 }
 
+const PDF_IMAGE_OPERATOR_NAMES = [
+  "paintImageMaskXObject",
+  "paintImageMaskXObjectGroup",
+  "paintImageMaskXObjectRepeat",
+  "paintImageXObject",
+  "paintImageXObjectRepeat",
+  "paintInlineImageXObject",
+  "paintInlineImageXObjectGroup",
+  "paintJpegXObject",
+];
+
+function isPdfImageOperator(operator, OPS) {
+  return PDF_IMAGE_OPERATOR_NAMES.some((name) => OPS[name] === operator);
+}
+
 async function pdfPages(buffer) {
-  let pdfParse;
+  let pdfjs;
   try {
-    pdfParse = require("pdf-parse");
+    pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
   } catch {
     return null;
   }
   const pages = [];
   const imagePages = [];
+  let document;
   try {
-    // pdf-parse 1.1.1 uses PDF.js v1.10.100; inspect its operator IDs so a
-    // native heading does not hide an image-only body on the same page.
-    const pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
-    const imageOperators = new Set([
-      pdfjs.OPS.paintImageXObject,
-      pdfjs.OPS.paintInlineImageXObject,
-      pdfjs.OPS.paintInlineImageXObjectGroup,
-      pdfjs.OPS.paintImageXObjectRepeat,
-    ]);
-    await pdfParse(Uint8Array.from(buffer), {
-      pagerender: async (page) => {
-        const operators = await page.getOperatorList();
-        if (operators.fnArray.some((operator) => imageOperators.has(operator)))
-          imagePages.push(page.pageNumber);
-        const content = await page.getTextContent({
-          normalizeWhitespace: true,
-        });
-        const text = content.items
+    document = await pdfjs.getDocument({
+      data: Uint8Array.from(buffer),
+      // Do not use PDF.js's browser Image decoder from the Node parser.
+      nativeImageDecoderSupport: pdfjs.NativeImageDecoding.NONE,
+    });
+    for (let number = 1; number <= document.numPages; number += 1) {
+      const page = await document.getPage(number);
+      const operators = await page.getOperatorList();
+      if (
+        operators.fnArray.some((operator) =>
+          isPdfImageOperator(operator, pdfjs.OPS)
+        )
+      )
+        imagePages.push(page.pageNumber);
+      const content = await page.getTextContent({ normalizeWhitespace: true });
+      pages.push({
+        page: page.pageNumber,
+        text: content.items
           .map((item) => item.str)
           .join(" ")
-          .trim();
-        pages.push(text);
-        return text;
-      },
-    });
+          .trim(),
+      });
+    }
   } catch (error) {
     throw new MeetingError(
       `PDF parsing failed: ${error.message}`,
       "SOURCE_PARSE_FAILED",
       422
     );
+  } finally {
+    if (document) await document.destroy().catch(() => {});
   }
   return {
-    segments: pages.map((text, index) => ({
+    segments: pages.map(({ page, text }) => ({
       text,
-      location: { type: "page", page: index + 1 },
+      location: { type: "page", page },
     })),
     imagePages: [...new Set(imagePages)],
+    pageCount: document?.numPages || pages.length,
   };
 }
 
@@ -417,7 +434,7 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
             name,
             buffer,
             "page",
-            segments.length
+            parsed.pageCount
           );
           const byPage = new Map();
           for (const segment of remote) {
@@ -449,4 +466,4 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
   };
 }
 
-module.exports = { createParser, validateSegments };
+module.exports = { createParser, validateSegments, isPdfImageOperator };

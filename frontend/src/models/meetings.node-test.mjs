@@ -507,6 +507,31 @@ test("current text preview shows file text as escaped React content", async () =
   }
 });
 
+test("workspace source viewer renders loaded text preview state safely", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { WorkspaceSourcePreview } = await vite.ssrLoadModule(
+      "/src/pages/Meetings/SourceViewer.jsx"
+    );
+    const html = renderToStaticMarkup(
+      React.createElement(WorkspaceSourcePreview, {
+        previewText: "Workspace original\n<script>keep as text</script>",
+        previewUrl: "",
+      })
+    );
+    assert.match(html, /当前文件文本预览/);
+    assert.match(html, /Workspace original/);
+    assert.match(html, /&lt;script&gt;keep as text&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>keep as text<\/script>/);
+  } finally {
+    await vite.close();
+  }
+});
+
 test("embedded source preview sandbox never enables scripts with same-origin access", async () => {
   const vite = await createServer({
     configFile: "vite.config.js",

@@ -1,7 +1,12 @@
 const AdmZip = require("adm-zip");
 const ExcelJS = require("exceljs");
+const fs = require("fs");
+const path = require("path");
 const { PDFDocument, StandardFonts } = require("pdf-lib");
-const { createParser } = require("../../modules/meetings/parser");
+const {
+  createParser,
+  isPdfImageOperator,
+} = require("../../modules/meetings/parser");
 
 function zipBuffer(entries) {
   const zip = new AdmZip();
@@ -31,6 +36,71 @@ function textPdf(text) {
     pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
   return Buffer.from(pdf);
+}
+
+function maskImagePdf() {
+  const content =
+    "BT /F1 12 Tf 40 700 Td (Native mask header) Tj ET\nq 300 0 0 500 40 100 cm /Stencil Do Q";
+  const mask = Buffer.from([0xff, 0x81, 0xbd, 0xa5, 0xa5, 0xbd, 0x81, 0xff]);
+  const objects = [
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    Buffer.from(
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Stencil 6 0 R >> >> /Contents 5 0 R >>"
+    ),
+    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    Buffer.concat([
+      Buffer.from(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n`),
+      Buffer.from(content),
+      Buffer.from("\nendstream"),
+    ]),
+    Buffer.concat([
+      Buffer.from(
+        `<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ImageMask true /BitsPerComponent 1 /Decode [0 1] /Length ${mask.length} >>\nstream\n`
+      ),
+      mask,
+      Buffer.from("\nendstream"),
+    ]),
+  ];
+  const chunks = [Buffer.from("%PDF-1.4\n")];
+  const offsets = [0];
+  let length = chunks[0].length;
+  objects.forEach((object, index) => {
+    offsets.push(length);
+    const prefix = Buffer.from(`${index + 1} 0 obj\n`);
+    const suffix = Buffer.from("\nendobj\n");
+    chunks.push(prefix, object, suffix);
+    length += prefix.length + object.length + suffix.length;
+  });
+  const xrefOffset = length;
+  const xref = [
+    `xref\n0 ${objects.length + 1}\n`,
+    "0000000000 65535 f \n",
+    ...offsets
+      .slice(1)
+      .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`),
+  ].join("");
+  const trailer = `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  chunks.push(Buffer.from(xref), Buffer.from(trailer));
+  return Buffer.concat(chunks);
+}
+
+async function pdfPaintOperators(buffer) {
+  const pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
+  const document = await pdfjs.getDocument({
+    data: Uint8Array.from(buffer),
+    nativeImageDecoderSupport: pdfjs.NativeImageDecoding.NONE,
+  });
+  try {
+    const operators = [];
+    for (let number = 1; number <= document.numPages; number += 1) {
+      const page = await document.getPage(number);
+      operators.push(...(await page.getOperatorList()).fnArray);
+    }
+    return operators;
+  } finally {
+    await document.destroy();
+  }
 }
 
 describe("located meeting source parsing", () => {
@@ -145,6 +215,57 @@ describe("located meeting source parsing", () => {
     expect(segments).toEqual([
       { text: "Quarterly decision", location: { type: "page", page: 1 } },
     ]);
+  });
+
+  test("keeps the real PDF page number when extracting multiple pages", async () => {
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    pdf.addPage().drawText("Actual page one", { font });
+    pdf.addPage().drawText("Actual page two", { font });
+
+    const segments = await createParser().parse({
+      name: "numbered.pdf",
+      buffer: Buffer.from(await pdf.save()),
+    });
+
+    expect(segments).toEqual([
+      { text: "Actual page one", location: { type: "page", page: 1 } },
+      { text: "Actual page two", location: { type: "page", page: 2 } },
+    ]);
+  });
+
+  test("rejects the document when a later PDF page operator fails", async () => {
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    pdf.addPage().drawText("First page must not publish alone", { font });
+    pdf.addPage().drawText("Second page has a parse failure", { font });
+    const pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
+    const originalGetDocument = pdfjs.getDocument;
+    pdfjs.getDocument = (...args) => {
+      const task = originalGetDocument(...args);
+      return task.promise.then((document) => ({
+        numPages: document.numPages,
+        destroy: () => document.destroy(),
+        getPage: async (number) => {
+          const page = await document.getPage(number);
+          if (number === 2)
+            page.getOperatorList = async () => {
+              throw new Error("synthetic page two operator failure");
+            };
+          return page;
+        },
+      }));
+    };
+    try {
+      await expect(
+        createParser().parse({
+          name: "operator-failure.pdf",
+          buffer: Buffer.from(await pdf.save()),
+        })
+      ).rejects.toMatchObject({ code: "SOURCE_PARSE_FAILED" });
+    } finally {
+      pdfjs.getDocument = originalGetDocument;
+    }
   });
 
   test("rejects empty local extraction instead of returning successful empty content", async () => {
@@ -293,6 +414,99 @@ describe("located meeting source parsing", () => {
     expect(result).toEqual([
       { text: "Native meeting header", location: { type: "page", page: 1 } },
       { text: "Scanned meeting decision", location: { type: "page", page: 1 } },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("OCRs a stencil-mask image on a native-text PDF page", async () => {
+    const buffer = maskImagePdf();
+    const pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
+    const operators = await pdfPaintOperators(buffer);
+    expect(operators).toContain(pdfjs.OPS.paintImageMaskXObject);
+
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        segments: [
+          {
+            text: "Scanned stencil-mask body",
+            location: { type: "page", page: 1 },
+          },
+        ],
+      }),
+    }));
+    const result = await createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl,
+    }).parse({ name: "mask.pdf", buffer });
+
+    expect(result).toEqual([
+      { text: "Native mask header", location: { type: "page", page: 1 } },
+      {
+        text: "Scanned stencil-mask body",
+        location: { type: "page", page: 1 },
+      },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("recognizes each image paint operator exposed by the bundled PDF.js", () => {
+    const { OPS } = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
+    for (const name of [
+      "paintImageMaskXObject",
+      "paintImageMaskXObjectGroup",
+      "paintImageMaskXObjectRepeat",
+      "paintImageXObject",
+      "paintImageXObjectRepeat",
+      "paintInlineImageXObject",
+      "paintInlineImageXObjectGroup",
+      "paintJpegXObject",
+    ]) {
+      expect(OPS[name]).toBeDefined();
+      expect(isPdfImageOperator(OPS[name], OPS)).toBe(true);
+    }
+  });
+
+  test("OCRs native-text PDF pages with the bundled PDF.js JPEG paint operator", async () => {
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage();
+    page.drawText("Native JPEG header", {
+      font: await pdf.embedFont(StandardFonts.Helvetica),
+    });
+    const jpeg = await pdf.embedJpg(
+      Uint8Array.from(
+        fs.readFileSync(
+          path.join(__dirname, "fixtures", "meeting-jpeg-xobject.jpg")
+        )
+      )
+    );
+    page.drawImage(jpeg, { x: 40, y: 100, width: 200, height: 100 });
+    const buffer = Buffer.from(await pdf.save());
+    const pdfjs = require("pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js");
+    const operators = await pdfPaintOperators(buffer);
+    expect(
+      operators.some((operator) => isPdfImageOperator(operator, pdfjs.OPS))
+    ).toBe(true);
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        segments: [
+          {
+            text: "Scanned JPEG body",
+            location: { type: "page", page: 1 },
+          },
+        ],
+      }),
+    }));
+
+    const result = await createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl,
+    }).parse({ name: "jpeg.pdf", buffer });
+
+    expect(result).toEqual([
+      { text: "Native JPEG header", location: { type: "page", page: 1 } },
+      { text: "Scanned JPEG body", location: { type: "page", page: 1 } },
     ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
