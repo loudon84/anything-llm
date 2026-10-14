@@ -428,8 +428,7 @@ export default function MeetingDetail() {
         title={`补充文本（${supplementalSources.filter((source) => source.sourceType === "SUPPLEMENT_TEXT").length}）`}
       >
         <p className="mb-3 text-xs text-theme-text-secondary">
-          补充文本提交后不可直接编辑；请删除现有文本来源，再添加修改后的文本。已审核会议删除文本后会返回草稿。文本占用会议的
-          不占附件数量和容量。
+          补充文本提交后不可直接编辑；请删除现有文本来源，再添加修改后的文本。已审核会议删除文本后会返回草稿。补充文本不占附件数量和容量。
         </p>
         {supplementalSources
           .filter((source) => source.sourceType === "SUPPLEMENT_TEXT")

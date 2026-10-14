@@ -6,6 +6,7 @@ import { createServer } from "vite";
 import { StaticRouter } from "react-router-dom/server.js";
 import {
   getMeetingSelectionState,
+  getAnswerStatusLabel,
   getActiveFileUsage,
   getSourceTypeLabel,
   getLocationTypeLabel,
@@ -74,6 +75,16 @@ test("attachment quota excludes supplemental text and archived sources", () => {
     getSourcePreviewMode({ name: "unknown" }, "application/octet-stream"),
     "download-only"
   );
+});
+
+test("meeting answer statuses use Chinese labels in the conversation history", () => {
+  assert.equal(getAnswerStatusLabel("ANSWERED"), "已回答");
+  assert.equal(getAnswerStatusLabel("AWAITING_CLARIFICATION"), "等待澄清");
+  assert.equal(getAnswerStatusLabel("AWAITING_SOURCES"), "证据不足");
+  assert.equal(getAnswerStatusLabel("FAILED_INCOMPLETE"), "回答未完成");
+  assert.equal(getAnswerStatusLabel("FAILED_STALE"), "范围已变化");
+  assert.equal(getAnswerStatusLabel("FAILED"), "回答失败");
+  assert.equal(getAnswerStatusLabel("UNEXPECTED"), "未知状态");
 });
 
 test("auto-selected over-limit and unavailable meetings stay deselectable", () => {

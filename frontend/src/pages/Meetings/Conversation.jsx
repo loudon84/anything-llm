@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { Meetings } from "@/models/meetings";
 import {
   getCitationLocationLabel,
+  getAnswerStatusLabel,
   getWorkspaceCitationSnapshot,
   getReanswerDraft,
 } from "@/models/meetingRules";
@@ -300,7 +301,7 @@ function AnswerCard({ answer, blocked, meetings, onReanswer }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold">{answer.question || "回答"}</h3>
         <div className="flex gap-2">
-          <Status value={answer.status} />
+          <Status value={getAnswerStatusLabel(answer.status)} />
           <Button disabled={blocked} onClick={onReanswer}>
             重新回答
           </Button>

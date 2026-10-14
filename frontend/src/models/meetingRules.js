@@ -52,6 +52,19 @@ export function getLocationTypeLabel(locationType) {
   );
 }
 
+export function getAnswerStatusLabel(status) {
+  return (
+    {
+      ANSWERED: "已回答",
+      AWAITING_CLARIFICATION: "等待澄清",
+      AWAITING_SOURCES: "证据不足",
+      FAILED_INCOMPLETE: "回答未完成",
+      FAILED_STALE: "范围已变化",
+      FAILED: "回答失败",
+    }[status] || "未知状态"
+  );
+}
+
 export function getMeetingSourceState(snapshot, source, error = "") {
   if (source && !snapshot) return "current";
   if (source) return compareCitedSource(snapshot.citedSource, source);
