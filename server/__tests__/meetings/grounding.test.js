@@ -81,4 +81,19 @@ describe("meeting answer grounding", () => {
       )
     ).toThrow("explicit missing information");
   });
+
+  test("allows irrelevant current evidence to remain insufficient", () => {
+    const answer = validateGroundedResponse(
+      {
+        status: "AWAITING_SOURCES",
+        text: "",
+        missingInfo:
+          "The selected evidence does not address the requested owner.",
+        citations: [],
+      },
+      [{ evidenceId: "meeting:chunk:4", quote: "The room was booked for May." }]
+    );
+    expect(answer.status).toBe("AWAITING_SOURCES");
+    expect(answer.citations).toEqual([]);
+  });
 });

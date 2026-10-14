@@ -47,6 +47,79 @@ function normalizeIds(values, label, { max, min = 1 } = {}) {
   return ids;
 }
 
+const MAX_QUESTION_LENGTH = 2000;
+const MAX_CLARIFICATION_LENGTH = 2000;
+const MAX_REFERENCE_LENGTH = 1200;
+
+function boundedText(value, limit, label) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || value.length > limit) {
+    throw new MeetingError(
+      `${label} must be ${limit} characters or fewer`,
+      `INVALID_${label.toUpperCase().replace(/\s+/g, "_")}`
+    );
+  }
+  const text = value.trim();
+  return text || null;
+}
+
+function referenceText(value, limit) {
+  return typeof value === "string"
+    ? value.trim().slice(0, limit) || null
+    : null;
+}
+
+function scopeBlockReason(manifest) {
+  const unavailable = manifest.find(
+    ({ meeting }) =>
+      meeting.retrievalStatus !== RETRIEVAL.AVAILABLE || meeting.deletedAt
+  );
+  if (!unavailable) return null;
+  const status = unavailable.meeting.retrievalStatus || "DELETED";
+  return `Selected meeting ${unavailable.meeting.id} is unavailable (${status})`;
+}
+
+function answerSourceState(manifest, citations) {
+  const sources = new Map();
+  for (const meeting of manifest) {
+    for (const source of meeting.sources) {
+      sources.set(`${meeting.meeting.id}:${source.id}`, {
+        meetingId: meeting.meeting.id,
+        ...source,
+      });
+    }
+  }
+  const citedSources = [];
+  const seen = new Set();
+  for (const citation of citations) {
+    if (citation.meetingId == null || citation.sourceId == null) continue;
+    const key = `${citation.meetingId}:${citation.sourceId}`;
+    if (!seen.has(key) && sources.has(key)) {
+      seen.add(key);
+      citedSources.push(citationSourceRevision(sources.get(key)));
+    }
+  }
+  return { manifest, citedSources };
+}
+
+function sourceStateParts(value) {
+  const parsed = parse(value, []);
+  return Array.isArray(parsed)
+    ? { manifest: parsed, citedSources: [] }
+    : {
+        manifest: Array.isArray(parsed?.manifest) ? parsed.manifest : [],
+        citedSources: Array.isArray(parsed?.citedSources)
+          ? parsed.citedSources
+          : [],
+      };
+}
+
+function citationSourceRevision(source) {
+  const revision = { ...source };
+  delete revision.retrievable;
+  return revision;
+}
+
 function createQAService({
   prisma,
   indexer,
@@ -84,6 +157,19 @@ function createQAService({
         "MEETING_UNAVAILABLE",
         409
       );
+    if (
+      requireAvailable &&
+      rows.some(
+        (meeting) =>
+          meeting.deletedAt || meeting.retrievalStatus === RETRIEVAL.DELETED
+      )
+    ) {
+      throw new MeetingError(
+        "Every selected meeting must be available before querying",
+        "MEETING_UNAVAILABLE",
+        409
+      );
+    }
     return requireAvailable ? assertQueryable(rows) : rows;
   }
 
@@ -156,11 +242,26 @@ function createQAService({
             : null,
         }))
         .sort((a, b) => a.id - b.id);
+      const chunks = await db.meeting_chunks.findMany({
+        where: { meetingId: meeting.id },
+      });
+      const currentChunkSources = new Set(
+        chunks
+          .filter((chunk) => chunk.generation === meeting.generation)
+          .map((chunk) => chunk.sourceId)
+      );
+      for (const source of active) {
+        source.retrievable =
+          meeting.retrievalStatus === RETRIEVAL.AVAILABLE &&
+          source.parseStatus === "SUCCESS" &&
+          currentChunkSources.has(source.id);
+      }
       sourceSets.push({
         meeting: {
           id: meeting.id,
           generation: meeting.generation,
           retrievalStatus: meeting.retrievalStatus,
+          deletedAt: meeting.deletedAt ?? null,
           updatedAt: meeting.updatedAt
             ? new Date(meeting.updatedAt).toISOString()
             : null,
@@ -172,44 +273,56 @@ function createQAService({
   }
 
   function compareSnapshots(savedValue, currentValue) {
-    const saved = parse(savedValue, []);
+    const saved = sourceStateParts(savedValue);
+    const previousManifest = saved.manifest;
     const current = currentValue;
-    const savedMeetings = new Map(saved.map((item) => [item.meeting.id, item]));
+    const savedMeetings = new Map(
+      previousManifest.map((item) => [item.meeting.id, item])
+    );
     let stale = false;
     let newSources = false;
-    for (const item of current) {
-      const prior = savedMeetings.get(item.meeting.id);
-      if (!prior) {
-        newSources = true;
+    const sourceByKey = new Map(
+      current.flatMap((item) =>
+        item.sources.map((source) => [
+          `${item.meeting.id}:${source.id}`,
+          { meetingId: item.meeting.id, ...source },
+        ])
+      )
+    );
+    for (const cited of saved.citedSources) {
+      const latest = sourceByKey.get(`${cited.meetingId}:${cited.id}`);
+      if (!latest) {
+        stale = true;
         continue;
       }
-      if (
-        prior.meeting.generation !== item.meeting.generation ||
-        item.meeting.retrievalStatus !== RETRIEVAL.AVAILABLE
-      )
+      if (stable(citationSourceRevision(latest)) !== stable(cited))
         stale = true;
-      const previous = new Map(
-        prior.sources.map((source) => [source.id, source])
-      );
-      const latest = new Map(item.sources.map((source) => [source.id, source]));
-      for (const [id, source] of previous) {
-        if (!latest.has(id)) stale = true;
-        else if (stable(latest.get(id)) !== stable(source)) {
-          stale = true;
-          newSources = true;
-        }
-      }
-      for (const id of latest.keys()) if (!previous.has(id)) newSources = true;
     }
-    if (saved.length !== current.length) stale = true;
-    return { stale, newSources };
+    for (const item of current) {
+      const prior = savedMeetings.get(item.meeting.id);
+      const previousRetrievable = new Map(
+        (prior?.sources || [])
+          .filter((source) => source.retrievable)
+          .map((source) => [source.id, source])
+      );
+      if (item.meeting.retrievalStatus !== RETRIEVAL.AVAILABLE) continue;
+      for (const source of item.sources.filter(
+        (candidate) => candidate.retrievable
+      )) {
+        const previous = previousRetrievable.get(source.id);
+        if (!previous || stable(previous) !== stable(source)) newSources = true;
+      }
+    }
+    return { stale, newSources, blockedReason: scopeBlockReason(current) };
   }
 
   async function createConversation(scope = {}, userId) {
     const meetingIds = normalizeIds(scope.meetingIds, "meeting", {
       max: LIMITS.selectedMeetings,
     });
-    const workspaceIds = normalizeIds(scope.workspaceIds, "workspace");
+    const workspaceIds = normalizeIds(scope.workspaceIds ?? [], "workspace", {
+      min: 0,
+    });
     await currentMeetings(meetingIds);
     if (typeof workspaceRetriever.resolve !== "function")
       throw new MeetingError(
@@ -254,6 +367,10 @@ function createQAService({
       ...row,
       meetingIds,
       workspaceIds,
+      scopeState: {
+        available: !scopeBlockReason(current),
+        blockedReason: scopeBlockReason(current),
+      },
       answers: answers.map((answer) => ({
         ...answer,
         citations: parse(answer.citations, []),
@@ -277,6 +394,10 @@ function createQAService({
         ...conversation,
         meetingIds,
         workspaceIds,
+        scopeState: {
+          available: !scopeBlockReason(current),
+          blockedReason: scopeBlockReason(current),
+        },
       },
       answers: answers.map((answer) => ({
         ...answer,
@@ -291,14 +412,18 @@ function createQAService({
     const conversation = await assertOwner(id, userId);
     const meetingIds = parse(conversation.meetingIds, []);
     const workspaceIds = await assertWorkspaceScope(conversation, userId);
-    const question =
-      typeof input.question === "string" ? input.question.trim() : "";
+    const question = boundedText(
+      input.question,
+      MAX_QUESTION_LENGTH,
+      "question"
+    );
     if (!question)
       throw new MeetingError("A question is required", "QUESTION_REQUIRED");
+    let previous = null;
     const previousAnswerId =
       input.previousAnswerId == null ? null : Number(input.previousAnswerId);
     if (previousAnswerId != null) {
-      const previous = await prisma.meeting_answers.findUnique?.({
+      previous = await prisma.meeting_answers.findUnique({
         where: { id: previousAnswerId },
       });
       if (!previous || previous.conversationId !== conversation.id)
@@ -310,7 +435,82 @@ function createQAService({
     }
     await currentMeetings(meetingIds);
     const before = await snapshot(meetingIds);
-    const meetingEvidence = await indexer.search(meetingIds, question);
+    const baselineBlock = scopeBlockReason(before);
+    if (baselineBlock) {
+      const unavailableAnswer = await transaction(async (db) => {
+        const row = await db.meeting_answers.create({
+          data: {
+            conversationId: conversation.id,
+            question,
+            clarification:
+              boundedText(
+                input.clarification,
+                MAX_CLARIFICATION_LENGTH,
+                "clarification"
+              ) ||
+              previous?.clarification ||
+              null,
+            status: "FAILED_STALE",
+            text: null,
+            missingInfo: null,
+            citations: JSON.stringify([]),
+            sourceState: JSON.stringify(answerSourceState(before, [])),
+            previousAnswerId,
+            error: baselineBlock,
+          },
+        });
+        await audit(
+          {
+            action: "MEETING_ANSWER_BLOCKED_UNAVAILABLE",
+            conversationId: conversation.id,
+            answerId: row.id,
+            userId: userId ?? null,
+          },
+          db
+        );
+        return row;
+      });
+      const unavailable = new MeetingError(
+        baselineBlock,
+        "MEETING_UNAVAILABLE",
+        409
+      );
+      unavailable.answerId = unavailableAnswer.id;
+      throw unavailable;
+    }
+    await currentMeetings(meetingIds);
+    const explicitClarification = boundedText(
+      input.clarification,
+      MAX_CLARIFICATION_LENGTH,
+      "clarification"
+    );
+    const clarification =
+      explicitClarification || previous?.clarification || null;
+    const previousQuestion = referenceText(
+      previous?.question,
+      MAX_REFERENCE_LENGTH
+    );
+    const previousMissingInfo = referenceText(
+      previous?.missingInfo,
+      MAX_REFERENCE_LENGTH
+    );
+    const conversationContext = {
+      previousQuestion,
+      previousMissingInfo,
+      previousAnswerStatus: previous?.status || null,
+      clarification,
+      note: "Prior answer text and citations are conversation history only, never evidence.",
+    };
+    const retrievalQuery = [
+      `Current question: ${question}`,
+      previousQuestion && `Previous question reference: ${previousQuestion}`,
+      previousMissingInfo &&
+        `Previously requested information: ${previousMissingInfo}`,
+      clarification && `Clarified conditions: ${clarification}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const meetingEvidence = await indexer.search(meetingIds, retrievalQuery);
     if (!Array.isArray(meetingEvidence))
       throw new MeetingError(
         "Meeting retrieval returned invalid evidence",
@@ -320,7 +520,7 @@ function createQAService({
     const workspaceEvidence = await workspaceRetriever.search({
       workspaceIds,
       userId,
-      question,
+      question: retrievalQuery,
     });
     if (!Array.isArray(workspaceEvidence))
       throw new MeetingError(
@@ -372,11 +572,13 @@ function createQAService({
             "You are a fixed-scope meeting evidence assistant. Follow the grounded answer contract exactly.",
           prompt: buildGroundedPrompt({
             question,
-            clarification: input.clarification,
+            clarification,
+            conversationContext,
             evidence,
           }),
           question,
-          clarification: input.clarification ?? null,
+          clarification,
+          conversationContext,
           evidence,
         });
         result = validateGroundedResponse(response, evidence);
@@ -404,19 +606,28 @@ function createQAService({
       }
     }
     const publication = await transaction(async (db) => {
+      let availabilityError = null;
+      try {
+        await currentMeetings(meetingIds, db);
+      } catch (error) {
+        if (error?.code !== "MEETING_UNAVAILABLE") throw error;
+        availabilityError = error;
+      }
       const after = await snapshot(meetingIds, db);
-      if (digest(before) !== digest(after)) {
+      if (availabilityError || digest(before) !== digest(after)) {
         const stale = await db.meeting_answers.create({
           data: {
             conversationId: conversation.id,
             question,
+            clarification,
             status: "FAILED_STALE",
             text: null,
             missingInfo: null,
             citations: JSON.stringify([]),
-            sourceState: JSON.stringify(before),
+            sourceState: JSON.stringify(answerSourceState(before, [])),
             previousAnswerId,
             error:
+              availabilityError?.message ||
               "Selected meeting source set or revision changed while generating the answer",
           },
         });
@@ -429,17 +640,20 @@ function createQAService({
           },
           db
         );
-        return { stale: true };
+        return { stale: true, availabilityError };
       }
       const row = await db.meeting_answers.create({
         data: {
           conversationId: conversation.id,
           question,
+          clarification,
           status: result.status,
           text: result.text,
           missingInfo: result.missingInfo,
           citations: JSON.stringify(result.citations),
-          sourceState: JSON.stringify(before),
+          sourceState: JSON.stringify(
+            answerSourceState(before, result.citations)
+          ),
           previousAnswerId,
           error: result.error || null,
         },
@@ -458,15 +672,18 @@ function createQAService({
     });
     if (publication.stale)
       throw new MeetingError(
-        "Selected meeting source set or revision changed while generating the answer",
-        "MEETING_SOURCE_CHANGED",
+        publication.availabilityError?.message ||
+          "Selected meeting source set or revision changed while generating the answer",
+        publication.availabilityError
+          ? "MEETING_UNAVAILABLE"
+          : "MEETING_SOURCE_CHANGED",
         409
       );
     const row = publication.row;
     return {
       ...row,
       citations: result.citations,
-      sourceState: before,
+      sourceState: answerSourceState(before, result.citations),
       stale: false,
       newSources: false,
     };

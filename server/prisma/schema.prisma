@@ -607,6 +607,7 @@ model meeting_answers {
   id              Int                   @id @default(autoincrement())
   conversationId  Int
   question        String
+  clarification   String?
   status          String
   text            String?
   missingInfo     String?
