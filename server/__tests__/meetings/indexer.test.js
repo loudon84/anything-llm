@@ -1,0 +1,153 @@
+const { createIndexer } = require("../../modules/meetings/indexer");
+
+function prismaFor({ meetings, chunks, sources }) {
+  return {
+    meetings: {
+      findMany: async ({ where }) =>
+        meetings.filter(
+          (meeting) =>
+            where.id.in.includes(meeting.id) &&
+            meeting.deletedAt == null &&
+            meeting.retrievalStatus === "AVAILABLE"
+        ),
+    },
+    meeting_sources: {
+      findMany: async ({ where }) =>
+        sources.filter(
+          (source) =>
+            where.meetingId.in.includes(source.meetingId) &&
+            source.deletedAt == null &&
+            source.parseStatus === "SUCCESS"
+        ),
+    },
+    meeting_chunks: {
+      findMany: async ({ where }) =>
+        chunks.filter(
+          (chunk) =>
+            where.meetingId.in.includes(chunk.meetingId) &&
+            where.sourceId.in.includes(chunk.sourceId)
+        ),
+    },
+  };
+}
+
+describe("located meeting chunk index", () => {
+  test("embeds bounded chunks while preserving source locator", async () => {
+    const embedder = {
+      embedDocuments: async (texts) => texts.map(() => [1, 0]),
+    };
+    const indexer = createIndexer({ prisma: {}, embedder, chunkCharacters: 8 });
+    const prepared = await indexer.prepare([
+      { text: "one two three", location: { type: "page", page: 4 } },
+    ]);
+    expect(prepared.map((chunk) => chunk.text)).toEqual(["one two", "three"]);
+    expect(prepared.every((chunk) => chunk.location.page === 4)).toBe(true);
+    expect(prepared.every((chunk) => chunk.embedding.length === 2)).toBe(true);
+  });
+
+  test("rejects missing embedder and empty located segments", async () => {
+    await expect(
+      createIndexer({ prisma: {} }).prepare([
+        { text: "x", location: { type: "paragraph", paragraph: 0 } },
+      ])
+    ).rejects.toMatchObject({ code: "EMBEDDER_UNCONFIGURED" });
+    const indexer = createIndexer({
+      prisma: {},
+      embedder: { embedDocuments: async () => [] },
+    });
+    await expect(indexer.prepare([])).rejects.toMatchObject({
+      code: "INDEX_CONTENT_EMPTY",
+    });
+  });
+
+  test("searches only current chunks from selected available meetings", async () => {
+    const meetings = [
+      {
+        id: 1,
+        retrievalStatus: "AVAILABLE",
+        deletedAt: null,
+        reviewStatus: "DRAFT",
+        coverage: "{}",
+        generation: 4,
+      },
+      { id: 2, retrievalStatus: "WAITING_CONTENT", deletedAt: null },
+    ];
+    const sources = [
+      {
+        id: 10,
+        meetingId: 1,
+        sourceType: "SUPPLEMENT_TEXT",
+        name: "notes",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+      },
+      {
+        id: 11,
+        meetingId: 1,
+        sourceType: "SUPPLEMENT_FILE",
+        name: "removed",
+        parseStatus: "SUCCESS",
+        deletedAt: new Date(),
+      },
+    ];
+    const chunks = [
+      {
+        id: 100,
+        meetingId: 1,
+        sourceId: 10,
+        text: "approved plan",
+        location: JSON.stringify({ type: "paragraph", paragraph: 2 }),
+        embedding: "[1,0]",
+        generation: 4,
+      },
+      {
+        id: 101,
+        meetingId: 1,
+        sourceId: 10,
+        text: "outdated",
+        location: "{}",
+        embedding: "[1,0]",
+        generation: 3,
+      },
+      {
+        id: 102,
+        meetingId: 1,
+        sourceId: 11,
+        text: "deleted",
+        location: "{}",
+        embedding: "[1,0]",
+        generation: 4,
+      },
+    ];
+    const db = prismaFor({ meetings, chunks, sources });
+    const embedder = {
+      embedQuery: async (question) => {
+        expect(question).toBe("What plan?");
+        return [1, 0];
+      },
+    };
+    const indexer = createIndexer({ prisma: db, embedder });
+    const result = await indexer.search([1, 2], "What plan?", 20);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: 100,
+      meetingId: 1,
+      sourceId: 10,
+      sourceType: "SUPPLEMENT_TEXT",
+      name: "notes",
+      text: "approved plan",
+      reviewStatus: "DRAFT",
+      location: { type: "paragraph", paragraph: 2 },
+    });
+  });
+
+  test("rejects a missing query embedding operation", async () => {
+    const indexer = createIndexer({
+      prisma: {},
+      embedder: { embedDocuments: async () => [] },
+    });
+    await expect(indexer.search([1], "question")).rejects.toMatchObject({
+      code: "EMBEDDER_UNCONFIGURED",
+    });
+  });
+});
