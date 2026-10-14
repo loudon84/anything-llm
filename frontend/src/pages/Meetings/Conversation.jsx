@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { Meetings } from "@/models/meetings";
 import {
   getCitationLocationLabel,
+  getWorkspaceCitationSnapshot,
   getReanswerDraft,
 } from "@/models/meetingRules";
 import paths from "@/utils/paths";
@@ -435,12 +436,16 @@ export function Citation({ citation, answer, meeting }) {
             to={paths.meetings.source(workspace.id, workspace.documentId)}
             state={{
               workspace,
-              snapshot: {
+              snapshot: getWorkspaceCitationSnapshot({
                 quote,
                 sourceName,
                 location,
                 citedSource: citationSnapshot,
-              },
+                freshness: {
+                  stale: answer?.stale,
+                  newSources: answer?.newSources,
+                },
+              }),
             }}
           >
             查看工作区文件引用

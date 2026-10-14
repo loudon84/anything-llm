@@ -12,6 +12,7 @@ import {
   getMeetingDraftValues,
   getMeetingActionCapabilities,
   getUploadBatchFeedback,
+  getPollingRefreshError,
 } from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import {
@@ -48,7 +49,7 @@ export default function MeetingDetail() {
   const refresh = useCallback(
     async (
       showLoading = true,
-      { clearError = true, syncContent = false } = {}
+      { clearError = true, syncContent = false, preserveError = false } = {}
     ) => {
       if (showLoading) setLoading(true);
       if (clearError) setError("");
@@ -63,8 +64,12 @@ export default function MeetingDetail() {
         );
         setSummary(contentDraft.current.summary);
         setTranscript(contentDraft.current.transcript);
+        if (preserveError)
+          setError((current) => getPollingRefreshError(current, "", true));
       } catch (e) {
-        setError(e.message);
+        setError((current) =>
+          getPollingRefreshError(current, e.message, preserveError)
+        );
       } finally {
         if (showLoading) setLoading(false);
       }
@@ -81,7 +86,10 @@ export default function MeetingDetail() {
         ["PENDING", "PROCESSING"].includes(source.parseStatus)
       );
     if (!active) return undefined;
-    const timer = window.setInterval(() => refresh(false), 3000);
+    const timer = window.setInterval(
+      () => refresh(false, { clearError: false, preserveError: true }),
+      3000
+    );
     return () => window.clearInterval(timer);
   }, [meeting?.retrievalStatus, sources, refresh]);
 
@@ -155,7 +163,7 @@ export default function MeetingDetail() {
         uploaded += 1;
       }
       setNotice(getUploadBatchFeedback(uploaded, selected.length).notice);
-      await refresh(false, { clearError: false });
+      await refresh(false, { clearError: false, preserveError: true });
     } catch (e) {
       const feedback = getUploadBatchFeedback(
         uploaded,
@@ -164,7 +172,7 @@ export default function MeetingDetail() {
       );
       setError(feedback.error);
       setNotice(feedback.notice);
-      await refresh(false, { clearError: false });
+      await refresh(false, { clearError: false, preserveError: true });
     } finally {
       setBusy(false);
     }

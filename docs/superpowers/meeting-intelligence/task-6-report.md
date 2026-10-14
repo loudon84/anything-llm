@@ -51,3 +51,23 @@ Verification after this correction, from `frontend/`:
 - `node node_modules/eslint/bin/eslint.js src/models/meetingRules.js src/models/meetings.node-test.mjs src/pages/Meetings/Detail.jsx` — passed.
 - `node node_modules/prettier/bin/prettier.cjs --check src/models/meetingRules.js src/models/meetings.node-test.mjs src/pages/Meetings/Detail.jsx` — passed.
 - `npm run build` — passed, including Vite build and the frontend post-build script. Known Piper browser externalization, existing static/dynamic imports, and >500 kB chunk warnings remain unchanged.
+
+## Review round 2 fixes
+
+Addressed the remaining Workspace provenance and upload-polling findings:
+
+- Detail background polling now preserves an existing operation error on both successful and failed refreshes. The 3-second timer and both post-upload refresh paths opt into preservation; a normal explicit refresh still clears the old error. The regression exercises an upload rejection through a successful poll, a failed poll, and explicit clearing.
+- Workspace citation navigation now carries the actual saved `sourceState.citedSources[].revision` together with the answer's available `stale` and `newSources` flags. The viewer displays the saved revision and saved quote separately from the current original. The Workspace file endpoint returns an authenticated file stream and rechecks current access/membership, but does not expose a current revision; accordingly, the UI reports the original as unchecked, readable, or unreadable after preview/download, and explicitly says the version cannot be compared. It does not infer that a specific Workspace document changed from answer-level freshness or claim that an inaccessible document was deleted.
+- Added an SSR render regression for the actual Workspace provenance status component, checking saved revision, readable/unreadable wording, unavailable comparison, and the non-inference from overall answer freshness. No backend or schema changes were needed.
+
+## Review round 2 verification
+
+From `frontend/` after the final UI edits:
+
+- `node --test src/models/meetings.node-test.mjs` — 20/20 passed. The new tests cover the polling error sequence, Workspace route snapshot revision/freshness, and rendered Workspace availability/provenance state. Before implementation, the focused test run failed because the new contract helpers were not exported; it passed after wiring the production paths to those helpers.
+- `node node_modules/eslint/bin/eslint.js src/models/meetingRules.js src/models/meetings.node-test.mjs src/pages/Meetings/Detail.jsx src/pages/Meetings/Conversation.jsx src/pages/Meetings/SourceViewer.jsx` — passed.
+- `node node_modules/prettier/bin/prettier.cjs --check src/models/meetingRules.js src/models/meetings.node-test.mjs src/pages/Meetings/Detail.jsx src/pages/Meetings/Conversation.jsx src/pages/Meetings/SourceViewer.jsx` — passed.
+- `git diff --check` — passed. Git emitted CRLF-to-LF notices for the parent-owned `ledger.md` and `task-7-brief.md` and for this report; the parent-owned files were not edited or included in this task's commit.
+- `npm run build` — passed, including Vite production build and `scripts/postbuild.js` (exit 0). Existing Piper `fs`/`path`/`crypto` browser externalization, static-plus-dynamic import warnings for LLMPreference and Security, and >500 kB chunk warnings remain. No new warning category was observed.
+
+No shared backend or application server was started. Current Workspace revision comparison remains unavailable through the existing file-stream endpoint; current access is checked when the user previews or downloads the file. Full browser interaction remains a Task 7 integration check.

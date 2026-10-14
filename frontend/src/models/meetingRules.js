@@ -161,6 +161,25 @@ export function getPollingListParams(activeQuery) {
   return { ...activeQuery };
 }
 
+export function getPollingRefreshError(
+  currentError,
+  refreshError,
+  preserveError
+) {
+  if (preserveError && currentError) return currentError;
+  return refreshError || "";
+}
+
+export function getWorkspaceCitationSnapshot({
+  quote,
+  sourceName,
+  location,
+  citedSource,
+  freshness,
+}) {
+  return { quote, sourceName, location, citedSource, freshness };
+}
+
 export function getCitationLocationLabel(location = {}) {
   if (location.paragraph != null) return `第 ${location.paragraph} 段`;
   if (location.page != null) return `第 ${location.page} 页`;

@@ -6,6 +6,49 @@ import { compareCitedSource } from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import { Button, Notice, Page, Panel, Status, formatDate } from "./MeetingsUI";
 
+export function WorkspaceSourceStatus({
+  snapshot,
+  availability = "unchecked",
+}) {
+  const savedRevision = snapshot?.citedSource?.revision;
+  const currentStatus =
+    availability === "available" ? (
+      <p>当前工作区原件可读取；无法比较当前文件版本与回答时版本。</p>
+    ) : availability === "unavailable" ? (
+      <p>
+        当前工作区原件不可读取或权限已变化；无法判断具体原因。回答时保存的引用快照仍保留。
+      </p>
+    ) : (
+      <p>
+        尚未检查当前工作区原件。预览或下载时会重新检查访问权限；当前文件版本无法比较。
+      </p>
+    );
+
+  return (
+    <div
+      className="mt-3 rounded-lg bg-theme-bg-primary p-3 text-sm"
+      role="status"
+      aria-live="polite"
+    >
+      <p>
+        回答时保存的工作区版本：
+        {savedRevision || "引用中未提供版本"}
+      </p>
+      {currentStatus}
+      {snapshot?.freshness?.stale && (
+        <p className="mt-2 text-amber-300">
+          该回答的整体证据状态标记为过期；这不能说明这份工作区文件发生了变化。
+        </p>
+      )}
+      {snapshot?.freshness?.newSources && (
+        <p className="mt-2 text-theme-text-secondary">
+          回答历史记录了新增证据；这不能说明这份工作区文件发生了变化。
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function MeetingSourceViewer() {
   const { id, sourceId } = useParams();
   const routerLocation = useLocation();
@@ -17,10 +60,13 @@ export default function MeetingSourceViewer() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [previewUrl, setPreviewUrl] = useState("");
+  const [workspaceAvailability, setWorkspaceAvailability] =
+    useState("unchecked");
 
   useEffect(() => {
     let live = true;
     if (workspace) {
+      setWorkspaceAvailability("unchecked");
       setLoading(false);
       return () => {
         live = false;
@@ -58,6 +104,7 @@ export default function MeetingSourceViewer() {
   async function openFile(download) {
     setBusy(true);
     setError("");
+    let originalReadable = false;
     try {
       const url = workspace
         ? Meetings.workspaceFileUrl(
@@ -67,6 +114,8 @@ export default function MeetingSourceViewer() {
           )
         : Meetings.fileUrl(id, sourceId, download);
       const blob = await fetchMeetingBlob(url);
+      originalReadable = true;
+      if (workspace) setWorkspaceAvailability("available");
       if (download)
         saveAs(blob, source?.name || snapshot?.sourceName || "meeting-source");
       else {
@@ -76,6 +125,8 @@ export default function MeetingSourceViewer() {
         });
       }
     } catch (e) {
+      if (workspace && !originalReadable)
+        setWorkspaceAvailability("unavailable");
       setError(e.message);
     } finally {
       setBusy(false);
@@ -118,9 +169,11 @@ export default function MeetingSourceViewer() {
           <p className="text-xs text-theme-text-secondary">
             {snapshot.meetingTitle || source?.meetingTitle || "来源快照"} ·{" "}
             {formatDate(snapshot.meetingStartTime)} ·{" "}
-            {snapshot.sourceRevision
-              ? `版本 ${snapshot.sourceRevision}`
-              : "已保存"}
+            {snapshot.citedSource?.revision
+              ? `工作区版本 ${snapshot.citedSource.revision}`
+              : snapshot.sourceRevision
+                ? `版本 ${snapshot.sourceRevision}`
+                : "已保存"}
           </p>
           <blockquote className="mt-3 whitespace-pre-wrap border-l-2 border-blue-400 pl-4">
             {snapshot.quote}
@@ -128,7 +181,7 @@ export default function MeetingSourceViewer() {
           <p className="mt-2 text-xs text-theme-text-secondary">
             该摘录属于回答时保存的快照。即使当前文件已修改或删除，历史引用仍保持原样。
           </p>
-          {snapshot.freshness?.stale && (
+          {!workspace && snapshot.freshness?.stale && (
             <Notice tone="warning">
               回答历史标记为资料已变化；请分别核对当时快照和当前来源。
             </Notice>
@@ -140,6 +193,10 @@ export default function MeetingSourceViewer() {
           <Notice>
             工作区文档目前只提供文件级溯源；页面显示所选摘录，无法定位到精确段落或页码。打开当前文件时会再次检查工作区权限和文档成员关系。
           </Notice>
+          <WorkspaceSourceStatus
+            snapshot={snapshot}
+            availability={workspaceAvailability}
+          />
           <div className="mt-3 flex gap-2">
             <Button disabled={busy} onClick={() => openFile(false)}>
               预览当前文件

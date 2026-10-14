@@ -18,6 +18,8 @@ import {
   getMeetingDraftValues,
   getUploadBatchFeedback,
   getPollingListParams,
+  getPollingRefreshError,
+  getWorkspaceCitationSnapshot,
 } from "./meetingRules.js";
 
 test("auto-selected over-limit and unavailable meetings stay deselectable", () => {
@@ -292,6 +294,84 @@ test("upload feedback retains rejection after refresh and reports partial batch 
     error: "",
     notice: "已提交 3 个补充文件，解析任务将在后台继续。",
   });
+});
+
+test("background detail polling preserves an upload error through success and failure until a user refresh", () => {
+  let error = "后续文件失败";
+  error = getPollingRefreshError(error, "", true);
+  assert.equal(error, "后续文件失败");
+  error = getPollingRefreshError(error, "轮询暂时失败", true);
+  assert.equal(error, "后续文件失败");
+  error = getPollingRefreshError(error, "", false);
+  assert.equal(error, "");
+});
+
+test("Workspace citation route payload retains its saved revision and answer freshness", () => {
+  assert.deepEqual(
+    getWorkspaceCitationSnapshot({
+      quote: "已保存的回答摘录",
+      sourceName: "需求说明.pdf",
+      location: { page: 4 },
+      citedSource: {
+        sourceType: "WORKSPACE",
+        workspaceId: 6,
+        documentId: "doc-9",
+        revision: "saved-sha256-revision",
+      },
+      freshness: { stale: true, newSources: false },
+    }),
+    {
+      quote: "已保存的回答摘录",
+      sourceName: "需求说明.pdf",
+      location: { page: 4 },
+      citedSource: {
+        sourceType: "WORKSPACE",
+        workspaceId: 6,
+        documentId: "doc-9",
+        revision: "saved-sha256-revision",
+      },
+      freshness: { stale: true, newSources: false },
+    }
+  );
+});
+
+test("Workspace viewer labels saved revision and current availability without inferring per-file change from answer freshness", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { WorkspaceSourceStatus } = await vite.ssrLoadModule(
+      "/src/pages/Meetings/SourceViewer.jsx"
+    );
+    const snapshot = {
+      citedSource: { revision: "saved-sha256-revision" },
+      freshness: { stale: true, newSources: false },
+    };
+    const available = renderToStaticMarkup(
+      React.createElement(WorkspaceSourceStatus, {
+        snapshot,
+        availability: "available",
+      })
+    );
+    assert.match(available, /saved-sha256-revision/);
+    assert.match(available, /当前工作区原件可读取/);
+    assert.match(available, /无法比较当前文件版本/);
+    assert.match(available, /不能说明这份工作区文件发生了变化/);
+    assert.doesNotMatch(available, /当前工作区原件与回答时一致/);
+
+    const unavailable = renderToStaticMarkup(
+      React.createElement(WorkspaceSourceStatus, {
+        snapshot,
+        availability: "unavailable",
+      })
+    );
+    assert.match(unavailable, /不可读取或权限已变化/);
+    assert.doesNotMatch(unavailable, /文档已删除/);
+  } finally {
+    await vite.close();
+  }
 });
 
 test("background list polling reuses the currently applied date filter", () => {
