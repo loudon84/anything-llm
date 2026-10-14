@@ -121,6 +121,28 @@ describe("durable Tencent meeting imports", () => {
     expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED", activeKey: null });
   });
 
+  test("fails the complete import if any preflight-selected artifact is absent at worker time", async () => {
+    const { db, state } = fakePrisma();
+    const prepareImport = jest.fn(async () => [{ sourceType: "TENCENT_ORIGINAL", name: "one" }]);
+    const importer = importerWith({ db,
+      client: {
+        getContent: async () => ({
+          summary: null, transcript: null, segments: [], capabilities: { attachments: { status: "supported" } },
+          attachments: [{ name: "one.txt", externalFileId: "file-1", downloadUrl: "https://download.tencent.com/file-1" }],
+        }),
+        downloadAttachment: async () => Buffer.from("one"),
+      },
+      sourceService: { prepareImport },
+    });
+    const job = await importer.queue(1, "m-1", {
+      startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z", attachmentIds: ["file-1", "file-2"],
+    }, 7);
+    await expect(importer.process(job)).rejects.toMatchObject({ code: "IMPORT_SELECTED_ARTIFACT_MISSING" });
+    expect(prepareImport).not.toHaveBeenCalled();
+    expect(state.meetings).toHaveLength(0);
+    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED", activeKey: null });
+  });
+
   test("rolls back meeting and all prepared content when one source commit fails", async () => {
     const { db, state } = fakePrisma();
     const importer = importerWith({ db,

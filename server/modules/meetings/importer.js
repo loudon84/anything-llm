@@ -372,10 +372,13 @@ function createImporter({
 
       const attachments = [];
       let attachmentBytes = 0;
+      const selectedAttachmentIds = Array.isArray(payload.scope?.attachmentIds)
+        ? new Set(payload.scope.attachmentIds.map(String))
+        : null;
       for (const attachment of content.attachments || []) {
         if (
-          payload.scope?.attachmentIds &&
-          !payload.scope.attachmentIds.includes(attachment.externalFileId)
+          selectedAttachmentIds &&
+          !selectedAttachmentIds.has(String(attachment.externalFileId))
         )
           continue;
         if (!client.downloadAttachment) {
@@ -422,6 +425,20 @@ function createImporter({
             "A meeting can contain no more than 500 MB of files",
             "MEETING_SIZE_LIMIT",
             413
+          );
+      }
+      if (selectedAttachmentIds) {
+        const downloadedIds = new Set(
+          attachments.map((attachment) => String(attachment.externalFileId))
+        );
+        const missingIds = [...selectedAttachmentIds].filter(
+          (externalFileId) => !downloadedIds.has(externalFileId)
+        );
+        if (missingIds.length)
+          throw new MeetingError(
+            "One or more selected Tencent artifacts are no longer available",
+            "IMPORT_SELECTED_ARTIFACT_MISSING",
+            409
           );
       }
       const selectedContent = { ...content, attachments };

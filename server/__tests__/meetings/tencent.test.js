@@ -8,7 +8,7 @@ describe("Tencent Meeting connector", () => {
     const calls = [];
     const fetchImpl = async (url, options) => {
       calls.push({ url: new URL(url), options });
-      return { ok: true, status: 200, json: async () => ({ meeting_info_list: [], remaining: 0 }) };
+      return { ok: true, status: 200, json: async () => ({ total_page: 1, current_page: 1, meeting_info_list: [], remaining: 0 }) };
     };
     const client = createTencentClient({
       config: { secretId: "AKIDfixture", secretKey: "fixture-secret", appId: "123", userId: "operator", operatorId: "operator", operatorIdType: 1 },
@@ -88,7 +88,7 @@ describe("Tencent Meeting connector", () => {
           { record_file_id: "rf-2", record_start_time: firstStart + 4 * 60 * 60 * 1_000, record_end_time: firstStart + 4 * 60 * 60 * 1_000 + 1_000 },
         ],
       }] }) };
-      if (parsed.pathname === "/v1/records/transcripts/details") return { ok: true, status: 200, json: async () => ({ minutes: { paragraphs: [{
+      if (parsed.pathname === "/v1/records/transcripts/details") return { ok: true, status: 200, json: async () => ({ more: false, minutes: { paragraphs: [{
         pid: "0", start_time: 0, end_time: 1000, sentences: [{ words: [{ text: parsed.searchParams.get("record_file_id") }] }],
       }] } }) };
       if (parsed.pathname.startsWith("/v1/addresses/")) return { ok: true, status: 200, json: async () => ({ ai_minutes: [{ file_type: "txt", download_address: "https://download.tencent.com/secret-url" }] }) };
@@ -136,5 +136,162 @@ describe("Tencent Meeting connector", () => {
     expect(publicConfig).not.toMatchObject({ secretId: "secret-id", secretKey: "secret-key" });
     expect(await service.getPrivate()).toMatchObject({ secretId: "secret-id", secretKey: "secret-key" });
     expect(JSON.stringify(auditEntries)).not.toContain("secret-key");
+  });
+
+  const connectorConfig = (capabilities = {}) => ({
+    secretId: "id", secretKey: "key", appId: "app", userId: "u", operatorId: "u", capabilities,
+  });
+  const recordsResponse = (files = [{ record_file_id: "rf-1", record_start_time: 1_700_000_000_000, record_end_time: 1_700_000_010_000 }]) => ({
+    ok: true, status: 200,
+    json: async () => ({ total_page: 1, record_meetings: [{ meeting_id: "m-1", record_files: files }] }),
+  });
+  const validParagraph = (pid, text = `p${pid}`) => ({
+    pid: String(pid), start_time: pid * 1000, end_time: pid * 1000 + 500,
+    sentences: [{ words: [{ text }] }],
+  });
+
+  test("follows transcript `more` pages by the next paragraph id and retains every paragraph", async () => {
+    const calls = [];
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported" }), now: () => 1_700_000_000_000, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url); calls.push(parsed);
+        if (parsed.pathname === "/v1/records") return recordsResponse();
+        if (parsed.pathname === "/v1/records/transcripts/details") {
+          const pid = parsed.searchParams.get("pid");
+          return { ok: true, status: 200, json: async () => pid === null
+            ? { more: true, minutes: { paragraphs: [validParagraph(0), validParagraph(1)] } }
+            : { more: false, minutes: { paragraphs: [validParagraph(2)] } } };
+        }
+        throw new Error("unexpected endpoint");
+      },
+    });
+    const content = await client.getContent("m-1", { meetingStartTime: 1_700_000_000_000, meetingEndTime: 1_700_086_400_000 });
+    const transcriptCalls = calls.filter((url) => url.pathname === "/v1/records/transcripts/details");
+    expect(transcriptCalls.map((url) => url.searchParams.get("pid"))).toEqual([null, "2"]);
+    expect(content.segments.map((segment) => segment.text)).toEqual(["p0", "p1", "p2"]);
+    expect(content.transcript).toBe("p0\np1\np2");
+  });
+
+  test("rejects transcript pagination that repeats or fails to advance its pid", async () => {
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported" }), now: () => 1_700_000_000_000, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/v1/records") return recordsResponse();
+        return { ok: true, status: 200, json: async () => ({ more: true, minutes: { paragraphs: [validParagraph(0)] } }) };
+      },
+    });
+    await expect(client.getContent("m-1", { meetingStartTime: 1_700_000_000_000, meetingEndTime: 1_700_086_400_000 }))
+      .rejects.toMatchObject({ code: "TENCENT_INVALID_RESPONSE" });
+  });
+
+  test("rejects an empty continuation page even when it clears `more`", async () => {
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported" }), now: () => 1_700_000_000_000, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/v1/records") return recordsResponse();
+        return { ok: true, status: 200, json: async () => parsed.searchParams.has("pid")
+          ? { more: false, minutes: { paragraphs: [] } }
+          : { more: true, minutes: { paragraphs: [validParagraph(0)] } } };
+      },
+    });
+    await expect(client.getContent("m-1", { meetingStartTime: 1_700_000_000_000, meetingEndTime: 1_700_086_400_000 }))
+      .rejects.toMatchObject({ code: "TENCENT_INVALID_RESPONSE" });
+  });
+
+  test("aggregates mixed recording transcript and smart minutes without losing provenance", async () => {
+    const base = 1_700_000_000_000;
+    const files = [
+      { record_file_id: "rf-1", record_start_time: base, record_end_time: base + 1000 },
+      { record_file_id: "rf-2", record_start_time: base + 5000, record_end_time: base + 6000 },
+    ];
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported", summary: "supported" }), now: () => base, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/v1/records") return recordsResponse(files);
+        if (parsed.pathname === "/v1/records/transcripts/details") {
+          if (parsed.searchParams.get("record_file_id") === "rf-2") return { ok: false, status: 500, json: async () => ({ error_code: 30001 }) };
+          return { ok: true, status: 200, json: async () => ({ more: false, minutes: { paragraphs: [validParagraph(0, "rf-1")] } }) };
+        }
+        if (parsed.pathname.startsWith("/v1/smart/minutes/")) return { ok: true, status: 200, json: async () => parsed.pathname.endsWith("rf-1")
+          ? { meeting_minute: { minute: "summary one" } }
+          : { meeting_minute: { minute: "" } } };
+        throw new Error("unexpected endpoint");
+      },
+    });
+    const content = await client.getContent("m-1", { meetingStartTime: base, meetingEndTime: base + 86_400_000 });
+    expect(content.transcript).toBe("rf-1");
+    expect(content.summary).toBe("summary one");
+    expect(content.summarySegments).toEqual([{ text: "summary one", location: { type: "paragraph", paragraph: 0, recordFileId: "rf-1" } }]);
+    expect(content.capabilities).toMatchObject({ transcript: { status: "supported" }, summary: { status: "supported" } });
+  });
+
+  test.each([
+    ["record list", "/v1/records", {}],
+    ["transcript envelope", "/v1/records/transcripts/details", { more: false }],
+    ["paragraph list", "/v1/records/transcripts/details", { more: false, minutes: {} }],
+  ])("rejects a malformed successful %s response", async (_label, malformedPath, body) => {
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported" }), now: () => 1_700_000_000_000, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const pathname = new URL(url).pathname;
+        if (pathname === "/v1/records" && malformedPath !== pathname) return recordsResponse();
+        if (pathname === malformedPath) return { ok: true, status: 200, json: async () => body };
+        throw new Error("unexpected endpoint");
+      },
+    });
+    await expect(client.getContent("m-1", { meetingStartTime: 1_700_000_000_000, meetingEndTime: 1_700_086_400_000 }))
+      .rejects.toMatchObject({ code: "TENCENT_INVALID_RESPONSE" });
+  });
+
+  test("marks an empty downloadable-artifact discovery explicitly absent", async () => {
+    const client = createTencentClient({
+      config: connectorConfig({ attachments: "supported" }), now: () => 1_700_000_000_000, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const pathname = new URL(url).pathname;
+        if (pathname === "/v1/records") return recordsResponse();
+        if (pathname.startsWith("/v1/addresses/")) return { ok: true, status: 200, json: async () => ({ ai_minutes: [] }) };
+        throw new Error("unexpected endpoint");
+      },
+    });
+    const content = await client.getContent("m-1", { meetingStartTime: 1_700_000_000_000, meetingEndTime: 1_700_086_400_000 });
+    expect(content.attachments).toEqual([]);
+    expect(content.capabilities.attachments).toMatchObject({ status: "absent" });
+    expect(content.capabilities.attachments.reason).toMatch(/no downloadable artifacts/i);
+  });
+
+  test("rejects a malformed successful smart-minutes envelope instead of treating it as absence", async () => {
+    const client = createTencentClient({
+      config: connectorConfig({ summary: "supported" }), now: () => 1_700_000_000_000, nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/v1/records") return recordsResponse();
+        if (parsed.pathname.startsWith("/v1/smart/minutes/")) return { ok: true, status: 200, json: async () => ({}) };
+        throw new Error("unexpected endpoint");
+      },
+    });
+    await expect(client.getContent("m-1", { meetingStartTime: 1_700_000_000_000, meetingEndTime: 1_700_086_400_000 }))
+      .rejects.toMatchObject({ code: "TENCENT_INVALID_RESPONSE" });
+  });
+
+  test("enforces timeout through a stalled body and validates final redirect host", async () => {
+    const stalled = createTencentClient({
+      config: connectorConfig(), timeoutMs: 15,
+      fetchImpl: async (_url, { signal }) => ({
+        ok: true, status: 200, url: "https://download.tencent.com/file",
+        headers: { get: () => null },
+        body: { getReader: () => ({ read: () => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true })), cancel: async () => {} }) },
+      }),
+    });
+    await expect(stalled.downloadAttachment("https://download.tencent.com/file"))
+      .rejects.toMatchObject({ code: "TENCENT_TIMEOUT" });
+    const redirected = createTencentClient({
+      config: connectorConfig(), fetchImpl: async () => ({ ok: true, status: 200, url: "https://evil.example/file", headers: { get: () => "1" }, arrayBuffer: async () => Uint8Array.from([1]).buffer }),
+    });
+    await expect(redirected.downloadAttachment("https://download.tencent.com/file"))
+      .rejects.toMatchObject({ code: "INVALID_TENCENT_DOWNLOAD_URL" });
   });
 });

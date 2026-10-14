@@ -49,3 +49,20 @@ The implementation was checked against Tencent's official docs and the repositor
 - GREEN: `npx jest server/__tests__/meetings/tencent.test.js server/__tests__/meetings/importer.test.js --runInBand` — 2 suites, 19 tests passed. Tests use deterministic signing fixtures and fake external Tencent/source boundaries; importer persistence/concurrency cases use isolated SQLite databases.
 - `prisma validate --schema server/prisma/schema.prisma` — passed.
 - ESLint on the four implementation files — passed.
+
+## Round 1 review follow-up
+
+Addressed all six actionable review findings. Transcript retrieval now sends a bounded `limit`, follows `more` with the next paragraph `pid`, and rejects empty/repeated/non-advancing pagination. The [official transcript-details guide](https://cloud.tencent.com/document/product/1095/65111) defines `pid` as the starting paragraph ID (inclusive), `more` as the continuation flag, and paragraph IDs as strings; the adapter advances from the last returned numeric paragraph ID and guards against a stalled/repeated cursor.
+
+An explicitly selected attachment ID that is absent or no longer downloadable at worker time now fails the entire import before source preparation. Structured transcript, recording-list, smart-minutes, and artifact-detail success envelopes are validated; malformed HTTP 200 bodies fail instead of becoming source absence. Confirmed transcript/minutes/artifact absence is accumulated across all recordings so a later recording cannot erase valid earlier content. Empty artifact discovery is marked `absent` with a manual supplement reason in both content retrieval and preflight manifest.
+
+Smart minutes are accumulated into `summary` and a new `summarySegments` array. Each entry is `{ text, location: { type: "paragraph", paragraph: 0, recordFileId } }`, preserving the originating recording for traceability. Task 3 should treat each summary segment as located `SUMMARY` material and retain `recordFileId` in persisted source/chunk provenance; `summary` remains the aggregate readable text.
+
+Download timeouts now stay active until the response body has been fully consumed or rejected, and the final response URL is checked after redirects before reading bytes. This continues to use no AK/SK headers on artifact hosts. An empty continuation page is rejected even if it reports `more: false`, since a prior page promised additional paragraphs.
+
+Follow-up verification:
+
+- RED: added regressions initially failed for pagination, missing selected artifacts, mixed recordings, malformed successful responses, empty artifact state, and a stalled download body.
+- GREEN: `npx jest server/__tests__/meetings/tencent.test.js server/__tests__/meetings/importer.test.js --runInBand` — 2 suites, 30 tests passed.
+- `prisma validate --schema server/prisma/schema.prisma` — passed; no schema change was needed for this review round.
+- ESLint on `modules/meetings/tencent.js`, `config.js`, `jobs.js`, and `importer.js` — passed.
