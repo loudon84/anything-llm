@@ -79,3 +79,15 @@ Existing EventLogs.logEvent uses global Prisma and catches errors. Do not call i
 
 ## Final Task2 runtime contract
 Read task-2-report.md and actual exported signatures: importer clientFactory receives {connection,config}, not raw ID; sourceService.prepareImport gets downloaded buffers, commitImport writes inside importer transaction. configService has getPublic/save/getPrivate. meeting_jobs schema now has leaseOwner/leaseUntil; migration42 included. Runtime must honor job handlers and leases, and use same normalized active identity. GET manifest uses client.describeMeeting and never returns signed URLs.
+
+## Task3 adapter update
+Indexer uses embedDocuments(texts)/embedQuery(question); wrap existing embedder.embedChunks(texts)/embedTextInput(question) explicitly. Source service persists jobs inside its own tx; runtime runner polls without an enqueue callback that writes separately. OCR services.ocr.url is the full /parse endpoint, not base URL; admin UI and config validation must agree with Task3 report. Approval must ignore resolved historical jobs for deleted/superseded sources without rewriting failure history.
+
+
+## Final Task3 fix interfaces
+
+Indexer.reindex(meetingId, {job}) accepts runner durable lease job; sourceService.process(job) uses this. commitImport(tx,meeting,prepared,{onRollback}) registers filesystem cleanup with importer outer transaction; importer implemented registration. Runtime need not wrap separate transactions. Source getSource returns current retained source, segments envelope may be object with provenance. New source/index publication checks job lease and exact active source state. Keep job lease renewal enabled during long OCR/embedding.
+
+## Streaming upload handoff
+
+SourceService.upload currently accepts buffer; endpoint disk multipart alone would still allocate 100MB/request if it reads into buffers before background processing. Extend narrowly to accept trusted temporary filePath+name, stream SHA256 and copy into generated contained storage paths, then queue asynchronous parsing. Keep buffer variant for importer/tests. Never accept arbitrary paths from JSON/body; only server-issued multipart paths. Tests must cover rejected temp cleanup and buffered/streamed duplicate equivalence. Report integration edits and rerun source tests.

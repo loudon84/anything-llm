@@ -1,4 +1,4 @@
-# Meeting Intelligence execution ledger
+# SDD ledger — plan: docs/superpowers/plans/2026-10-14-meeting-intelligence.md
 
 - Worktree: C:/Users/smc-sz-hr21007/.codex/worktrees/meeting-intelligence-3204/anything-llm
 - Branch: codex/meeting-intelligence
@@ -29,8 +29,8 @@
 
 - [x] T1 Persistence / lifecycle — complete (cca287a0..b1cadb8b; scoped review clean, 18 tests)
 - [x] T2 Tencent / jobs — complete (3e56ec60..520c1cf9; scoped review clean, 30 tests)
-- [ ] T3 Parsing / sources / index — in progress (GPT-6 Luna)
-- [ ] T4 Grounded QA / history — pending
+- [x] T3 Parsing / sources / index — complete (a24db03b..0f4cd881; scoped review clean)
+- [ ] T4 Grounded QA / history — in progress (GPT-6 Luna)
 - [ ] T5 API / runtime — pending
 - [ ] T6 React pages — pending
 - [ ] T7 Integration / review — pending
@@ -59,3 +59,15 @@
 
 - T2 fix round1 committed 520c1cf9; 30 tests/schema/lint green, six completeness/transfer findings addressed by implementer, scoped rereview pending. Summary segments now retain recording provenance; downstream T3 brief updated.
 
+
+- T3 runtime handoff: explicit embedDocuments/embedQuery adapter; original AnythingLLM embedder uses embedChunks/embedTextInput. Source jobs written through transaction client (no external enqueue during tx). OCR URL full /parse endpoint. Typed text approved deletion remains original PRD rule; files only draft deletion. Approval filtering must retain historical failures while ignoring resolved deleted-source jobs.
+
+
+- T3 review report written despite final reviewer model capacity error: seven actionable findings (source/chunk ownership, source-set/lease races, pending-source recovery, supplement-only deletion, outer rollback file cleanup, format-specific OCR provenance). Parent added required PPT embedded-image OCR and mixed scanned/text PDF coverage findings.
+- Ruling: A single image source ID identifies whole-image provenance; no pixel bounding-box requirement — PRD only demands locating the image, shared schema has no crop fields — cost if wrong: word-level highlighting would require new OCR metadata/UI.
+
+- Task 3: fix round 1/5 committed 98cdd44f; all ten categories addressed by implementer. Controller independently reran 7 meeting suites / 84 tests PASS; scoped rereview in progress. Reviewer initially hit capacity; replacement scoped reviewer GPT-6.1 Sol used, implementer remains GPT-6 Luna.
+- Task 3: fix round 1/5 rereview ten findings addressed, one new P1 open: same scanned PDF page returns multiple OCR segments and Map keeps only the last. Fix round2 returned to GPT-6 Luna for per-page arrays/flatten and regression.
+
+- Task 3: fix round 2/5 (PDF multi-segment loss addressed, zero open; commit0f4cd881; scoped rereview spec and quality PASS).
+- Task 3: complete (commits8a7fd142..0f4cd881, review clean). Retained current source text, original locators and historical snapshots align.
