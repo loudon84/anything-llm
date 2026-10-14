@@ -33,7 +33,7 @@
 - [x] T4 Grounded QA / history — complete (aba37279..470ac235; scoped review clean)
 - [x] T5 API / runtime — complete (5a + 5b scoped reviews clean, GPT-6 Luna)
 - [x] T6 React pages — complete (cb52940a..5ad54b24, scoped review clean)
-- [ ] T7 Integration / review — pending
+- [ ] T7 Integration / review — in progress (GPT-6 Luna, BASEa4d7d97d)
 
 
 - Baseline setup: npm installed with lifecycle scripts disabled; Prisma client generated explicitly after baseline missing-client failure. Root selected regression rerun pending. Frontend baseline production build pending.
@@ -106,3 +106,7 @@
 - Task6 fixround1/5 rereview7of9ADDRESSED;2Importantremain(original#5 Workspacefreshness/revision/unverifiable display, #7 subsequentpollclearsuploaderror). No newbreakingfinding; returnedoriginalGPT-6Luna round2scopedfix. Meetingprovenance/coverage, remotepage/date, approvedactionmatrix, absenttranscript, filter/edits, importlimits/reanswer nowADDRESSED.
 - Task6 fixround2 committed5ad54b24:remainingWorkspaceprovenance/currentversionunverifiable+subsequentpolluploaderror addressedperimplementer.20Nodecases/scopedlint/format/buildPASS; scopedrereviewpending.
 - Task6 fixround2/5:bothremainingfindingsADDRESSED,0open;5ad54b24 scopedrereviewPASS. Task6:complete(commits7f73df17..5ad54b24,2fixrounds,20tests/buildPASS). ActualisolatedUIverificationcarriedTask7. Removedonlyowncompletedtaskdiffpackages(nonrecursive); retainedplan/ledger/reports andallcode.
+- Task7 startedfreshGPT-6Luna atBASEa4d7d97d: realDBintegration, PDFsame-pageOCR, historicalreuploadstateguard/currentconfig, isolatedUIattempt/deployment/evidence. ParentownssubsequentTask7gate+wholebranchAstrareview+finalTODO.
+- Task7 rootUIverification: actualexistingapp + isolatedPrisma/preload running; Center/Detail rendered. ConfirmedPRD115gap:sourcecheckLimits sumsTEXTbytes into500MBattachmentquota; Detail statesTEXTconsumes500MB. AssignedLuna narrowfile-onlycapacityguard/frontendcopy+realDBboundarytests, existingbodylimitsunchanged. Also actualUI rawAVAILABLE/SUPPLEMENT_FILE/hashwording assignedsmallChinesepolish; finalfrontendbuildneededfornewchanges.
+- Task7 actualbrowser: Center fixed-scope dialog behaved correctly (metadata deselect, Workspaces defaultnone); creation persistedconversation1 but QApage crashed answers.slice. RealGET200 evidence:topanswers object containsconversation+answers, notarray; assignedendpoint/clienthistorycontractregression+latestownedAPIrestart toLuna. FileAPI200/76bytes/CORSgood; initialpreview Failedfetch tracedharnessAPIbase, new41875explicitbase fetchedBlob butTXTiframeblank; safeReacttextpreview assigned. Existingunsandboxed genericoriginaliframes assignedrestrictedpreviewclassification/sandbox/escape tests. No failingUIartifacts claimedaspassed.
+- Task7 committed3a1c154c: real fresh43migration Prisma integration; PDF same-page native+scan, historical approved-file reupload and attachment-only quota guards corrected; actual HTTP history-envelope regression. 18suites/154backendtests and24frontendtests/build/scopedchecks PASS per report. Parent actual isolated browser Center→fixed-scope conversation→question→citation snapshot→safe TXT current preview and Settings rendered successfully; external adapters/fixtures synthetic. Chinese answer-state/copy polish finishing; task-scoped review next, no Linux/live/performance acceptance claim.
