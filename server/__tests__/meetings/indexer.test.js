@@ -210,6 +210,50 @@ describe("located meeting chunk index", () => {
     });
   });
 
+  test("fails visibly when a current chunk was embedded with another profile or has an invalid vector", async () => {
+    const meeting = {
+      id: 1,
+      retrievalStatus: "AVAILABLE",
+      deletedAt: null,
+      reviewStatus: "DRAFT",
+      coverage: "{}",
+      generation: 4,
+    };
+    const source = {
+      id: 10,
+      meetingId: 1,
+      sourceType: "SUPPLEMENT_TEXT",
+      name: "notes",
+      parseStatus: "SUCCESS",
+      deletedAt: null,
+    };
+    const chunk = {
+      id: 100,
+      meetingId: 1,
+      sourceId: 10,
+      text: "old model",
+      location: "{}",
+      embedding: JSON.stringify({ profileId: "model-a", vector: [1, 0] }),
+      generation: 4,
+    };
+    const db = prismaFor({
+      meetings: [meeting],
+      sources: [source],
+      chunks: [chunk],
+    });
+    const indexer = createIndexer({
+      prisma: db,
+      embedder: { profileId: "model-b", embedQuery: async () => [1, 0] },
+    });
+    await expect(indexer.search([1], "question")).rejects.toMatchObject({
+      code: "EMBEDDING_PROFILE_MISMATCH",
+    });
+    chunk.embedding = JSON.stringify({ profileId: "model-b", vector: [0, 0] });
+    await expect(indexer.search([1], "question")).rejects.toMatchObject({
+      code: "EMBEDDING_VECTOR_INVALID",
+    });
+  });
+
   test("rejects a missing query embedding operation", async () => {
     const indexer = createIndexer({
       prisma: {},

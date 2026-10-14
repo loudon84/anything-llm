@@ -708,4 +708,48 @@ describe("fixed-scope meeting QA and history", () => {
     expect(workspaceEvidence[0].filePath).toBeUndefined();
     expect(workspaceEvidence[0].evidenceId).toBe("workspace:2:chunk-1");
   });
+
+  test("does not publish an answer after a Workspace document changes during generation", async () => {
+    const prisma = fakePrisma({
+      meetingRows: [availableMeeting()],
+      sourceRows: [activeSource()],
+    });
+    const evidence = {
+      evidenceId: "workspace:2:chunk",
+      workspaceId: 2,
+      documentId: "doc-7",
+      revision: "2026-10-01T00:00:00.000Z",
+      quote: "Current Workspace evidence.",
+      name: "current.txt",
+      sourceType: "WORKSPACE",
+    };
+    const workspaceRetriever = {
+      resolve: async () => [{ id: 2 }],
+      search: async () => [evidence],
+      validateEvidence: async ({ db }) => db === prisma && false,
+    };
+    const llm = {
+      generate: jest.fn(async () => ({
+        status: "ANSWERED",
+        text: "Current Workspace evidence.",
+        missingInfo: null,
+        citations: [{ evidenceId: evidence.evidenceId, quote: evidence.quote }],
+      })),
+    };
+    const { service } = setup({
+      prisma,
+      workspaceRetriever,
+      evidence: [evidence],
+      llm,
+    });
+    const conversation = await service.createConversation(
+      { meetingIds: [1], workspaceIds: [2] },
+      9
+    );
+    await expect(
+      service.ask(conversation.id, { question: "Status?" }, 9)
+    ).rejects.toMatchObject({ code: "WORKSPACE_SOURCE_CHANGED" });
+    expect(llm.generate).toHaveBeenCalledTimes(1);
+    expect(prisma._answers[0].status).toBe("FAILED_STALE");
+  });
 });

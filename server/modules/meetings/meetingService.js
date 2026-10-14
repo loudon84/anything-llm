@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const { MeetingError } = require("./errors");
 const { LIMITS, REVIEW, RETRIEVAL, quarterFor } = require("./policy");
 
@@ -33,13 +34,16 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
     return meeting;
   }
 
-  async function auditMutation(action, meeting, userId, details = {}) {
-    await audit({
-      action,
-      meetingId: meeting.id,
-      userId: userId ?? null,
-      ...details,
-    });
+  async function auditMutation(action, meeting, userId, db, details = {}) {
+    await audit(
+      {
+        action,
+        meetingId: meeting.id,
+        userId: userId ?? null,
+        ...details,
+      },
+      db
+    );
   }
 
   return {
@@ -144,7 +148,12 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
                 createdBy: userId ?? null,
               },
             });
-            await auditMutation("MEETING_METADATA_CREATED", meeting, userId);
+            await auditMutation(
+              "MEETING_METADATA_CREATED",
+              meeting,
+              userId,
+              db
+            );
             return meeting;
           });
         } catch (error) {
@@ -230,7 +239,7 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
             reviewedAt: now(),
           },
         });
-        await auditMutation("MEETING_APPROVED", updated, userId);
+        await auditMutation("MEETING_APPROVED", updated, userId, db);
         return updated;
       });
     },
@@ -261,7 +270,7 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
         await db.meeting_chunks.deleteMany({
           where: { meetingId: meeting.id },
         });
-        await auditMutation("MEETING_DELETED", updated, userId);
+        await auditMutation("MEETING_DELETED", updated, userId, db);
         return updated;
       });
     },
@@ -280,6 +289,15 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
           "A summary or transcript revision is required",
           "EMPTY_REVISION"
         );
+      for (const [field, present] of [
+        ["summary", hasSummary],
+        ["transcript", hasTranscript],
+      ])
+        if (present && typeof changes[field] !== "string")
+          throw new MeetingError(
+            `${field} must be a string; use an empty string to clear it`,
+            "INVALID_REVISION"
+          );
       return transaction(async (db) => {
         const meeting = await findMeeting(db, id);
         if (
@@ -293,6 +311,65 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
           );
         }
         const generation = Number(meeting.generation || 0) + 1;
+        const existingTextSources = await db.meeting_sources.findMany({
+          where: {
+            meetingId: meeting.id,
+            deletedAt: null,
+            sourceType: { in: ["SUMMARY", "TRANSCRIPT"] },
+          },
+        });
+        for (const [sourceType, field, present] of [
+          ["SUMMARY", "summary", hasSummary],
+          ["TRANSCRIPT", "transcript", hasTranscript],
+        ]) {
+          if (!present) continue;
+          const content = changes[field];
+          const segments = content
+            .split(/\r?\n+/)
+            .map((text) => text.trim())
+            .filter(Boolean)
+            .map((text, paragraph) => ({
+              text,
+              location: { type: "paragraph", paragraph },
+            }));
+          const contentHash = crypto
+            .createHash("sha256")
+            .update(content)
+            .digest("hex");
+          const existingSource = existingTextSources.find(
+            (source) => source.sourceType === sourceType
+          );
+          if (!existingSource && !content.trim()) continue;
+          const sourceData = {
+            contentHash,
+            activeHash: content.trim() ? `${sourceType}:${contentHash}` : null,
+            contentText: content.trim() ? content : null,
+            segments: JSON.stringify(segments),
+            parseStatus: "SUCCESS",
+            error: null,
+            deletedAt: null,
+          };
+          if (existingSource)
+            await db.meeting_sources.update({
+              where: { id: existingSource.id },
+              data: sourceData,
+            });
+          else
+            await db.meeting_sources.create({
+              data: {
+                meetingId: meeting.id,
+                sourceType,
+                name:
+                  field === "summary"
+                    ? "Meeting summary"
+                    : "Meeting transcript",
+                bytes: 0,
+                filePath: null,
+                createdBy: userId ?? null,
+                ...sourceData,
+              },
+            });
+        }
         const updated = await db.meetings.update({
           where: { id: meeting.id },
           data: {
@@ -318,8 +395,63 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
             attempts: 0,
           },
         });
-        await auditMutation("MEETING_REVISED", updated, userId, { generation });
+        await auditMutation("MEETING_REVISED", updated, userId, db, {
+          generation,
+        });
         return updated;
+      });
+    },
+
+    async requestReindex(id, userId, profileId = "default") {
+      return transaction(async (db) => {
+        const meeting = await findMeeting(db, id);
+        const pending = await db.meeting_jobs.findMany({
+          where: {
+            meetingId: meeting.id,
+            kind: "REINDEX",
+            status: { in: ["CREATED", "PROCESSING"] },
+          },
+        });
+        const sameGenerationJob = pending.find((job) => {
+          try {
+            const payload = JSON.parse(job.payload || "{}");
+            return (
+              payload.manual === true &&
+              payload.generation === meeting.generation &&
+              payload.profileId === String(profileId)
+            );
+          } catch {
+            return false;
+          }
+        });
+        if (sameGenerationJob) return sameGenerationJob;
+        const generation = Number(meeting.generation || 0) + 1;
+        const updated = await db.meetings.update({
+          where: { id: meeting.id },
+          data: { generation, retrievalStatus: RETRIEVAL.INDEXING },
+        });
+        const job = await db.meeting_jobs.create({
+          data: {
+            kind: "REINDEX",
+            meetingId: meeting.id,
+            connectionId: meeting.connectionId,
+            externalId: meeting.externalId,
+            quarter: meeting.quarter,
+            activeKey: `REINDEX:${meeting.id}:${generation}:MANUAL:${String(profileId)}`,
+            payload: JSON.stringify({
+              generation,
+              profileId: String(profileId),
+              manual: true,
+            }),
+            status: "CREATED",
+            attempts: 0,
+          },
+        });
+        await auditMutation("MEETING_REINDEX_REQUESTED", updated, userId, db, {
+          generation,
+          profileId: String(profileId),
+        });
+        return job;
       });
     },
   };

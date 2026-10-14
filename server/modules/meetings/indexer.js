@@ -51,21 +51,36 @@ function cosine(left, right) {
   for (let index = 0; index < left.length; index += 1) {
     const a = Number(left[index]);
     const b = Number(right[index]);
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return -1;
+    if (!Number.isFinite(a) || !Number.isFinite(b))
+      throw new MeetingError(
+        "Embedding vector contains invalid values",
+        "EMBEDDING_VECTOR_INVALID",
+        503
+      );
     dot += a * b;
     leftNorm += a * a;
     rightNorm += b * b;
   }
-  return leftNorm && rightNorm ? dot / Math.sqrt(leftNorm * rightNorm) : -1;
+  if (!leftNorm || !rightNorm)
+    throw new MeetingError(
+      "Embedding vector has zero magnitude",
+      "EMBEDDING_VECTOR_INVALID",
+      503
+    );
+  return dot / Math.sqrt(leftNorm * rightNorm);
 }
 
 function createIndexer({
   prisma,
   embedder,
+  profileId: configuredProfileId,
   chunkCharacters = DEFAULT_CHUNK_CHARACTERS,
 } = {}) {
   if (!prisma)
     throw new TypeError("createIndexer requires an injected Prisma client");
+  const profileId = String(
+    configuredProfileId || embedder?.profileId || embedder?.model || "default"
+  );
 
   async function vectorize(texts, operation) {
     if (typeof embedder?.[operation] !== "function") {
@@ -88,10 +103,15 @@ function createIndexer({
           (vector) =>
             !Array.isArray(vector) ||
             !vector.length ||
-            vector.some((value) => !Number.isFinite(Number(value)))
+            vector.some((value) => !Number.isFinite(Number(value))) ||
+            vector.every((value) => Number(value) === 0)
         )
       ) {
-        throw new Error("Embedding service returned an invalid vector set");
+        throw new MeetingError(
+          "Embedding service returned an invalid or zero vector",
+          "EMBEDDING_VECTOR_INVALID",
+          503
+        );
       }
       return vectors.map((vector) => vector.map(Number));
     } catch (error) {
@@ -184,7 +204,26 @@ function createIndexer({
         const source = sourceById.get(chunk.sourceId);
         if (!meeting || !source || chunk.generation !== meeting.generation)
           return [];
-        const embedding = parseJson(chunk.embedding, null);
+        const stored = parseJson(chunk.embedding, null);
+        const embedding = Array.isArray(stored) ? stored : stored?.vector;
+        const storedProfile = Array.isArray(stored)
+          ? "default"
+          : stored?.profileId;
+        if (storedProfile && storedProfile !== profileId)
+          throw new MeetingError(
+            "Indexed vectors use a different embedding profile; rebuild the meeting index",
+            "EMBEDDING_PROFILE_MISMATCH",
+            503
+          );
+        if (
+          !Array.isArray(embedding) ||
+          embedding.length !== queryVector.length
+        )
+          throw new MeetingError(
+            "Indexed vectors are incompatible with the current embedding dimensions; rebuild the meeting index",
+            "EMBEDDING_PROFILE_MISMATCH",
+            503
+          );
         const score = cosine(queryVector, embedding);
         if (score < 0) return [];
         return [
@@ -271,6 +310,15 @@ function createIndexer({
               segment.location
           )
         : [];
+      const effectiveText = sourceRevisions.has(source.id)
+        ? sourceRevisions.get(source.id).contentText
+        : source.contentText;
+      if (String(effectiveText || "").trim() && !valid.length)
+        throw new MeetingError(
+          "A successful source has no located indexable segments",
+          "INDEX_CONTENT_EMPTY",
+          422
+        );
       for (const segment of valid)
         segments.push({ ...segment, sourceId: source.id });
     }
@@ -361,7 +409,7 @@ function createIndexer({
               sourceId,
               text: chunk.text,
               location: JSON.stringify(chunk.location),
-              embedding: JSON.stringify(chunk.embedding),
+              embedding: JSON.stringify({ profileId, vector: chunk.embedding }),
               generation,
             },
           });
@@ -383,7 +431,7 @@ function createIndexer({
       : publish(prisma);
   }
 
-  return { prepare, reindex, search };
+  return { prepare, reindex, search, profileId };
 }
 
 function splitCurrentText(value) {

@@ -1,6 +1,6 @@
 const { MeetingError } = require("./errors");
 
-const PRIVATE_FIELDS = ["secretId", "secretKey", "stsToken"];
+const PRIVATE_FIELDS = ["secretId", "secretKey", "stsToken", "ocrToken"];
 
 function parseConfig(value) {
   try {
@@ -27,6 +27,9 @@ function createMeetingConfig({
     );
   let selectedId = null;
 
+  const transaction = (callback) =>
+    prisma.$transaction ? prisma.$transaction(callback) : callback(prisma);
+
   async function findConnection(id) {
     if (id != null)
       return prisma.meeting_connections.findUnique
@@ -51,7 +54,19 @@ function createMeetingConfig({
         );
       }
     }
-    return { ...stored.settings, ...credentials, id: row.id, name: row.name };
+    const services = stored.settings?.services || {};
+    return {
+      ...stored.settings,
+      ...credentials,
+      services: {
+        ...services,
+        ...(services.ocr
+          ? { ocr: { ...services.ocr, token: credentials.ocrToken || "" } }
+          : {}),
+      },
+      id: row.id,
+      name: row.name,
+    };
   }
 
   async function getPublic(id) {
@@ -70,6 +85,24 @@ function createMeetingConfig({
         : {}),
       capabilities: settings.capabilities || {},
       credentialHints: stored.credentialHints || {},
+      ...(settings.services
+        ? {
+            services: {
+              ...settings.services,
+              ...(settings.services.ocr
+                ? {
+                    ocr: {
+                      url: settings.services.ocr.url,
+                      configured: Boolean(settings.services.ocr.url),
+                      tokenPresent: Boolean(
+                        credentialsHint(stored, "ocrToken")
+                      ),
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -102,8 +135,12 @@ function createMeetingConfig({
       }
     }
     for (const field of PRIVATE_FIELDS) {
-      if (input[field] != null && input[field] !== "")
-        credentials[field] = String(input[field]);
+      const supplied =
+        field === "ocrToken"
+          ? (input.services?.ocr?.token ?? input.ocrToken)
+          : input[field];
+      if (supplied != null && supplied !== "")
+        credentials[field] = String(supplied);
       else if (priorCredentials[field])
         credentials[field] = priorCredentials[field];
     }
@@ -124,6 +161,35 @@ function createMeetingConfig({
       else if (old.settings?.[field] != null)
         settings[field] = old.settings[field];
     }
+    const ocrInput = input.services?.ocr;
+    const priorOcr = old.settings?.services?.ocr || {};
+    if (ocrInput || priorOcr.url) {
+      const url = ocrInput?.url ?? priorOcr.url ?? "";
+      if (url) {
+        let parsed;
+        try {
+          parsed = new URL(url);
+        } catch {
+          throw new MeetingError(
+            "OCR parser URL must be an absolute URL",
+            "INVALID_MEETING_CONFIG"
+          );
+        }
+        if (
+          !new Set(["https:", "http:"]).has(parsed.protocol) ||
+          !parsed.pathname.endsWith("/parse")
+        )
+          throw new MeetingError(
+            "OCR parser URL must use HTTP(S) and end in /parse",
+            "INVALID_MEETING_CONFIG"
+          );
+      }
+      settings.services = {
+        ...(old.settings?.services || {}),
+        ocr: { url, configured: Boolean(url) },
+      };
+    } else if (old.settings?.services)
+      settings.services = old.settings.services;
     const credentialHints = Object.fromEntries(
       PRIVATE_FIELDS.filter((field) => credentials[field]).map((field) => [
         field,
@@ -136,29 +202,39 @@ function createMeetingConfig({
       credentialHints,
     });
     const data = { name, config };
-    let row;
-    if (prisma.meeting_connections.upsert && id != null) {
-      row = await prisma.meeting_connections.upsert({
-        where: { id },
-        create: data,
-        update: data,
-      });
-    } else if (id != null && existing) {
-      row = await prisma.meeting_connections.update({ where: { id }, data });
-    } else {
-      row = await prisma.meeting_connections.create({ data });
-    }
-    selectedId = row.id;
-    await audit({
-      action: "MEETING_CONNECTION_SAVED",
-      connectionId: row.id,
-      userId: userId ?? null,
-      name,
+    const row = await transaction(async (tx) => {
+      let saved;
+      if (tx.meeting_connections.upsert && id != null) {
+        saved = await tx.meeting_connections.upsert({
+          where: { id },
+          create: data,
+          update: data,
+        });
+      } else if (id != null && existing) {
+        saved = await tx.meeting_connections.update({ where: { id }, data });
+      } else {
+        saved = await tx.meeting_connections.create({ data });
+      }
+      await audit(
+        {
+          action: "MEETING_CONNECTION_SAVED",
+          connectionId: saved.id,
+          userId: userId ?? null,
+          name,
+        },
+        tx
+      );
+      return saved;
     });
+    selectedId = row.id;
     return getPublic(row.id);
   }
 
   return { getPublic, save, getPrivate };
+}
+
+function credentialsHint(stored, field) {
+  return stored.credentialHints?.[field] || null;
 }
 
 module.exports = { createMeetingConfig };

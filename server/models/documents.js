@@ -156,6 +156,15 @@ const Document = {
       }
 
       try {
+        if (typeof metadata.workspaceOriginalId === "string") {
+          await require("../utils/workspaceOriginals")
+            .getWorkspaceOriginals()
+            .bind({
+              referenceId: metadata.workspaceOriginalId,
+              workspaceId: workspace.id,
+              docId,
+            });
+        }
         await prisma.workspace_documents.create({ data: newDoc });
         embedded.push(path);
         emitProgress(workspace.slug, {

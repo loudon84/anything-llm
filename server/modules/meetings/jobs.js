@@ -8,6 +8,7 @@ function createJobRunner({
   pollMs = 2000,
   leaseMs = 30_000,
   runnerId = crypto.randomUUID(),
+  audit = async () => {},
 } = {}) {
   if (!prisma?.meeting_jobs)
     throw new TypeError("createJobRunner requires a Prisma client");
@@ -36,7 +37,20 @@ function createJobRunner({
       quarter: identity.quarter ?? null,
     };
     try {
-      return await prisma.meeting_jobs.create({ data });
+      return await transaction(async (db) => {
+        const job = await db.meeting_jobs.create({ data });
+        await audit(
+          {
+            action: "MEETING_JOB_ENQUEUED",
+            jobId: job.id,
+            kind: data.kind,
+            meetingId: data.meetingId,
+            userId: identity.userId ?? null,
+          },
+          db
+        );
+        return job;
+      });
     } catch (error) {
       if (error.code === "P2002")
         throw new MeetingError(
@@ -190,7 +204,7 @@ function createJobRunner({
         }
       }
       try {
-        return await db.meeting_jobs.update({
+        const updated = await db.meeting_jobs.update({
           where: { id: job.id },
           data: {
             status: "CREATED",
@@ -201,6 +215,23 @@ function createJobRunner({
             leaseUntil: null,
           },
         });
+        await audit(
+          {
+            action: "MEETING_JOB_RETRY_QUEUED",
+            jobId: updated.id,
+            kind: updated.kind,
+            meetingId: updated.meetingId,
+            userId: (() => {
+              try {
+                return JSON.parse(job.payload || "{}").userId ?? null;
+              } catch {
+                return null;
+              }
+            })(),
+          },
+          db
+        );
+        return updated;
       } catch (error) {
         if (error.code === "P2002")
           throw new MeetingError(

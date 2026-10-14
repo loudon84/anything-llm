@@ -293,7 +293,7 @@ function createImporter({
             409
           );
         }
-        return db.meeting_jobs.create({
+        const job = await db.meeting_jobs.create({
           data: {
             kind: "IMPORT",
             meetingId: null,
@@ -310,6 +310,18 @@ function createImporter({
             leaseUntil: null,
           },
         });
+        await audit(
+          {
+            action: "MEETING_IMPORT_QUEUED",
+            jobId: job.id,
+            connectionId: normalizedConnectionId,
+            externalId: normalizedExternalId,
+            quarter,
+            userId: userId ?? null,
+          },
+          db
+        );
+        return job;
       });
     } catch (error) {
       if (error.code === "P2002")
@@ -485,12 +497,15 @@ function createImporter({
             leaseOwner: null,
             leaseUntil: null,
           });
+          await audit(
+            {
+              action: "MEETING_IMPORT_METADATA_ONLY",
+              meetingId: created.id,
+              userId: payload.userId ?? null,
+            },
+            tx
+          );
           return created;
-        });
-        await audit({
-          action: "MEETING_IMPORT_METADATA_ONLY",
-          meetingId: meeting.id,
-          userId: payload.userId ?? null,
         });
         return meeting;
       }
@@ -549,14 +564,17 @@ function createImporter({
           leaseOwner: null,
           leaseUntil: null,
         });
+        await audit(
+          {
+            action: "MEETING_IMPORT_COMMITTED",
+            meetingId: indexing.id,
+            userId: payload.userId ?? null,
+          },
+          tx
+        );
         return indexing;
       });
       rollbackCleanups.length = 0;
-      await audit({
-        action: "MEETING_IMPORT_COMMITTED",
-        meetingId: meeting.id,
-        userId: payload.userId ?? null,
-      });
       return meeting;
     } catch (error) {
       await Promise.allSettled(

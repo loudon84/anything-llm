@@ -607,6 +607,7 @@ function createQAService({
     }
     const publication = await transaction(async (db) => {
       let availabilityError = null;
+      let workspaceChanged = false;
       try {
         await currentMeetings(meetingIds, db);
       } catch (error) {
@@ -614,7 +615,21 @@ function createQAService({
         availabilityError = error;
       }
       const after = await snapshot(meetingIds, db);
-      if (availabilityError || digest(before) !== digest(after)) {
+      if (
+        !availabilityError &&
+        typeof workspaceRetriever.validateEvidence === "function"
+      )
+        workspaceChanged = !(await workspaceRetriever.validateEvidence({
+          workspaceIds,
+          userId,
+          evidence: workspaceEvidence,
+          db,
+        }));
+      if (
+        availabilityError ||
+        workspaceChanged ||
+        digest(before) !== digest(after)
+      ) {
         const stale = await db.meeting_answers.create({
           data: {
             conversationId: conversation.id,
@@ -628,7 +643,9 @@ function createQAService({
             previousAnswerId,
             error:
               availabilityError?.message ||
-              "Selected meeting source set or revision changed while generating the answer",
+              (workspaceChanged
+                ? "Selected Workspace document changed while generating the answer"
+                : "Selected meeting source set or revision changed while generating the answer"),
           },
         });
         await audit(
@@ -640,7 +657,7 @@ function createQAService({
           },
           db
         );
-        return { stale: true, availabilityError };
+        return { stale: true, availabilityError, workspaceChanged };
       }
       const row = await db.meeting_answers.create({
         data: {
@@ -673,10 +690,14 @@ function createQAService({
     if (publication.stale)
       throw new MeetingError(
         publication.availabilityError?.message ||
-          "Selected meeting source set or revision changed while generating the answer",
+          (publication.workspaceChanged
+            ? "Selected Workspace document changed while generating the answer"
+            : "Selected meeting source set or revision changed while generating the answer"),
         publication.availabilityError
           ? "MEETING_UNAVAILABLE"
-          : "MEETING_SOURCE_CHANGED",
+          : publication.workspaceChanged
+            ? "WORKSPACE_SOURCE_CHANGED"
+            : "MEETING_SOURCE_CHANGED",
         409
       );
     const row = publication.row;

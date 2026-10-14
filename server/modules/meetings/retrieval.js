@@ -1,6 +1,10 @@
 const { MeetingError } = require("./errors");
 
-function createWorkspaceRetriever({ lookupWorkspace, searchWorkspace } = {}) {
+function createWorkspaceRetriever({
+  lookupWorkspace,
+  searchWorkspace,
+  lookupDocument,
+} = {}) {
   if (
     typeof lookupWorkspace !== "function" ||
     typeof searchWorkspace !== "function"
@@ -70,6 +74,15 @@ function createWorkspaceRetriever({ lookupWorkspace, searchWorkspace } = {}) {
           quote,
           location: item.location ?? null,
           sourceType: "WORKSPACE",
+          documentId:
+            String(
+              item.documentId ?? item.docId ?? item.metadata?.docId ?? ""
+            ) || null,
+          revision:
+            item.revision ??
+            item.lastUpdatedAt ??
+            item.metadata?.lastUpdatedAt ??
+            null,
           score: Number.isFinite(Number(item.score))
             ? Number(item.score)
             : null,
@@ -83,7 +96,53 @@ function createWorkspaceRetriever({ lookupWorkspace, searchWorkspace } = {}) {
     return results;
   }
 
-  return { resolve, search };
+  async function validateEvidence({ workspaceIds, userId, evidence, db } = {}) {
+    const workspaces = await resolve({ workspaceIds, userId });
+    const scoped = (evidence || []).filter(
+      (item) => item.sourceType === "WORKSPACE"
+    );
+    if (!scoped.length) return true;
+    const workspaceById = new Map(
+      workspaces.map((workspace) => [Number(workspace.id), workspace])
+    );
+    for (const item of scoped) {
+      const workspace = workspaceById.get(Number(item.workspaceId));
+      if (!workspace || !item.documentId || !item.revision) return false;
+      let document;
+      if (typeof lookupDocument === "function") {
+        document = await lookupDocument({
+          workspace,
+          userId,
+          documentId: item.documentId,
+          db,
+        });
+      } else if (typeof db?.workspace_documents?.findFirst === "function") {
+        document = await db.workspace_documents.findFirst({
+          where: {
+            workspaceId: Number(item.workspaceId),
+            docId: String(item.documentId),
+          },
+        });
+      } else {
+        throw new MeetingError(
+          "Workspace document membership validation is not configured",
+          "WORKSPACE_VALIDATION_UNAVAILABLE",
+          503
+        );
+      }
+      const currentRevision = document?.lastUpdatedAt ?? document?.revision;
+      if (
+        !document ||
+        !currentRevision ||
+        new Date(currentRevision).getTime() !==
+          new Date(item.revision).getTime()
+      )
+        return false;
+    }
+    return true;
+  }
+
+  return { resolve, search, validateEvidence };
 }
 
 module.exports = { createWorkspaceRetriever };

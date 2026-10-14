@@ -48,10 +48,14 @@ class CollectorApi {
     return this.DEFAULT_COLLECTOR_PORT;
   }
 
-  constructor() {
+  constructor({ originalRetention = null, fetchImpl = null } = {}) {
     const { CommunicationKey } = require("../comKey");
     this.comkey = new CommunicationKey();
     this.endpoint = `http://0.0.0.0:${CollectorApi.getCollectorPort()}`;
+    this.originalRetention =
+      originalRetention ||
+      require("../workspaceOriginals").getWorkspaceOriginals();
+    this.fetchImpl = fetchImpl || fetch;
   }
 
   log(text, ...args) {
@@ -111,34 +115,49 @@ class CollectorApi {
    */
   async processDocument(filename = "", metadata = {}) {
     if (!filename) return false;
-
+    let retained;
+    try {
+      retained = await this.originalRetention.retain(filename);
+    } catch (e) {
+      this.log(e.message);
+      return { success: false, reason: e.message, documents: [] };
+    }
     const data = JSON.stringify({
       filename,
       metadata,
       options: this.#attachOptions(),
     });
 
-    return await fetch(`${this.endpoint}/process`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Integrity": this.comkey.sign(data),
-        "X-Payload-Signer": this.comkey.encrypt(
-          new EncryptionManager().xPayload
-        ),
-      },
-      body: data,
-      dispatcher: new Agent({ headersTimeout: 600000 }),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error("Response could not be completed");
-        return res.json();
-      })
-      .then((res) => res)
-      .catch((e) => {
-        this.log(e.message);
-        return { success: false, reason: e.message, documents: [] };
+    try {
+      const response = await this.fetchImpl(`${this.endpoint}/process`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Integrity": this.comkey.sign(data),
+          "X-Payload-Signer": this.comkey.encrypt(
+            new EncryptionManager().xPayload
+          ),
+        },
+        body: data,
+        dispatcher: new Agent({ headersTimeout: 600000 }),
       });
+      if (!response.ok) throw new Error("Response could not be completed");
+      const result = await response.json();
+      if (
+        !result?.success ||
+        !Array.isArray(result.documents) ||
+        !result.documents.length
+      ) {
+        await retained.cleanup();
+        return result;
+      }
+      result.documents = await retained.attach(result.documents);
+      return result;
+    } catch (e) {
+      await retained.cleanup().catch(() => {});
+      this.log(e.message);
+      return { success: false, reason: e.message, documents: [] };
+    }
   }
 
   /**

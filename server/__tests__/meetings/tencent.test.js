@@ -138,6 +138,82 @@ describe("Tencent Meeting connector", () => {
     expect(JSON.stringify(auditEntries)).not.toContain("secret-key");
   });
 
+  test("encrypts OCR tokens, preserves blank updates, exposes current parser settings, and rolls back on audit failure", async () => {
+    const rows = [];
+    const prisma = {
+      meeting_connections: { findFirst: async () => rows[0] || null },
+    };
+    prisma.$transaction = async (callback) => {
+      const pending = [...rows];
+      const tx = {
+        meeting_connections: {
+          upsert: async ({ create, update }) => {
+            pending[0] = { id: 1, ...create, ...(pending[0] ? update : {}) };
+            return pending[0];
+          },
+        },
+      };
+      const result = await callback(tx);
+      rows.splice(0, rows.length, ...pending);
+      return result;
+    };
+    const encryption = {
+      encrypt: (value) => Buffer.from(value).toString("base64"),
+      decrypt: (value) => Buffer.from(value, "base64").toString(),
+    };
+    const service = createMeetingConfig({ prisma, encryption });
+    await service.save(
+      {
+        id: 1,
+        appId: "app",
+        secretId: "id",
+        secretKey: "key",
+        services: {
+          ocr: {
+            url: "https://ocr.example/parse",
+            token: "synthetic-ocr-secret",
+          },
+        },
+      },
+      7
+    );
+    expect(await service.getPublic()).toMatchObject({
+      services: { ocr: { url: "https://ocr.example/parse", configured: true } },
+    });
+    expect(JSON.stringify(await service.getPublic())).not.toContain(
+      "synthetic-ocr-secret"
+    );
+    await service.save(
+      {
+        id: 1,
+        services: { ocr: { url: "https://ocr.example/parse", token: "" } },
+      },
+      7
+    );
+    expect(await service.getPrivate()).toMatchObject({
+      services: {
+        ocr: {
+          url: "https://ocr.example/parse",
+          token: "synthetic-ocr-secret",
+        },
+      },
+    });
+    expect(JSON.stringify(rows[0].config)).not.toContain(
+      "synthetic-ocr-secret"
+    );
+    const failing = createMeetingConfig({
+      prisma,
+      encryption,
+      audit: async () => {
+        throw new Error("audit unavailable");
+      },
+    });
+    await expect(
+      failing.save({ id: 1, name: "must rollback" }, 7)
+    ).rejects.toThrow("audit unavailable");
+    expect(rows[0].name).toBe("Tencent Meeting");
+  });
+
   const connectorConfig = (capabilities = {}) => ({
     secretId: "id", secretKey: "key", appId: "app", userId: "u", operatorId: "u", capabilities,
   });

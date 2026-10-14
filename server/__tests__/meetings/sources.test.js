@@ -4,6 +4,9 @@ const path = require("path");
 const { PrismaClient } = require("@prisma/client");
 const { createSourceService } = require("../../modules/meetings/sources");
 const { createIndexer } = require("../../modules/meetings/indexer");
+const {
+  createMeetingService,
+} = require("../../modules/meetings/meetingService");
 
 const meetingData = (connectionId, externalId = "source-test") => ({
   connectionId,
@@ -69,6 +72,7 @@ describe("meeting source identity and lifecycle", () => {
     return createSourceService({
       prisma,
       storageRoot,
+      trustedUploadRoot: directory,
       parser: {
         parse: async () => [
           {
@@ -188,6 +192,84 @@ describe("meeting source identity and lifecycle", () => {
     ).toBe(true);
     expect(path.basename(source.filePath)).not.toContain("outside");
     expect(fs.readFileSync(source.filePath, "utf8")).toBe("safe");
+    const archivedParts = path
+      .relative(storageRoot, source.filePath)
+      .split(path.sep);
+    expect(archivedParts).toHaveLength(3);
+    expect(archivedParts.slice(0, 2)).toEqual(["2026-Q2", String(meetingId)]);
+    expect(archivedParts[2]).toMatch(/^[0-9a-f-]{36}\.txt$/i);
+  });
+
+  test("allows approved supplemental-text deletion with downgrade and archives its content", async () => {
+    const filePath = path.join(storageRoot, "archive.txt");
+    fs.mkdirSync(storageRoot, { recursive: true });
+    fs.writeFileSync(filePath, "archive bytes");
+    const source = await prisma.meeting_sources.create({
+      data: {
+        meetingId,
+        sourceType: "SUPPLEMENT_TEXT",
+        name: "notes",
+        contentHash: "archive",
+        activeHash: "archive",
+        contentText: "Retained decision",
+        filePath,
+        parseStatus: "SUCCESS",
+      },
+    });
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: { reviewStatus: "APPROVED", retrievalStatus: "AVAILABLE" },
+    });
+    const sources = service();
+    await sources.remove(meetingId, source.id, 7);
+    expect(fs.readFileSync(filePath, "utf8")).toBe("archive bytes");
+    await expect(sources.getSource(meetingId, source.id)).rejects.toMatchObject(
+      { code: "SOURCE_NOT_FOUND" }
+    );
+    expect(await sources.getArchivedSource(meetingId, source.id)).toMatchObject(
+      { deleted: true, contentText: "Retained decision" }
+    );
+    expect(
+      await prisma.meetings.findUnique({ where: { id: meetingId } })
+    ).toMatchObject({ reviewStatus: "DRAFT", retrievalStatus: "INDEXING" });
+  });
+
+  test("rejects approved file deletion without changing review state or removing its original", async () => {
+    const source = await service().upload(
+      meetingId,
+      { name: "archive.txt", buffer: Buffer.from("keep") },
+      7
+    );
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: { reviewStatus: "APPROVED" },
+    });
+    await expect(
+      service().remove(meetingId, source.id, 7)
+    ).rejects.toMatchObject({ code: "SOURCE_IMMUTABLE" });
+    expect(fs.readFileSync(source.filePath, "utf8")).toBe("keep");
+    expect(
+      await prisma.meetings.findUnique({ where: { id: meetingId } })
+    ).toMatchObject({ reviewStatus: "APPROVED" });
+  });
+
+  test("streams a trusted temporary upload and deduplicates it against the buffer contract", async () => {
+    const tempPath = path.join(directory, "server-issued-upload.txt");
+    fs.writeFileSync(tempPath, "identical bytes");
+    const sources = service();
+    const streamed = await sources.upload(
+      meetingId,
+      { name: "stream.txt", tempPath },
+      7
+    );
+    expect(fs.readFileSync(streamed.filePath, "utf8")).toBe("identical bytes");
+    await expect(
+      sources.upload(
+        meetingId,
+        { name: "buffer.txt", buffer: Buffer.from("identical bytes") },
+        7
+      )
+    ).rejects.toMatchObject({ code: "SOURCE_DUPLICATE" });
   });
 
   test("deleting the last source pauses retrieval and queues cleanup without erasing history", async () => {
@@ -654,6 +736,107 @@ describe("meeting source identity and lifecycle", () => {
       type: "paragraph",
       paragraph: 0,
     });
+  });
+
+  test("metadata-only meetings become searchable after manual summary entry and clearing the last summary removes old evidence", async () => {
+    const meetings = createMeetingService({ prisma });
+    const revised = await meetings.revise(
+      meetingId,
+      { summary: "Manual decision" },
+      7
+    );
+    const sourceService = service();
+    let job = await prisma.meeting_jobs.findFirst({
+      where: { meetingId, kind: "REINDEX" },
+    });
+    await sourceService.process(job);
+    expect(
+      await prisma.meetings.findUnique({ where: { id: meetingId } })
+    ).toMatchObject({ retrievalStatus: "AVAILABLE" });
+    const indexer = createIndexer({
+      prisma,
+      embedder: {
+        embedQuery: async () => [1, 0],
+        embedDocuments: async (texts) => texts.map(() => [1, 0]),
+      },
+    });
+    expect(
+      (await indexer.search([meetingId], "decision")).map((item) => item.quote)
+    ).toEqual(["Manual decision"]);
+    await meetings.revise(revised.id, { summary: "" }, 7);
+    job = await prisma.meeting_jobs.findFirst({
+      where: {
+        meetingId,
+        kind: "REINDEX",
+        status: "CREATED",
+        id: { not: job.id },
+      },
+    });
+    await sourceService.process(job);
+    expect(
+      await prisma.meetings.findUnique({ where: { id: meetingId } })
+    ).toMatchObject({ retrievalStatus: "WAITING_CONTENT", summary: "" });
+    expect(await prisma.meeting_chunks.count({ where: { meetingId } })).toBe(0);
+  });
+
+  test("manual profile rebuild restores search after mismatch without using old vectors", async () => {
+    const source = await prisma.meeting_sources.create({
+      data: {
+        meetingId,
+        sourceType: "SUPPLEMENT_TEXT",
+        name: "notes",
+        contentHash: "profile-source",
+        activeHash: "profile-source",
+        contentText: "Rebuild decision",
+        segments: JSON.stringify([
+          {
+            text: "Rebuild decision",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+        parseStatus: "SUCCESS",
+      },
+    });
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: { generation: 3, retrievalStatus: "AVAILABLE" },
+    });
+    await prisma.meeting_chunks.create({
+      data: {
+        meetingId,
+        sourceId: source.id,
+        text: "Rebuild decision",
+        location: "{}",
+        embedding: JSON.stringify({ profileId: "model-a", vector: [1, 0] }),
+        generation: 3,
+      },
+    });
+    const currentIndexer = createIndexer({
+      prisma,
+      embedder: {
+        profileId: "model-b",
+        embedQuery: async () => [1, 0],
+        embedDocuments: async (texts) => texts.map(() => [1, 0]),
+      },
+    });
+    await expect(
+      currentIndexer.search([meetingId], "decision")
+    ).rejects.toMatchObject({ code: "EMBEDDING_PROFILE_MISMATCH" });
+    const job = await createMeetingService({ prisma }).requestReindex(
+      meetingId,
+      7,
+      currentIndexer.profileId
+    );
+    await service({ indexer: currentIndexer }).process(job);
+    expect(await currentIndexer.search([meetingId], "decision")).toHaveLength(
+      1
+    );
+    expect(
+      JSON.parse(
+        (await prisma.meeting_chunks.findFirst({ where: { meetingId } }))
+          .embedding
+      ).profileId
+    ).toBe("model-b");
   });
 
   test("keeps the last-source deletion blocked when the next upload fails", async () => {

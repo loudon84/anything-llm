@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
+const fsSync = require("fs");
 const path = require("path");
 const { MeetingError } = require("./errors");
 const { LIMITS, RETRIEVAL } = require("./constants");
@@ -44,11 +45,38 @@ const asSegments = (value, transcript = false) =>
         : { type: "paragraph", paragraph },
     }));
 
+function meetingStorageDirectory(storageRoot, meeting) {
+  if (
+    !/^\d{4}-Q[1-4]$/.test(String(meeting?.quarter || "")) ||
+    !Number.isSafeInteger(Number(meeting?.id)) ||
+    Number(meeting.id) <= 0
+  )
+    throw new MeetingError(
+      "Meeting archive identity is invalid",
+      "INVALID_MEETING_ARCHIVE_ID",
+      500
+    );
+  const directory = path.resolve(
+    storageRoot,
+    meeting.quarter,
+    String(meeting.id)
+  );
+  const relative = path.relative(path.resolve(storageRoot), directory);
+  if (relative.startsWith("..") || path.isAbsolute(relative))
+    throw new MeetingError(
+      "Meeting archive path escaped storage",
+      "INVALID_MEETING_ARCHIVE_ID",
+      500
+    );
+  return directory;
+}
+
 function createSourceService({
   prisma,
   parser,
   indexer,
   storageRoot = path.join(process.cwd(), "storage", "meetings"),
+  trustedUploadRoot = null,
   audit = async () => {},
 } = {}) {
   if (!prisma || !parser || !indexer)
@@ -59,10 +87,8 @@ function createSourceService({
   const transaction = (callback) =>
     prisma.$transaction ? prisma.$transaction(callback) : callback(prisma);
 
-  async function recordAudit(event) {
-    await Promise.resolve()
-      .then(() => audit(event))
-      .catch(() => {});
+  async function recordAudit(event, tx) {
+    await audit(event, tx);
   }
 
   async function currentMeeting(db, meetingId) {
@@ -77,6 +103,21 @@ function createSourceService({
       throw new MeetingError("Meeting not found", "MEETING_NOT_FOUND", 404);
     }
     return meeting;
+  }
+
+  async function cleanupTrustedTemp(inputPath) {
+    if (!trustedUploadRoot || typeof inputPath !== "string") return;
+    const root = path.resolve(trustedUploadRoot);
+    const candidate = path.resolve(inputPath);
+    const relative = path.relative(root, candidate);
+    if (
+      relative === "" ||
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    )
+      return;
+    await fs.rm(candidate, { force: true }).catch(() => {});
   }
 
   async function ensureSupplementAllowed(db, meetingId) {
@@ -192,14 +233,56 @@ function createSourceService({
     name,
     sourceType,
     buffer,
+    filePathInput,
     text,
     userId,
   }) {
-    await ensureSupplementAllowed(prisma, meetingId);
-    const raw = buffer || Buffer.from(text, "utf8");
-    const bytes = raw.byteLength;
-    const contentHash = hash(raw);
-    if (buffer && bytes > MAX_SOURCE_BYTES)
+    const initialMeeting = await ensureSupplementAllowed(prisma, meetingId);
+    const raw = buffer || (text == null ? null : Buffer.from(text, "utf8"));
+    let bytes = raw?.byteLength || 0;
+    let contentHash;
+    if (filePathInput) {
+      if (!trustedUploadRoot)
+        throw new MeetingError(
+          "Trusted multipart upload storage is not configured",
+          "SOURCE_INPUT_INVALID",
+          500
+        );
+      const [realRoot, realInput] = await Promise.all([
+        fs.realpath(trustedUploadRoot),
+        fs.realpath(filePathInput),
+      ]);
+      const relative = path.relative(realRoot, realInput);
+      if (
+        relative === "" ||
+        relative === ".." ||
+        relative.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relative)
+      )
+        throw new MeetingError(
+          "Temporary upload is outside the trusted upload directory",
+          "SOURCE_INPUT_INVALID"
+        );
+      filePathInput = realInput;
+      const stat = await fs.stat(filePathInput).catch(() => null);
+      if (!stat?.isFile())
+        throw new MeetingError(
+          "Temporary upload is unavailable",
+          "SOURCE_INPUT_INVALID"
+        );
+      bytes = stat.size;
+      if (bytes > MAX_SOURCE_BYTES)
+        throw new MeetingError(
+          "A source file cannot exceed 100 MB",
+          "SOURCE_FILE_TOO_LARGE",
+          413
+        );
+      const digest = crypto.createHash("sha256");
+      for await (const chunk of fsSync.createReadStream(filePathInput))
+        digest.update(chunk);
+      contentHash = digest.digest("hex");
+    } else contentHash = hash(raw);
+    if ((buffer || filePathInput) && bytes > MAX_SOURCE_BYTES)
       throw new MeetingError(
         "A source file cannot exceed 100 MB",
         "SOURCE_FILE_TOO_LARGE",
@@ -207,22 +290,42 @@ function createSourceService({
       );
     let filePath = null;
     let savedFilePath = null;
-    if (buffer) {
+    if (buffer || filePathInput) {
       const extension = path.extname(name).toLowerCase();
       if (!UPLOAD_EXTENSIONS.has(extension))
         throw new MeetingError(
           `Unsupported source format: ${extension || "unknown"}`,
           "SOURCE_FORMAT_UNSUPPORTED"
         );
-      filePath = path.join(storageRoot, `${crypto.randomUUID()}${extension}`);
+      filePath = path.join(
+        meetingStorageDirectory(storageRoot, initialMeeting),
+        `${crypto.randomUUID()}${extension}`
+      );
       savedFilePath = filePath;
-      await fs.mkdir(storageRoot, { recursive: true });
-      await fs.writeFile(filePath, buffer, { flag: "wx", mode: 0o600 });
+      try {
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        if (buffer)
+          await fs.writeFile(filePath, buffer, { flag: "wx", mode: 0o600 });
+        else
+          await fs.copyFile(
+            filePathInput,
+            filePath,
+            fsSync.constants.COPYFILE_EXCL
+          );
+      } catch (error) {
+        await fs.rm(filePath, { force: true }).catch(() => {});
+        throw error;
+      }
     }
     try {
       const source = await transaction(async (tx) => {
         const current = await ensureSupplementAllowed(tx, meetingId);
-        await checkLimits(tx, current.id, bytes, Boolean(buffer));
+        await checkLimits(
+          tx,
+          current.id,
+          bytes,
+          Boolean(buffer || filePathInput)
+        );
         const duplicate = await tx.meeting_sources.findFirst({
           where: { meetingId: current.id, activeHash: contentHash },
         });
@@ -257,19 +360,23 @@ function createSourceService({
             where: { id: current.id },
             data: { reviewStatus: "DRAFT", reviewedBy: null, reviewedAt: null },
           });
+        await recordAudit(
+          {
+            action: "MEETING_SOURCE_ADDED",
+            meetingId: source.meetingId,
+            sourceId: source.id,
+            sourceType: source.sourceType,
+            userId: userId ?? null,
+          },
+          tx
+        );
         return source;
-      });
-      await recordAudit({
-        action: "MEETING_SOURCE_ADDED",
-        meetingId: source.meetingId,
-        sourceId: source.id,
-        sourceType: source.sourceType,
-        userId: userId ?? null,
       });
       return source;
     } catch (error) {
       if (savedFilePath)
         await fs.rm(savedFilePath, { force: true }).catch(() => {});
+      if (filePathInput) await cleanupTrustedTemp(filePathInput);
       if (
         error.code === "P2002" ||
         (await prisma.meeting_sources.findFirst({
@@ -287,18 +394,28 @@ function createSourceService({
   }
 
   async function upload(meetingId, file, userId) {
-    if (!file || typeof file.name !== "string" || !Buffer.isBuffer(file.buffer))
+    if (
+      !file ||
+      typeof file.name !== "string" ||
+      (!Buffer.isBuffer(file.buffer) && typeof file.tempPath !== "string")
+    )
       throw new MeetingError(
         "A named source file is required",
         "SOURCE_INPUT_INVALID"
       );
-    return persistSupplement({
-      meetingId,
-      name: file.name,
-      sourceType: "SUPPLEMENT_FILE",
-      buffer: file.buffer,
-      userId,
-    });
+    try {
+      return await persistSupplement({
+        meetingId,
+        name: file.name,
+        sourceType: "SUPPLEMENT_FILE",
+        buffer: file.buffer,
+        filePathInput: file.tempPath,
+        userId,
+      });
+    } catch (error) {
+      if (file.tempPath) await cleanupTrustedTemp(file.tempPath);
+      throw error;
+    }
   }
 
   async function addText(meetingId, { name, text }, userId) {
@@ -316,7 +433,7 @@ function createSourceService({
   async function getSource(meetingId, sourceId) {
     const meeting = await currentMeeting(prisma, meetingId);
     const source = await prisma.meeting_sources.findFirst({
-      where: { id: Number(sourceId), meetingId: meeting.id },
+      where: { id: Number(sourceId), meetingId: meeting.id, deletedAt: null },
     });
     if (!source)
       throw new MeetingError(
@@ -327,16 +444,32 @@ function createSourceService({
     return source;
   }
 
+  async function getArchivedSource(meetingId, sourceId) {
+    const source = await prisma.meeting_sources.findFirst({
+      where: { id: Number(sourceId), meetingId: Number(meetingId) },
+    });
+    if (!source)
+      throw new MeetingError(
+        "Meeting source not found",
+        "SOURCE_NOT_FOUND",
+        404
+      );
+    const meeting = await prisma.meetings.findUnique({
+      where: { id: Number(meetingId) },
+    });
+    return {
+      ...source,
+      deleted: Boolean(source.deletedAt),
+      meetingDeleted: Boolean(
+        meeting?.deletedAt || meeting?.retrievalStatus === RETRIEVAL.DELETED
+      ),
+      readOnly: true,
+    };
+  }
+
   async function remove(meetingId, sourceId, userId) {
-    let removedPath = null;
     const result = await transaction(async (tx) => {
       const meeting = await currentMeeting(tx, meetingId);
-      if (meeting.reviewStatus !== "DRAFT")
-        throw new MeetingError(
-          "Only draft meeting sources can be deleted",
-          "MEETING_IMMUTABLE",
-          409
-        );
       const source = await tx.meeting_sources.findFirst({
         where: { id: Number(sourceId), meetingId: meeting.id, deletedAt: null },
       });
@@ -354,7 +487,24 @@ function createSourceService({
           "SOURCE_IMMUTABLE",
           409
         );
-      removedPath = source.filePath;
+      if (
+        source.sourceType === "SUPPLEMENT_FILE" &&
+        meeting.reviewStatus !== "DRAFT"
+      )
+        throw new MeetingError(
+          "Approved supplemental files are read-only",
+          "SOURCE_IMMUTABLE",
+          409
+        );
+      if (
+        source.sourceType === "SUPPLEMENT_TEXT" &&
+        !["DRAFT", "APPROVED"].includes(meeting.reviewStatus)
+      )
+        throw new MeetingError(
+          "Meeting text cannot be deleted in its current state",
+          "MEETING_IMMUTABLE",
+          409
+        );
       const deletedAt = new Date();
       await tx.meeting_sources.update({
         where: { id: source.id },
@@ -363,7 +513,14 @@ function createSourceService({
       const generation = Number(meeting.generation || 0) + 1;
       const updated = await tx.meetings.update({
         where: { id: meeting.id },
-        data: { generation, retrievalStatus: RETRIEVAL.INDEXING },
+        data: {
+          generation,
+          retrievalStatus: RETRIEVAL.INDEXING,
+          ...(source.sourceType === "SUPPLEMENT_TEXT" &&
+          meeting.reviewStatus === "APPROVED"
+            ? { reviewStatus: "DRAFT", reviewedBy: null, reviewedAt: null }
+            : {}),
+        },
       });
       await tx.meeting_jobs.create({
         data: {
@@ -378,24 +535,27 @@ function createSourceService({
           attempts: 0,
         },
       });
-      return {
+      const output = {
         source: { ...source, deletedAt, activeHash: null },
         meeting: updated,
         generation,
       };
-    });
-    if (removedPath) await fs.rm(removedPath, { force: true }).catch(() => {});
-    await recordAudit({
-      action: "MEETING_SOURCE_DELETED",
-      meetingId: result.meeting.id,
-      sourceId: result.source.id,
-      userId: userId ?? null,
-      generation: result.generation,
+      await recordAudit(
+        {
+          action: "MEETING_SOURCE_DELETED",
+          meetingId: updated.id,
+          sourceId: source.id,
+          userId: userId ?? null,
+          generation,
+        },
+        tx
+      );
+      return output;
     });
     return result.source;
   }
 
-  async function retry(sourceId) {
+  async function retry(sourceId, userId) {
     return transaction(async (tx) => {
       const source = await tx.meeting_sources.findUnique({
         where: { id: Number(sourceId) },
@@ -412,6 +572,15 @@ function createSourceService({
         data: { parseStatus: "PENDING", error: null },
       });
       await createParseJob(tx, meeting, pending);
+      await recordAudit(
+        {
+          action: "MEETING_SOURCE_RETRY_QUEUED",
+          meetingId: meeting.id,
+          sourceId: source.id,
+          userId: userId ?? null,
+        },
+        tx
+      );
       return pending;
     });
   }
@@ -544,7 +713,10 @@ function createSourceService({
               sourceId,
               text: chunk.text,
               location: JSON.stringify(chunk.location),
-              embedding: JSON.stringify(chunk.embedding),
+              embedding: JSON.stringify({
+                profileId: indexer.profileId || "default",
+                vector: chunk.embedding,
+              }),
               generation: currentMeeting.generation,
             },
           });
@@ -598,15 +770,17 @@ function createSourceService({
           });
           await queueReindexForSourceSet(tx, currentMeeting, activeSources);
         }
+        await recordAudit(
+          {
+            action: "MEETING_SOURCE_INDEXED",
+            meetingId: currentMeeting.id,
+            sourceId,
+            chunkCount: chunks.length,
+          },
+          tx
+        );
         return { stale: false, sourceId, chunkCount: chunks.length };
       });
-      if (!result.stale)
-        await recordAudit({
-          action: "MEETING_SOURCE_INDEXED",
-          meetingId: meeting.id,
-          sourceId,
-          chunkCount: chunks.length,
-        });
       return result;
     } catch (error) {
       const failureResult = await transaction(async (tx) => {
@@ -680,16 +854,18 @@ function createSourceService({
             },
           });
         }
+        await recordAudit(
+          {
+            action: "MEETING_SOURCE_FAILED",
+            meetingId: currentMeeting.id,
+            sourceId,
+            code: error?.code || "SOURCE_PROCESSING_FAILED",
+          },
+          tx
+        );
         return { recorded: true };
       });
       if (!failureResult.recorded) return failureResult;
-      if (failureResult.recorded)
-        await recordAudit({
-          action: "MEETING_SOURCE_FAILED",
-          meetingId: meeting.id,
-          sourceId,
-          error: errorText(error),
-        });
       throw error;
     }
   }
@@ -869,10 +1045,10 @@ function createSourceService({
         if (item.buffer) {
           const extension = path.extname(item.name).toLowerCase();
           filePath = path.join(
-            storageRoot,
+            meetingStorageDirectory(storageRoot, meeting),
             `${crypto.randomUUID()}${extension}`
           );
-          await fs.mkdir(storageRoot, { recursive: true });
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
           await fs.writeFile(filePath, item.buffer, {
             flag: "wx",
             mode: 0o600,
@@ -918,7 +1094,10 @@ function createSourceService({
               sourceId: source.id,
               text: chunk.text,
               location: JSON.stringify(chunk.location),
-              embedding: JSON.stringify(chunk.embedding),
+              embedding: JSON.stringify({
+                profileId: indexer.profileId || "default",
+                vector: chunk.embedding,
+              }),
               generation: meeting.generation,
             },
           });
@@ -952,6 +1131,7 @@ function createSourceService({
     prepareImport,
     commitImport,
     getSource,
+    getArchivedSource,
   };
 }
 

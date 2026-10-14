@@ -143,6 +143,61 @@ describe("meeting persistence lifecycle", () => {
     });
   });
 
+  test("revision creates indexable sources for manually supplied text and rejects non-string values", async () => {
+    const { db, state } = fakePrisma();
+    const service = createMeetingService({ prisma: db });
+    const meeting = await service.createMetadata(metadata("manual-source"), 5);
+    await expect(
+      service.revise(meeting.id, { summary: { unexpected: true } }, 5)
+    ).rejects.toMatchObject({ code: "INVALID_REVISION" });
+    await service.revise(
+      meeting.id,
+      { summary: "Decision one\nDecision two" },
+      5
+    );
+    expect(state.meeting_sources).toHaveLength(1);
+    expect(state.meeting_sources[0]).toMatchObject({
+      sourceType: "SUMMARY",
+      parseStatus: "SUCCESS",
+      contentText: "Decision one\nDecision two",
+    });
+    expect(JSON.parse(state.meeting_sources[0].segments)).toEqual([
+      { text: "Decision one", location: { type: "paragraph", paragraph: 0 } },
+      { text: "Decision two", location: { type: "paragraph", paragraph: 1 } },
+    ]);
+  });
+
+  test("queues a profile rebuild without changing meeting review state", async () => {
+    const { db, state } = fakePrisma();
+    const service = createMeetingService({ prisma: db });
+    const meeting = await service.createMetadata(
+      metadata("profile-rebuild"),
+      5
+    );
+    Object.assign(meeting, {
+      retrievalStatus: "AVAILABLE",
+      reviewStatus: "APPROVED",
+      generation: 3,
+    });
+    const job = await service.requestReindex(meeting.id, 5, "model-b");
+    expect(job).toMatchObject({
+      kind: "REINDEX",
+      status: "CREATED",
+      meetingId: meeting.id,
+    });
+    expect(JSON.parse(job.payload)).toMatchObject({
+      generation: 4,
+      profileId: "model-b",
+      manual: true,
+    });
+    expect(meeting).toMatchObject({
+      generation: 4,
+      retrievalStatus: "INDEXING",
+      reviewStatus: "APPROVED",
+    });
+    expect(state.meeting_jobs).toHaveLength(1);
+  });
+
   test("allows approval after a failed supplemental source was deleted and cleanup completed", async () => {
     const { db, state } = fakePrisma();
     const service = createMeetingService({ prisma: db });
@@ -278,6 +333,23 @@ describe("meeting creation with real SQLite transactions", () => {
       )
     ).rejects.toMatchObject({ code: "INVALID_CONNECTION_ID" });
     expect(await prisma.meetings.count()).toBe(0);
+  });
+
+  test("rolls back meeting creation when its transactional audit write fails", async () => {
+    const auditedService = createMeetingService({
+      prisma,
+      audit: async () => {
+        throw new Error("audit unavailable");
+      },
+    });
+    await expect(
+      auditedService.createMetadata(databaseMetadata("audit-rollback"), 5)
+    ).rejects.toThrow("audit unavailable");
+    expect(
+      await prisma.meetings.count({
+        where: { activeKey: `${connectionId}:audit-rollback` },
+      })
+    ).toBe(0);
   });
 
   test("rejects an empty or non-string external meeting ID", async () => {
