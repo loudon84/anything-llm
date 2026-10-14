@@ -188,6 +188,10 @@ describe("located meeting source parsing", () => {
       ok: true,
       json: async () => ({
         segments: [
+          {
+            text: "First scanned-page decision",
+            location: { type: "page", page: 2 },
+          },
           { text: "Scanned appendix", location: { type: "page", page: 2 } },
         ],
       }),
@@ -201,6 +205,10 @@ describe("located meeting source parsing", () => {
     });
     expect(result).toEqual([
       { text: "Native PDF decision", location: { type: "page", page: 1 } },
+      {
+        text: "First scanned-page decision",
+        location: { type: "page", page: 2 },
+      },
       { text: "Scanned appendix", location: { type: "page", page: 2 } },
     ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);

@@ -44,3 +44,9 @@ PPTX parsing now follows slide relationships to embedded images and sends each i
 - GREEN: `npx jest server/__tests__/meetings --runInBand` — 7 suites, 84 tests passed, including Tencent importer and lifecycle regressions.
 - Scoped ESLint passed for parser, indexer, sources, and importer. Targeted Prettier checks and `git diff --check` passed.
 - Runtime extension: `createIndexer().reindex(meetingId, { job })` accepts the durable runner job to guard publication by lease. `commitImport(tx, meeting, prepared, { onRollback })` registers cleanup with the importer's outer transaction; the three-argument call remains valid when the caller owns rollback cleanup.
+
+### Rereview follow-up: multiple OCR segments per PDF page
+
+- RED: the mixed text/scanned PDF fixture returned two located OCR segments for page 2; before the fix, parsing retained only the last one.
+- GREEN: `npx jest server/__tests__/meetings/parser.test.js server/__tests__/meetings/sources.test.js --runInBand` — 2 suites, 29 tests passed. The parser now groups OCR results into ordered arrays by page and expands all segments for each textless page; missing-page and format-location validation remain enforced.
+- Scoped ESLint, targeted Prettier, and `git diff --check` passed for the parser change.

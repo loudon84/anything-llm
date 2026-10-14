@@ -395,13 +395,17 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
             "page",
             segments.length
           );
-          const byPage = new Map(
-            remote.map((segment) => [segment.location.page, segment])
-          );
+          const byPage = new Map();
+          for (const segment of remote) {
+            const page = segment.location.page;
+            const pageSegments = byPage.get(page) || [];
+            pageSegments.push(segment);
+            byPage.set(page, pageSegments);
+          }
           for (const segment of segments) {
             const page = segment.location.page;
-            const extracted = byPage.get(page);
-            if (!segment.text.trim() && !extracted) {
+            const extracted = byPage.get(page) || [];
+            if (!segment.text.trim() && !extracted.length) {
               throw new MeetingError(
                 `OCR/document parser did not return scanned PDF page ${page}`,
                 "PARSER_RESPONSE_INVALID",
@@ -409,8 +413,10 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
               );
             }
           }
-          segments = segments.map((segment) =>
-            segment.text.trim() ? segment : byPage.get(segment.location.page)
+          segments = segments.flatMap((segment) =>
+            segment.text.trim()
+              ? [segment]
+              : byPage.get(segment.location.page) || []
           );
         }
         segments = segments.filter((segment) => segment.text.trim());
