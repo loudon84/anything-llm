@@ -45,3 +45,16 @@ For this review batch, new regressions were first run red: genuine flat-document
 - Scoped ESLint for changed service modules, Prettier check for formatted changed code/tests/report, and `git diff --check` for Task 5a files — passed. The existing Tencent test file retains its prior formatting to keep the review diff limited to the new regressions.
 
 No real credentials, provider services, or Linux acceptance were used.
+
+## Review round 2
+
+The indexer now exposes `validateIndex`, a shared check for complete chunk sets. It requires every object vector envelope to have a nonempty profile ID matching the configured profile, rejects malformed/zero vectors, and requires one dimension across the set. Reindex uses the same check before publication.
+
+`commitImport` validates the entire flattened prepared import before creating any source or chunk rows, and each prepared source carries the profile ID used during embedding so a stale or mismatched profile cannot be relabeled at commit time. Supplemental `PARSE_SOURCE` validates candidate chunks together with all retrievable successful chunks in the current generation inside the publication transaction, excluding only the replaced source's old chunks. A mismatch rolls back candidate chunks/source success; the failure path marks the new source `FAILED`, while the existing meeting stays `AVAILABLE` and its older chunks remain searchable.
+
+The new service/indexer regressions first failed red against the mixed 2D/3D multi-source import and the incompatible supplemental source. After the shared validation fix:
+
+- `npx jest server/__tests__/meetings/sources.test.js server/__tests__/meetings/indexer.test.js server/__tests__/meetings/importer.test.js --runInBand` — 3 suites, 47 tests passed.
+- `npx jest server/__tests__/meetings --runInBand` — 13 suites, 127 tests passed.
+
+The supplement regression confirms the failed candidate is not exposed and a prior current-generation chunk remains queryable under the configured profile. No provider/network acceptance was claimed.

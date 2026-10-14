@@ -164,6 +164,46 @@ function createIndexer({
     }));
   }
 
+  function validateIndex(chunks) {
+    let dimensions = null;
+    for (const chunk of chunks || []) {
+      const stored = parseJson(chunk?.embedding, chunk?.embedding);
+      const vector = Array.isArray(stored) ? stored : stored?.vector;
+      const storedProfile = Array.isArray(stored)
+        ? "default"
+        : stored?.profileId;
+      if (
+        typeof storedProfile !== "string" ||
+        !storedProfile.trim() ||
+        storedProfile !== profileId
+      )
+        throw new MeetingError(
+          "Indexed vectors do not match the configured embedding profile; rebuild the meeting index",
+          "EMBEDDING_PROFILE_MISMATCH",
+          503
+        );
+      if (
+        !Array.isArray(vector) ||
+        !vector.length ||
+        vector.some((value) => !Number.isFinite(Number(value))) ||
+        vector.every((value) => Number(value) === 0)
+      )
+        throw new MeetingError(
+          "Indexed vectors contain invalid values",
+          "EMBEDDING_VECTOR_INVALID",
+          503
+        );
+      if (dimensions == null) dimensions = vector.length;
+      else if (vector.length !== dimensions)
+        throw new MeetingError(
+          "Indexed vectors have incompatible dimensions; rebuild the meeting index",
+          "EMBEDDING_PROFILE_MISMATCH",
+          503
+        );
+    }
+    return { profileId, dimensions };
+  }
+
   async function search(meetingIds, question, limit = 20) {
     const ids = [
       ...new Set(
@@ -339,6 +379,11 @@ function createIndexer({
         segments.push({ ...segment, sourceId: source.id });
     }
     const prepared = segments.length ? await prepare(segments) : [];
+    validateIndex(
+      prepared.map((chunk) => ({
+        embedding: { profileId, vector: chunk.embedding },
+      }))
+    );
     const preparedBySource = new Map();
     for (const chunk of prepared) {
       const sourceId = chunk.sourceId;
@@ -447,7 +492,7 @@ function createIndexer({
       : publish(prisma);
   }
 
-  return { prepare, reindex, search, profileId };
+  return { prepare, validateIndex, reindex, search, profileId };
 }
 
 function splitCurrentText(value) {

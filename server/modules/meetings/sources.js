@@ -735,12 +735,28 @@ function createSourceService({
             parseStatus: "SUCCESS",
           },
         });
+        const activeSuccessIds = new Set(
+          activeSuccess.map((activeSource) => activeSource.id)
+        );
         const activeChunks = await tx.meeting_chunks.findMany({
           where: {
             meetingId: currentMeeting.id,
             generation: currentMeeting.generation,
           },
         });
+        indexer.validateIndex([
+          ...activeChunks.filter(
+            (chunk) =>
+              chunk.sourceId !== sourceId &&
+              activeSuccessIds.has(chunk.sourceId)
+          ),
+          ...chunks.map((chunk) => ({
+            embedding: {
+              profileId: indexer.profileId || "default",
+              vector: chunk.embedding,
+            },
+          })),
+        ]);
         const chunkedSourceIds = new Set(
           activeChunks.map((chunk) => chunk.sourceId)
         );
@@ -932,6 +948,7 @@ function createSourceService({
         );
       const contentText = located.map((segment) => segment.text).join("\n");
       prepared.push({
+        profileId: indexer.profileId || "default",
         sourceType,
         name,
         segments: located,
@@ -1028,6 +1045,22 @@ function createSourceService({
     let totalChunks = 0;
     const filePaths = [];
     try {
+      indexer.validateIndex(
+        prepared.flatMap((item) => {
+          if (item.profileId !== (indexer.profileId || "default"))
+            throw new MeetingError(
+              "Prepared import vectors do not match the configured embedding profile",
+              "EMBEDDING_PROFILE_MISMATCH",
+              503
+            );
+          return (item.chunks || []).map((chunk) => ({
+            embedding: {
+              profileId: item.profileId,
+              vector: chunk.embedding,
+            },
+          }));
+        })
+      );
       for (const item of prepared) {
         if (
           !Array.isArray(item.segments) ||

@@ -368,6 +368,94 @@ describe("meeting source identity and lifecycle", () => {
     expect(current.error).toMatch(/parse outage/);
   });
 
+  test("rejects a supplement with incompatible dimensions and keeps existing chunks queryable", async () => {
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: { retrievalStatus: "AVAILABLE", generation: 2 },
+    });
+    const existing = await prisma.meeting_sources.create({
+      data: {
+        meetingId,
+        sourceType: "SUPPLEMENT_TEXT",
+        name: "Existing decision",
+        contentHash: "existing",
+        activeHash: "existing",
+        contentText: "Existing decision",
+        segments: JSON.stringify([
+          {
+            text: "Existing decision",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+        parseStatus: "SUCCESS",
+      },
+    });
+    await prisma.meeting_chunks.create({
+      data: {
+        meetingId,
+        sourceId: existing.id,
+        text: "Existing decision",
+        location: JSON.stringify({ type: "paragraph", paragraph: 0 }),
+        embedding: JSON.stringify({
+          profileId: "current-profile",
+          vector: [1, 0],
+        }),
+        generation: 2,
+      },
+    });
+    const indexer = createIndexer({
+      prisma,
+      profileId: "current-profile",
+      embedder: {
+        embedDocuments: async () => [[0, 0, 1]],
+        embedQuery: async () => [1, 0],
+      },
+    });
+    const sources = service({
+      indexer,
+      parser: {
+        parse: async () => [
+          {
+            text: "New incompatible decision",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ],
+      },
+    });
+    const supplement = await sources.upload(
+      meetingId,
+      { name: "new.txt", buffer: Buffer.from("new source bytes") },
+      7
+    );
+
+    await expect(
+      sources.process({
+        id: 901,
+        kind: "PARSE_SOURCE",
+        meetingId,
+        payload: JSON.stringify({
+          sourceId: supplement.id,
+          sourceRevision: supplement.contentHash,
+          generation: 2,
+        }),
+      })
+    ).rejects.toMatchObject({ code: "EMBEDDING_PROFILE_MISMATCH" });
+
+    const [meeting, failedSource, chunks] = await Promise.all([
+      prisma.meetings.findUnique({ where: { id: meetingId } }),
+      prisma.meeting_sources.findUnique({ where: { id: supplement.id } }),
+      prisma.meeting_chunks.findMany({ where: { meetingId } }),
+    ]);
+    expect(meeting.retrievalStatus).toBe("AVAILABLE");
+    expect(failedSource.parseStatus).toBe("FAILED");
+    expect(chunks).toHaveLength(1);
+    await expect(
+      indexer.search([meetingId], "decision")
+    ).resolves.toMatchObject([
+      { quote: "Existing decision", sourceId: existing.id },
+    ]);
+  });
+
   test("a successful later supplement can make an initially failed draft available", async () => {
     const failedParser = service({
       parser: {
@@ -993,5 +1081,69 @@ describe("meeting source identity and lifecycle", () => {
     await expect(
       sources.commitImport(prisma, { id: meetingId, generation: 1 }, [])
     ).rejects.toMatchObject({ code: "IMPORT_CONTENT_UNUSABLE" });
+  });
+
+  test("rejects mixed dimensions across separately prepared Tencent sources before publishing", async () => {
+    let batch = 0;
+    const indexer = createIndexer({
+      prisma,
+      profileId: "current-profile",
+      embedder: {
+        embedDocuments: async (texts) => {
+          batch += 1;
+          return texts.map(() => Array(batch === 1 ? 2 : 3).fill(1));
+        },
+      },
+    });
+    const sources = service({ indexer });
+    const prepared = await sources.prepareImport({
+      summarySegments: [
+        {
+          text: "Imported summary",
+          location: { type: "paragraph", paragraph: 0 },
+        },
+      ],
+      segments: [
+        {
+          text: "Imported transcript",
+          location: { type: "transcript", startMs: 0, endMs: 100 },
+        },
+      ],
+    });
+    expect(prepared.map((source) => source.chunks[0].embedding.length)).toEqual(
+      [2, 3]
+    );
+    expect(prepared.map((source) => source.profileId)).toEqual([
+      "current-profile",
+      "current-profile",
+    ]);
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const indexing = await tx.meetings.update({
+          where: { id: meetingId },
+          data: { retrievalStatus: "INDEXING", generation: 1 },
+        });
+        return sources.commitImport(tx, indexing, prepared);
+      })
+    ).rejects.toMatchObject({ code: "EMBEDDING_PROFILE_MISMATCH" });
+
+    expect(
+      (await prisma.meetings.findUnique({ where: { id: meetingId } }))
+        .retrievalStatus
+    ).toBe("WAITING_CONTENT");
+    expect(await prisma.meeting_sources.count({ where: { meetingId } })).toBe(
+      0
+    );
+    expect(await prisma.meeting_chunks.count({ where: { meetingId } })).toBe(0);
+    await expect(
+      sources.commitImport(
+        prisma,
+        { id: meetingId, generation: 1 },
+        prepared.map((source, index) =>
+          index === 1 ? { ...source, profileId: "previous-profile" } : source
+        )
+      )
+    ).rejects.toMatchObject({ code: "EMBEDDING_PROFILE_MISMATCH" });
   });
 });
