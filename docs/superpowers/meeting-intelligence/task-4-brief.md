@@ -58,3 +58,9 @@ Require selected meetings 1..10 unique and AVAILABLE. Persist immutable sets; en
 
 ## Verified database constraint
 Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
+
+## Import scope integration
+Scope from/to are numeric elapsed millisecond offsets (0 valid); attachmentIds selects externalFileIds. Omitted bounds mean full transcript, omitted attachments means all supported document artifacts. Derive selected duration from actual bounds. Check T2 report for finalized adapter result fields.
+
+## Workspace original-file check
+Existing Citation UI often shows only cached chunks for file sources (parseChunkSource defaults no href). Do not invent a download URL or claim raw-original availability. Inspect original retention/source metadata for actual evidence opening; if raw file is unavailable, report integration gap to controller and return explicit originalUnavailable rather than broken link. New deployment allows source-retention adaptation if needed, with Task5 ownership. Meeting originals have own new storage path and must always be locatable.

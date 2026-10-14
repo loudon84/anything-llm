@@ -50,12 +50,14 @@ Task 1 defines Prisma models named `meeting_connections`, `meetings`, `meeting_s
 
 Task 1 may add indexing/relations needed for safe queries without removing these names. Lazy database imports make unit tests possible without installed Prisma; real persistence integration uses generated Prisma client. Store enums as strings and validate transitions in domain code. Use `Asia/Shanghai` as initial business timezone and date interval [from inclusive, to exclusive), document this implementation ruling.
 
+Import scope uses `from`/`to` as elapsed millisecond offsets (zero is valid), `attachmentIds` as externalFileIds; omitted range means full transcript, omitted attachmentIds means all supported document artifacts. Validate actual bounds, not caller-provided durationMs.
+
 Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'cell'|'slide'|'transcript', paragraph?:number,page?:number,sheet?:string,cell?:string,slide?:number,startMs?:number,endMs?:number}}`. Source reference includes id, meetingId, sourceType, name, location, quote, reviewStatus, coverage.
 
 ## TODO ledger
 
 - [x] T1 Persistence and lifecycle rules (18 tests; review clean).
-- [ ] T2 Tencent connector, encrypted configuration and durable import jobs.
+- [x] T2 Tencent connector, encrypted configuration and durable import jobs (30 tests; review clean).
 - [ ] T3 Located parsing/OCR, source uploads, embedding index and reindex.
 - [ ] T4 Fixed-scope grounded QA, historical citations and reanswers.
 - [ ] T5 Authenticated Express API and runtime integration.
@@ -70,26 +72,26 @@ Source segment shape: `{text:string, location:{type:'paragraph'|'page'|'image'|'
 
 createMetadata checks active duplicate and quarterly quota including other active import reservations; initial WAITING_CONTENT. softDelete only DRAFT, clears activeKey, marks DELETED and soft-deletes sources/clears activeHash while retaining rows/snapshots, deletes active chunks. revise only SUMMARY/TRANSCRIPT values, increments generation, sets INDEXING and DRAFT, queues REINDEX; no full-content versions. approve requires AVAILABLE and no unresolved source/job processing errors. Each mutation checks current state inside transaction and audits.
 
-- [ ] Write failing tests for 201st-quarter meeting rejection, 11 selected meetings, >3h scope, byte/count limits, original deletion rejection, approved supplemental deletion rejection, metadata-only cannot approve, delete/reimport new ID, revision queues indexing.
-- [ ] Run `npx jest server/__tests__/meetings/policy.test.js server/__tests__/meetings/lifecycle.test.js --runInBand` and record RED.
-- [ ] Implement policies/service plus schema/migration; concurrent duplicates resolved by unique activeKey, quota transactions checked consistently.
-- [ ] Run focused tests GREEN; `server/node_modules/.bin/prisma validate --schema server/prisma/schema.prisma` from repository root (Windows use `.cmd`).
-- [ ] Commit task-owned code/tests/migration; write report with commands/evidence and any changes to contracts.
+- [x] Write failing tests for 201st-quarter meeting rejection, 11 selected meetings, >3h scope, byte/count limits, original deletion rejection, approved supplemental deletion rejection, metadata-only cannot approve, delete/reimport new ID, revision queues indexing.
+- [x] Run `npx jest server/__tests__/meetings/policy.test.js server/__tests__/meetings/lifecycle.test.js --runInBand` and record RED.
+- [x] Implement policies/service plus schema/migration; concurrent duplicates resolved by unique activeKey, quota transactions checked consistently.
+- [x] Run focused tests GREEN; `server/node_modules/.bin/prisma validate --schema server/prisma/schema.prisma` from repository root (Windows use `.cmd`).
+- [x] Commit task-owned code/tests/migration; write report with commands/evidence and any changes to contracts.
 
 ### Task 2: Tencent connector, configuration and durable imports
 
 **Files:** Create `server/modules/meetings/tencent.js`, `config.js`, `jobs.js`, `importer.js`; tests `server/__tests__/meetings/tencent.test.js`, `importer.test.js`.
 
-**Interfaces:** `createTencentClient({config,fetchImpl=fetch})` returns `listMeetings(query)`, `getContent(externalId,scope)`. Return list `{items:[{externalId,title,startTime,endTime}],nextCursor}`; content `{summary,transcript,segments,attachments:[{name,downloadUrl,externalFileId}],coverage,capabilities}`. `createMeetingConfig({prisma,encryption})` returns `getPublic()`, `save(input)`, `getPrivate()`; encrypted credentials, public output redacted, audit no secrets. `createJobRunner({prisma,handlers,pollMs=2000})` returns `start()`, `stop()`, `enqueue(kind,payload,identity)`, `retry(id)`, `runOnce()`. `createImporter({prisma,meetingService,clientFactory,sourceService})` exposes `queue(connectionId,externalId,scope,userId)`, `process(job)`.
+**Interfaces:** `createTencentClient({config,fetchImpl=fetch})` returns `listMeetings(query)`, `describeMeeting(externalId,{startTime,endTime})`, `getContent(externalId,scope)`. Return list `{items:[{externalId,title,startTime,endTime}],nextCursor}`; content `{summary,transcript,segments,attachments:[{name,downloadUrl,externalFileId}],coverage,capabilities}`. `createMeetingConfig({prisma,encryption})` returns `getPublic()`, `save(input)`, `getPrivate()`; encrypted credentials, public output redacted, audit no secrets. `createJobRunner({prisma,handlers,pollMs=2000})` returns `start()`, `stop()`, `enqueue(kind,payload,identity)`, `retry(id)`, `runOnce()`. `createImporter({prisma,meetingService,clientFactory,sourceService})` exposes `queue(connectionId,externalId,scope,userId)`, `process(job)`.
 
 Read official research report `prd/tencent-meeting-api-research.md` once available; verify official documentation via web if needed. Only implement documented endpoints/signature, never invent content APIs. Capabilities must distinguish supported/unsupported/unknown and per-item absence. Unverified summary/attachment capability defaults unsupported with reason and manual supplement path, while configured supported network failures propagate. Use fixed official host, bounded timeouts, no secret logging, redact credential response.
 
 Queue import reserves duplicate identity and quarter capacity transactionally; list metadata needed before reserving. Worker gets complete selected content, prepares parsed sources via Task3 `prepareImport`, then commits meeting/sources/chunks atomically or returns FAILED with no queryable meeting. Metadata-only branch creates WAITING_CONTENT without parser. Retry reuses same job and reservation safely; reclaim PROCESSING after restart with exclusive leasing so two runners do not double-claim. Scope clipping retains whole summary; if transcript lacks timestamps reject time selection explicitly, do not invent timestamps. Download only official-returned URL and enforce byte limits before buffering.
 
-- [ ] Write RED tests for official canonical signing fixture, redaction, pagination, metadata-only vs 500 distinction, whole-scope rollback, duplicate retry and restart recovery.
-- [ ] Run `npx jest server/__tests__/meetings/tencent.test.js server/__tests__/meetings/importer.test.js --runInBand`.
-- [ ] Implement connector/config/importer/runner; dependencies injectable, no real account calls in tests.
-- [ ] Verify GREEN and commit; report official URLs and remaining live-account verification separately.
+- [x] Write RED tests for official canonical signing fixture, redaction, pagination, metadata-only vs 500 distinction, whole-scope rollback, duplicate retry and restart recovery.
+- [x] Run `npx jest server/__tests__/meetings/tencent.test.js server/__tests__/meetings/importer.test.js --runInBand`.
+- [x] Implement connector/config/importer/runner; dependencies injectable, no real account calls in tests.
+- [x] Verify GREEN and commit; report official URLs and remaining live-account verification separately.
 
 ### Task 3: Sources, located parsing and embedding index
 
@@ -127,7 +129,7 @@ Require selected meetings 1..10 unique and AVAILABLE. Persist immutable sets; en
 
 API:
 - GET/PUT `/meetings/config`: public redacted config / admin-save; includes Tencent and parser/OCR service settings, uses existing configured LLM/embedder.
-- GET `/meetings/remote`: query list and cursor.
+- GET `/meetings/remote`: query list and cursor. GET `/meetings/remote/:externalId/manifest`: selected meeting attachment manifest, transcript duration and capability info, no signed download URLs; query includes date window and connectionId.
 - POST `/meetings/import`: `{connectionId,externalId,scope}` =>202 `{job}`.
 - GET `/meetings/jobs`; POST `/meetings/jobs/:id/retry`.
 - GET `/meetings`: quarter/from/to filters => `{meetings}`; GET `/meetings/:id` => `{meeting,sources}`.
@@ -165,4 +167,8 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 - [ ] Capture real test evidence and supported formats/services; record credentialless Tencent verification limits and unmeasured Linux/OCR/performance gates honestly.
 - [ ] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review.
 - [ ] Final deliverable links plan/TODO, code worktree and branch; do not claim Linux/live-release gate passed on Windows or absent credentials. Do not push/merge automatically.
+
+
+
+
 

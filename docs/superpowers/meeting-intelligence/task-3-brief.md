@@ -60,3 +60,12 @@ Uploads persisted under opaque generated name in storage/meetings, never origina
 
 ## Verified database constraint
 Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
+
+## Import scope integration
+Scope from/to are numeric elapsed millisecond offsets (0 valid); attachmentIds selects externalFileIds. Omitted bounds mean full transcript, omitted attachments means all supported document artifacts. Derive selected duration from actual bounds. Check T2 report for finalized adapter result fields.
+
+## Final Task2 handoff
+Read task-2-report.md for exact content shape. prepareImport performs no database writes; receives fully downloaded attachment buffers and transcript segments with recording IDs/normalized offsets. commitImport(tx,meeting,prepared) writes using supplied tx, must reject empty prepared or unusable chunks, must not create nested transaction. Reindex after manual transcript/summary revision must derive text from meetings current fields and not reuse stale original source content or inaccurate timestamps; if edited text cannot align reliably, use current paragraph locator and remove unsupported old time labels. Preserve historical citation snapshots.
+
+## Task2 summary provenance extension
+Content.summarySegments now optional array {text,location:{type:paragraph,paragraph:0,recordFileId}} alongside aggregate summary text. Preserve originating recording IDs and located summary segments when preparing initial SUMMARY source/chunks. Accept original Tencent zero paragraph IDs or normalize consistently in both viewer segments and citations. For manual revisions, avoid keeping stale recording/timing attribution that no longer aligns with revised text.

@@ -63,3 +63,9 @@ Existing frontend BrowserNative SpeechToText imports regenerator-runtime but fro
 
 ## Verified database constraint
 Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
+
+## Import scope integration
+Scope from/to are numeric elapsed millisecond offsets (0 valid); attachmentIds selects externalFileIds. Omitted bounds mean full transcript, omitted attachments means all supported document artifacts. Derive selected duration from actual bounds. Check T2 report for finalized adapter result fields.
+
+## Manifest discovery contract
+Tencent client adds describeMeeting(externalId,{startTime,endTime}), sharing private record discovery with getContent. Public manifest exposes attachment externalFileId/name/bytes, transcriptDurationMs and recording/capability metadata, never signed URLs. API GET /meetings/remote/:externalId/manifest accepts date-window/connectionId query and returns {manifest}. UI loads before scope confirmation so user can select attachmentIds and elapsed range. Multiple recordings must normalize a shared timeline, not apply a fresh 3-hour window to each recording. See T2 report.

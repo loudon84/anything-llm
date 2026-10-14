@@ -63,3 +63,6 @@ Official report exists at prd/tencent-meeting-api-research.md. User/enterprise A
 
 ## Verified database constraint
 Prisma 5.3.1 generated SQLite client in this repo does not expose createMany for new models. Use awaited per-row create inside transactions, not unsupported bulk operations. Client generated, all 41 migrations applied to ignored worktree storage DB. Tests that need real database should isolated temp copies/fixtures, not production.
+
+## Manifest discovery contract
+Tencent client adds describeMeeting(externalId,{startTime,endTime}), sharing private record discovery with getContent. Public manifest exposes attachment externalFileId/name/bytes, transcriptDurationMs and recording/capability metadata, never signed URLs. API GET /meetings/remote/:externalId/manifest accepts date-window/connectionId query and returns {manifest}. UI loads before scope confirmation so user can select attachmentIds and elapsed range. Multiple recordings must normalize a shared timeline, not apply a fresh 3-hour window to each recording. See T2 report.

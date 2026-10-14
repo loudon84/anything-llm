@@ -28,8 +28,8 @@
 ## Tasks
 
 - [x] T1 Persistence / lifecycle — complete (cca287a0..b1cadb8b; scoped review clean, 18 tests)
-- [ ] T2 Tencent / jobs — in progress (GPT-6 Luna)
-- [ ] T3 Parsing / sources / index — pending
+- [x] T2 Tencent / jobs — complete (3e56ec60..520c1cf9; scoped review clean, 30 tests)
+- [ ] T3 Parsing / sources / index — in progress (GPT-6 Luna)
 - [ ] T4 Grounded QA / history — pending
 - [ ] T5 API / runtime — pending
 - [ ] T6 React pages — pending
@@ -46,4 +46,16 @@
 - Local DB smoke: Prisma client generated; all 41 migrations applied successfully to fresh ignored worktree SQLite DB. Initial migrate failed on missing database file; Prisma connect created the empty file and deploy succeeded.
 
 - T1 fix round1 implemented: 18 tests including real temporary SQLite concurrent duplicate and final-quarter-slot tests pass. Scoped rereview pending; generated SQLite createMany unavailable, all downstream briefs note this.
+
+
+- T2 scope refinement: elapsed from/to offsets, zero valid; selection duration from actual bounds and attachmentIds manifest. Controller detected T1 || drops from=0; T2 instructed to correct as integration regression.
+
+- Ruling: Add manifest discovery before scope confirmation (GET remote/:externalId/manifest); PRD requires choosing actual attachments and limits, metadata list alone cannot support this — cost if wrong: extra official calls, bounded and paged.
+- T2 timeline note: official transcript timestamps are offsets within each record file; normalize multiple files to one selected meeting timeline, retain record IDs and enforce overall selected-duration limit.
+
+- T2 committed 3e56ec60: 19 tests, Prisma and scoped ESLint pass. Independent review in progress. Added meeting job lease columns via additive migration. Full parser/source prepared-result internal shape owned by T3; final contracts carried into T3/T5 briefs.
+
+- T2 fix round1/5: independent review found transcript pagination truncation, vanished selected artifact IDs, multi-record summary/capability overwrite, malformed200 mislabeled absent, empty-artifact fallback and full-body timeout gaps. Returned all six with required regressions to same GPT-6 Luna implementer. No dependent implementation dispatched until corrected/reviewed.
+
+- T2 fix round1 committed 520c1cf9; 30 tests/schema/lint green, six completeness/transfer findings addressed by implementer, scoped rereview pending. Summary segments now retain recording provenance; downstream T3 brief updated.
 

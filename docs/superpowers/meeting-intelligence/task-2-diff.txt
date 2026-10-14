@@ -1,0 +1,2115 @@
+3e56ec60 Add Tencent meeting import connector
+ .../meeting-intelligence/task-2-report.md          |  51 ++
+ server/__tests__/meetings/importer.test.js         | 308 +++++++++++
+ server/__tests__/meetings/tencent.test.js          | 140 +++++
+ server/modules/meetings/config.js                  | 164 ++++++
+ server/modules/meetings/importer.js                | 562 +++++++++++++++++++++
+ server/modules/meetings/jobs.js                    | 240 +++++++++
+ server/modules/meetings/tencent.js                 | 562 +++++++++++++++++++++
+ .../migration.sql                                  |   2 +
+ server/prisma/schema.prisma                        |   2 +
+ 9 files changed, 2031 insertions(+)
+diff --git a/docs/superpowers/meeting-intelligence/task-2-report.md b/docs/superpowers/meeting-intelligence/task-2-report.md
+new file mode 100644
+index 00000000..63e448e2
+--- /dev/null
++++ b/docs/superpowers/meeting-intelligence/task-2-report.md
+@@ -0,0 +1,51 @@
++# Task 2 implementation report
++
++## Delivered
++
++Implemented the Tencent Meeting client, encrypted connection configuration, durable job runner, and meeting importer in `server/modules/meetings/`. The client signs requests for the fixed Tencent Meeting API host, applies request timeouts, redacts credentials and response bodies from errors, paginates meeting and recording results, and only downloads artifacts from Tencent-returned HTTPS URLs. Download handling checks advertised length and streams with a hard byte ceiling before buffering.
++
++The client exposes `describeMeeting(externalId, { startTime, endTime })` for preflight. It shares recording discovery with content retrieval and returns attachment IDs, names, artifact types, byte-size availability, per-file limit, transcript duration, recording metadata, and capability states. Signed download URLs are never included in the manifest. Since Tencent's detail response does not document artifact byte sizes, `bytes` is `null`; `maxBytes` is provided.
++
++Content capability defaults are explicit: transcript, summary, and downloadable attachments are `unsupported` until enabled in connection configuration, with a manual-supplement reason. A confirmed per-record absence is reported as `absent`. Configured-supported runtime failures propagate and fail the job. Transcript absence handles only documented per-item no-content/not-found codes; generation-in-progress and other errors remain failures. No undocumented endpoint or arbitrary business-file API is assumed.
++
++Connection credentials are encrypted before persistence and omitted from public responses and audit events. Import reservation checks duplicates and quarterly capacity transactionally. Import jobs persist the selected metadata and scope, use an exclusive renewable lease that can be reclaimed after expiration, and clear their active reservation on terminal success or failure. Retry reacquires the same active key and rechecks duplicate and quota conditions. The reservation key is exactly `${connectionId}:${trimmedExternalId}`, matching the meeting deduplication key.
++
++Import scope uses `scope.startTime` and `scope.endTime` for the Tencent meeting-discovery date window (at most 90 days). `scope.from` and `scope.to` are elapsed millisecond offsets into the normalized transcript timeline; zero is valid, and the selected interval is validated from these actual bounds against the three-hour cap. When bounds are supplied, transcript paragraphs are clipped by overlap; transcript selection fails if the provider supplies no timestamps. `scope.attachmentIds` selects external artifact IDs; omitted means all supported returned artifacts. The summary is retained whole. Attachment downloads enforce 100 MB per file, 20 files, and 500 MB total.
++
++Tencent paragraph timestamps are relative to each recording file, not the meeting epoch. Multiple recording files are placed on one meeting timeline by offsetting each paragraph with the file's `record_start_time` relative to the earliest file start; the original `recordFileId` is retained in each transcript segment's `location`. The preflight manifest reports each recording's normalized start offset and duration. This prevents applying a fresh three-hour allowance independently to each recording.
++
++If no supported content is present because capabilities are explicitly unsupported or content is absent, the importer creates a metadata-only `DRAFT`/`WAITING_CONTENT` meeting. A capability marked supported but yielding no usable content is a failure. For content imports, source preparation happens before the write transaction, then metadata creation, source/chunk commit, and job completion happen atomically. Failures leave no partially queryable meeting and release the reservation.
++
++## Task 3 source integration contract
++
++`createImporter({ prisma, meetingService, clientFactory, sourceService, configService?, audit? })` expects:
++
++- `clientFactory({ connection, config })` to return the client with `listMeetings()` and `getContent()`; `downloadAttachment(url, maxBytes)` must be returned when artifacts require download. The importer passes the complete selected content with attachment buffers and metadata to the source service.
++- `sourceService.prepareImport(content)` to be a pure preparation step with no database writes. It must reject or return no prepared result when content cannot produce usable located source material. The importer also rejects `null` and an empty prepared array.
++- `sourceService.commitImport(tx, meeting, prepared)` to persist sources/chunks inside the transaction supplied by the importer. It must preserve source identity/type and artifact/recording provenance, persist valid nonempty located chunks, and leave the meeting `AVAILABLE` only when indexing is complete. It should throw on empty, malformed, or failed indexing so the transaction rolls back. Prepared-result internal shape is owned by Task 3.
++
++For Tencent content, retain the actual source type (`TENCENT_ORIGINAL`), `externalFileId`, artifact type, and `recordFileId` where applicable. Transcript locations contain `type: "transcript"`, paragraph index, normalized `startMs`/`endMs`, and `recordFileId`. Summary is supplied separately as `summary`; transcript text and located segments are both supplied. Attachment objects contain `name`, `externalFileId`, `sourceType`, `artifactType`, `bytes`, and downloaded `buffer`.
++
++The importer constructs the write-side meeting service with `createMeetingService({ prisma: tx })` so its metadata write participates in the same transaction as source indexing. Task 3 should not add an independent transaction around `commitImport`.
++
++## Schema change
++
++Added nullable `leaseOwner` and `leaseUntil` columns to `meeting_jobs`, plus additive migration `server/prisma/migrations/20261014010000_meeting_job_leases/migration.sql`. These fields make claims exclusive across runners and allow safe restart recovery without relying on in-memory locks. The SQLite client has no `createMany` for the new models, so transaction writes use supported per-row operations.
++
++## Official documentation checked
++
++- [Enterprise self-built app authentication (AK/SK)](https://cloud.tencent.com/document/product/1095/42413) — canonical request string, HMAC-SHA256 then Base64 of lowercase hex, required headers, STS note.
++- [Query a user's ended meetings](https://cloud.tencent.com/document/product/1095/53805) — ended meeting list and 90-day maximum range.
++- [Query meeting recording list](https://cloud.tencent.com/document/product/1095/51189) — operator/time requirements, pagination, recording file timestamps and sizes.
++- [Transcript details](https://cloud.tencent.com/document/product/1095/65111) — structured transcript endpoint and per-record no-content/generation statuses; paragraph timing is recording-relative.
++- [Smart minutes](https://cloud.tencent.com/document/product/1095/109458) — smart minutes capability and feature/content gates.
++- [Single recording details and downloadable artifacts](https://cloud.tencent.com/document/product/1095/51180) — artifact arrays, short-lived download URLs, file types, and access gates.
++
++The implementation was checked against Tencent's official docs and the repository research report. No tenant credentials were available or used and no live account/API calls were made. Tenant roles, application grants, STS provisioning, plan gates, and actual artifact availability remain release-time verification items.
++
++## Verification
++
++- RED: the new focused tests initially failed on the missing Task 2 modules.
++- GREEN: `npx jest server/__tests__/meetings/tencent.test.js server/__tests__/meetings/importer.test.js --runInBand` — 2 suites, 19 tests passed. Tests use deterministic signing fixtures and fake external Tencent/source boundaries; importer persistence/concurrency cases use isolated SQLite databases.
++- `prisma validate --schema server/prisma/schema.prisma` — passed.
++- ESLint on the four implementation files — passed.
+diff --git a/server/__tests__/meetings/importer.test.js b/server/__tests__/meetings/importer.test.js
+new file mode 100644
+index 00000000..c08d1966
+--- /dev/null
++++ b/server/__tests__/meetings/importer.test.js
+@@ -0,0 +1,308 @@
++const { createImporter, clipContent } = require("../../modules/meetings/importer");
++const { createJobRunner } = require("../../modules/meetings/jobs");
++const { createMeetingService } = require("../../modules/meetings/meetingService");
++const fs = require("fs");
++const os = require("os");
++const path = require("path");
++const { PrismaClient } = require("@prisma/client");
++
++function fakePrisma(seed = {}) {
++  const state = {
++    meeting_connections: seed.meeting_connections || [{ id: 1, config: "{}" }],
++    meetings: seed.meetings || [],
++    meeting_sources: seed.meeting_sources || [],
++    meeting_chunks: seed.meeting_chunks || [],
++    meeting_jobs: seed.meeting_jobs || [],
++  };
++  let nextJob = 1;
++  let nextMeeting = 1;
++  let nextSource = 1;
++  const matches = (row, where = {}) => Object.entries(where).every(([key, value]) => {
++    if (value && typeof value === "object" && "in" in value) return value.in.includes(row[key]);
++    if (value && typeof value === "object" && "lte" in value) return row[key] != null && new Date(row[key]) <= value.lte;
++    return row[key] === value;
++  });
++  const delegates = {};
++  for (const collection of Object.keys(state)) delegates[collection] = {
++    findMany: async ({ where = {} } = {}) => state[collection].filter((row) => matches(row, where)),
++    findFirst: async ({ where = {} } = {}) => state[collection].find((row) => matches(row, where)) || null,
++    findUnique: async ({ where = {} } = {}) => state[collection].find((row) => matches(row, where)) || null,
++    create: async ({ data }) => {
++      const id = collection === "meeting_jobs" ? nextJob++ : collection === "meetings" ? nextMeeting++ : nextSource++;
++      const row = { id, createdAt: new Date(), updatedAt: new Date(), ...data };
++      state[collection].push(row);
++      return row;
++    },
++    update: async ({ where, data }) => {
++      const row = state[collection].find((item) => matches(item, where));
++      if (!row) throw new Error("row not found");
++      Object.assign(row, data, { updatedAt: new Date() });
++      return row;
++    },
++    updateMany: async ({ where, data }) => {
++      const rows = state[collection].filter((row) => matches(row, where));
++      rows.forEach((row) => Object.assign(row, data, { updatedAt: new Date() }));
++      return { count: rows.length };
++    },
++  };
++  const db = { ...delegates };
++  db.$transaction = async (callback) => {
++    const snapshot = JSON.parse(JSON.stringify(state));
++    try { return await callback(db); }
++    catch (error) {
++      for (const key of Object.keys(state)) state[key].splice(0, state[key].length, ...snapshot[key]);
++      throw error;
++    }
++  };
++  return { db, state };
++}
++
++const officialMeeting = {
++  externalId: "m-1", title: "Review", startTime: "2026-04-01T10:00:00+08:00", endTime: "2026-04-01T11:00:00+08:00",
++};
++const importerWith = ({ db = fakePrisma().db, client = {}, sourceService = {}, meetingService } = {}) => createImporter({
++  prisma: db,
++  meetingService: meetingService || { createMetadata: async (data, userId) => db.meetings.create({ data: {
++    connectionId: data.connectionId, externalId: data.externalId, activeKey: `${data.connectionId}:${data.externalId}`,
++    title: data.title, startTime: new Date(data.startTime), endTime: new Date(data.endTime), quarter: "2026-Q2",
++    reviewStatus: "DRAFT", retrievalStatus: "WAITING_CONTENT", summary: null, transcript: null, coverage: "{}", generation: 0,
++    deletedAt: null, createdBy: userId,
++  } }) },
++  clientFactory: () => ({
++    listMeetings: async () => ({ items: [officialMeeting], nextCursor: null }),
++    getContent: async () => ({ summary: null, transcript: null, segments: [], attachments: [], capabilities: {} }),
++    ...client,
++  }),
++  sourceService: { prepareImport: async () => [], commitImport: async () => {}, ...sourceService },
++});
++
++describe("durable Tencent meeting imports", () => {
++  test("preserves an offset boundary of zero and rejects ranges over three hours", () => {
++    const content = { transcript: "start end", segments: [
++      { text: "start", location: { type: "transcript", startMs: 0, endMs: 10 } },
++      { text: "end", location: { type: "transcript", startMs: 10_800_001, endMs: 10_800_010 } },
++    ] };
++    expect(clipContent(content, { from: 0, to: 10 }).transcript).toBe("start");
++    expect(() => clipContent(content, { from: 0, to: 10_800_001 })).toThrow("no more than three hours");
++  });
++
++  test("queues an offset selection starting at zero using its actual bounds", async () => {
++    const { db, state } = fakePrisma();
++    const importer = importerWith({ db });
++    const job = await importer.queue(1, "m-1", {
++      ...{ startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" }, from: 0, to: 10_800_000,
++    }, 7);
++    expect(JSON.parse(job.payload).scope).toMatchObject({ from: 0, to: 10_800_000 });
++    await expect(importer.queue(1, "m-2", {
++      startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z", from: 0, to: 10_800_001,
++    }, 7)).rejects.toMatchObject({ code: "TRANSCRIPT_SCOPE_LIMIT" });
++    expect(state.meeting_jobs).toHaveLength(1);
++  });
++
++  test("creates a metadata-only waiting meeting when content is confirmed unavailable", async () => {
++    const { db, state } = fakePrisma();
++    const importer = importerWith({ db, client: { getContent: async () => ({
++      summary: null, transcript: null, segments: [], attachments: [],
++      capabilities: { transcript: { status: "unsupported", reason: "Transcript feature is unavailable for this tenant." } },
++    }) } });
++    const job = await importer.queue(1, "m-1", { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" }, 7);
++    await importer.process(job);
++    expect(state.meetings).toHaveLength(1);
++    expect(state.meetings[0]).toMatchObject({ externalId: "m-1", retrievalStatus: "WAITING_CONTENT", reviewStatus: "DRAFT" });
++    expect(state.meeting_jobs[0]).toMatchObject({ status: "SUCCESS", activeKey: null });
++  });
++
++  test("propagates configured API failures and releases the failed reservation without creating a meeting", async () => {
++    const { db, state } = fakePrisma();
++    const importer = importerWith({ db, client: { getContent: async () => { throw new Error("Tencent Meeting request failed (HTTP 500)"); } } });
++    const job = await importer.queue(1, "m-1", { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" }, 7);
++    await expect(importer.process(job)).rejects.toThrow("HTTP 500");
++    expect(state.meetings).toHaveLength(0);
++    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED", activeKey: null });
++  });
++
++  test("rolls back meeting and all prepared content when one source commit fails", async () => {
++    const { db, state } = fakePrisma();
++    const importer = importerWith({ db,
++      client: { getContent: async () => ({
++        summary: "Summary", transcript: null, segments: [{ text: "Evidence", location: { type: "paragraph", paragraph: 1 } }], attachments: [],
++        capabilities: { transcript: { status: "supported" } },
++      }) },
++      sourceService: {
++        prepareImport: async () => [{ sourceType: "SUMMARY", name: "summary", contentText: "Summary" }],
++        commitImport: async (tx, meeting) => {
++          await tx.meeting_sources.create({ data: { meetingId: meeting.id, sourceType: "SUMMARY", name: "summary", parseStatus: "SUCCESS" } });
++          throw new Error("chunk write failed");
++        },
++      },
++    });
++    const job = await importer.queue(1, "m-1", { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" }, 7);
++    await expect(importer.process(job)).rejects.toThrow("chunk write failed");
++    expect(state.meetings).toHaveLength(0);
++    expect(state.meeting_sources).toHaveLength(0);
++    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED", activeKey: null });
++  });
++
++  test("queue reserves the same external meeting once and treats active reservations as quota", async () => {
++    const { db, state } = fakePrisma();
++    const importer = importerWith({ db });
++    const scope = { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" };
++    const first = await importer.queue(1, "m-1", scope, 7);
++    await expect(importer.queue(1, "m-1", scope, 7)).rejects.toMatchObject({ code: "MEETING_DUPLICATE" });
++    expect(state.meeting_jobs).toHaveLength(1);
++    expect(first.activeKey).toBe("1:m-1");
++  });
++
++  test("retry reuses its job and reclaims stale PROCESSING work after a runner restart", async () => {
++    const { db, state } = fakePrisma({ meeting_jobs: [{
++      id: 8, kind: "IMPORT", connectionId: 1, externalId: "m-1", activeKey: null, quarter: "2026-Q2",
++      payload: JSON.stringify({ scope: { from: "2026-04-01T00:00:00Z", to: "2026-04-02T00:00:00Z" }, userId: 7 }),
++      status: "PROCESSING", attempts: 1, leaseOwner: "a", leaseUntil: new Date(0), updatedAt: new Date(0),
++    }] });
++    const runnerA = createJobRunner({ prisma: db, handlers: { IMPORT: async () => {} }, pollMs: 5, leaseMs: 10, runnerId: "a" });
++    const runnerB = createJobRunner({ prisma: db, handlers: { IMPORT: async () => { throw new Error("still unavailable"); } }, pollMs: 5, leaseMs: 10, runnerId: "b" });
++    await expect(runnerB.runOnce()).rejects.toThrow("still unavailable");
++    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED", leaseOwner: null, attempts: 2 });
++    const retry = await runnerB.retry(8);
++    expect(retry).toMatchObject({ id: 8, status: "CREATED" });
++    expect(state.meeting_jobs).toHaveLength(1);
++  });
++});
++
++describe("durable imports with SQLite", () => {
++  let prisma;
++  let directory;
++  let connectionId;
++
++  beforeAll(async () => {
++    directory = fs.mkdtempSync(path.join(os.tmpdir(), "meeting-import-"));
++    const database = path.join(directory, "meetings.db");
++    fs.copyFileSync(path.join(__dirname, "../../storage/anythingllm.db"), database);
++    prisma = new PrismaClient({ datasources: { db: { url: `file:${database.replace(/\\/g, "/")}` } } });
++    const columns = await prisma.$queryRawUnsafe('PRAGMA table_info("meeting_jobs")');
++    const names = new Set(columns.map((column) => column.name));
++    if (!names.has("leaseOwner")) await prisma.$executeRawUnsafe('ALTER TABLE "meeting_jobs" ADD COLUMN "leaseOwner" TEXT');
++    if (!names.has("leaseUntil")) await prisma.$executeRawUnsafe('ALTER TABLE "meeting_jobs" ADD COLUMN "leaseUntil" DATETIME');
++  });
++
++  beforeEach(async () => {
++    await prisma.meeting_jobs.deleteMany();
++    await prisma.meeting_chunks.deleteMany();
++    await prisma.meeting_sources.deleteMany();
++    await prisma.meetings.deleteMany();
++    await prisma.meeting_connections.deleteMany();
++    const connection = await prisma.meeting_connections.create({ data: { name: "Tencent integration", config: "{}" } });
++    connectionId = connection.id;
++  });
++
++  afterAll(async () => {
++    await prisma?.$disconnect();
++    if (directory) fs.rmSync(directory, { recursive: true, force: true });
++  });
++
++  const testImporter = (overrides = {}) => createImporter({
++    prisma,
++    meetingService: createMeetingService({ prisma }),
++    clientFactory: () => ({
++      listMeetings: async () => ({ items: [officialMeeting], nextCursor: null }),
++      getContent: async () => ({ summary: null, transcript: null, segments: [], attachments: [], capabilities: { transcript: { status: "unsupported" } } }),
++      ...overrides.client,
++    }),
++    sourceService: { prepareImport: async () => [], commitImport: async () => {}, ...overrides.sourceService },
++  });
++  const dateRange = { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" };
++
++  test("concurrent queue requests reserve one database identity", async () => {
++    const importer = testImporter();
++    const results = await Promise.allSettled([
++      importer.queue(connectionId, "m-1", dateRange, 7),
++      importer.queue(connectionId, "m-1", dateRange, 7),
++    ]);
++    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
++    expect(await prisma.meeting_jobs.count({ where: { kind: "IMPORT", status: "CREATED" } })).toBe(1);
++  });
++
++  test("concurrent reservations cannot exceed the quarterly capacity", async () => {
++    for (let index = 0; index < 199; index += 1) await prisma.meetings.create({ data: {
++      connectionId, externalId: `existing-${index}`, activeKey: `${connectionId}:existing-${index}`,
++      title: "Existing", startTime: new Date("2026-04-01T02:00:00Z"), quarter: "2026-Q2",
++      reviewStatus: "DRAFT", retrievalStatus: "WAITING_CONTENT", coverage: "{}",
++    } });
++    const importer = testImporter({ client: { listMeetings: async () => ({
++      items: [{ ...officialMeeting, externalId: "m-2" }, { ...officialMeeting, externalId: "m-3" }], nextCursor: null,
++    }) } });
++    const results = await Promise.allSettled([
++      importer.queue(connectionId, "m-2", dateRange, 7),
++      importer.queue(connectionId, "m-3", dateRange, 7),
++    ]);
++    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
++    expect(await prisma.meeting_jobs.count({ where: { quarter: "2026-Q2", status: "CREATED" } })).toBe(1);
++    expect(await prisma.meetings.count({ where: { quarter: "2026-Q2", deletedAt: null } })).toBe(199);
++  });
++
++  test("the reserved import can create metadata in the last quarterly slot and then releases its key", async () => {
++    for (let index = 0; index < 199; index += 1) await prisma.meetings.create({ data: {
++      connectionId, externalId: `existing-${index}`, activeKey: `${connectionId}:existing-${index}`,
++      title: "Existing", startTime: new Date("2026-04-01T02:00:00Z"), quarter: "2026-Q2",
++      reviewStatus: "DRAFT", retrievalStatus: "WAITING_CONTENT", coverage: "{}",
++    } });
++    const importer = testImporter();
++    const job = await importer.queue(connectionId, "m-1", dateRange, 7);
++    expect(job.activeKey).toBe(`${connectionId}:m-1`);
++    const meeting = await importer.process(job);
++    expect(meeting.retrievalStatus).toBe("WAITING_CONTENT");
++    const persisted = await prisma.meeting_jobs.findUnique({ where: { id: job.id } });
++    expect(persisted).toMatchObject({ activeKey: null, meetingId: meeting.id, status: "SUCCESS" });
++    expect(await prisma.meetings.count({ where: { quarter: "2026-Q2", deletedAt: null } })).toBe(200);
++  });
++
++  test("rolls back all import rows when a source commit fails in SQLite", async () => {
++    const importer = testImporter({
++      client: { getContent: async () => ({ summary: "Usable summary", transcript: null, segments: [], attachments: [], capabilities: {} }) },
++      sourceService: {
++        prepareImport: async () => [{ sourceType: "SUMMARY", name: "minutes" }],
++        commitImport: async (tx, meeting) => {
++          await tx.meeting_sources.create({ data: { meetingId: meeting.id, sourceType: "SUMMARY", name: "minutes", parseStatus: "SUCCESS" } });
++          throw new Error("simulated source write failure");
++        },
++      },
++    });
++    const job = await importer.queue(connectionId, "m-1", dateRange, 7);
++    await expect(importer.process(job)).rejects.toThrow("simulated source write failure");
++    expect(await prisma.meetings.count()).toBe(0);
++    expect(await prisma.meeting_sources.count()).toBe(0);
++    expect(await prisma.meeting_jobs.findUnique({ where: { id: job.id } })).toMatchObject({ status: "FAILED", activeKey: null });
++  });
++
++  test("reclaims a stale lease and retries the same persisted import job", async () => {
++    const job = await prisma.meeting_jobs.create({ data: {
++      kind: "IMPORT", connectionId, externalId: "m-1", activeKey: null, quarter: "2026-Q2",
++      payload: JSON.stringify({ scope: dateRange, meeting: officialMeeting, userId: 7 }), status: "PROCESSING",
++      attempts: 1, leaseOwner: "previous-worker", leaseUntil: new Date(0),
++    } });
++    const runner = createJobRunner({ prisma, handlers: { IMPORT: async () => { throw new Error("temporary"); } }, runnerId: "restarted-worker", leaseMs: 100 });
++    await expect(runner.runOnce()).rejects.toThrow("temporary");
++    const failed = await prisma.meeting_jobs.findUnique({ where: { id: job.id } });
++    expect(failed).toMatchObject({ status: "FAILED", attempts: 2, leaseOwner: null, activeKey: null });
++    const retried = await runner.retry(job.id);
++    expect(retried).toMatchObject({ id: job.id, status: "CREATED", activeKey: `${connectionId}:m-1` });
++  });
++
++  test("two runners cannot claim the same created row", async () => {
++    const job = await prisma.meeting_jobs.create({ data: {
++      kind: "IMPORT", connectionId, externalId: "m-1", activeKey: `${connectionId}:m-1`, quarter: "2026-Q2",
++      payload: JSON.stringify({ scope: dateRange }), status: "CREATED", attempts: 0,
++    } });
++    const handled = [];
++    const handler = async (job) => {
++      handled.push(job.id);
++      await new Promise((resolve) => setTimeout(resolve, 40));
++    };
++    const runnerA = createJobRunner({ prisma, handlers: { IMPORT: handler }, runnerId: "runner-a", leaseMs: 200 });
++    const runnerB = createJobRunner({ prisma, handlers: { IMPORT: handler }, runnerId: "runner-b", leaseMs: 200 });
++    await Promise.allSettled([runnerA.runOnce(), runnerB.runOnce()]);
++    expect(handled).toEqual([job.id]);
++    expect(await prisma.meeting_jobs.count({ where: { status: "SUCCESS" } })).toBe(1);
++    expect(await prisma.meeting_jobs.findFirst()).toMatchObject({ attempts: 1, leaseOwner: null });
++  });
++});
+diff --git a/server/__tests__/meetings/tencent.test.js b/server/__tests__/meetings/tencent.test.js
+new file mode 100644
+index 00000000..ea665b90
+--- /dev/null
++++ b/server/__tests__/meetings/tencent.test.js
+@@ -0,0 +1,140 @@
++const crypto = require("crypto");
++const { createTencentClient } = require("../../modules/meetings/tencent");
++const { createMeetingConfig } = require("../../modules/meetings/config");
++const { clipContent } = require("../../modules/meetings/importer");
++
++describe("Tencent Meeting connector", () => {
++  test("signs the complete canonical URI using Tencent's documented TC3 header order", async () => {
++    const calls = [];
++    const fetchImpl = async (url, options) => {
++      calls.push({ url: new URL(url), options });
++      return { ok: true, status: 200, json: async () => ({ meeting_info_list: [], remaining: 0 }) };
++    };
++    const client = createTencentClient({
++      config: { secretId: "AKIDfixture", secretKey: "fixture-secret", appId: "123", userId: "operator", operatorId: "operator", operatorIdType: 1 },
++      fetchImpl,
++      now: () => 1_700_000_000_000,
++      nonce: () => 12345,
++    });
++
++    await client.listMeetings({ from: 1_700_000_000, to: 1_700_086_400, cursor: "2" });
++
++    const { url, options } = calls[0];
++    const uri = `${url.pathname}${url.search}`;
++    const canonical = `GET\nX-TC-Key=AKIDfixture&X-TC-Nonce=12345&X-TC-Timestamp=1700000000\n${uri}\n`;
++    const hex = crypto.createHmac("sha256", "fixture-secret").update(canonical).digest("hex");
++    expect(url.origin).toBe("https://api.meeting.qq.com");
++    expect(options.headers["X-TC-Signature"]).toBe(Buffer.from(hex, "utf8").toString("base64"));
++    expect(options.headers.AppId).toBe("123");
++    expect(options.headers["X-TC-Nonce"]).toBe("12345");
++  });
++
++  test("maps official history pages and returns the next page cursor", async () => {
++    const urls = [];
++    const client = createTencentClient({
++      config: { secretId: "id", secretKey: "key", appId: "app", userId: "u" },
++      fetchImpl: async (url) => {
++        urls.push(new URL(url));
++        return { ok: true, status: 200, json: async () => ({
++          total_page: 2,
++          current_page: 1,
++          meeting_info_list: [{ meeting_id: "m1", subject: "Review", start_time: "1700000000", end_time: "1700003600" }],
++        }) };
++      },
++      now: () => 1_700_100_000_000,
++      nonce: () => 11,
++    });
++    const result = await client.listMeetings({ from: 1_700_000_000, to: 1_700_086_400 });
++    expect(urls[0].pathname).toBe("/v1/history/meetings/u");
++    expect(urls[0].searchParams.get("page")).toBe("1");
++    expect(result.items).toEqual([{ externalId: "m1", title: "Review", startTime: "2023-11-14T22:13:20.000Z", endTime: "2023-11-14T23:13:20.000Z" }]);
++    expect(result.nextCursor).toBe("2");
++  });
++
++  test("times out and does not expose credentials in errors", async () => {
++    const client = createTencentClient({
++      config: { secretId: "secret-id-value", secretKey: "secret-key-value", appId: "app", userId: "u" },
++      fetchImpl: async () => { throw new Error("request failed"); },
++      timeoutMs: 100,
++    });
++    await expect(client.listMeetings({ from: 100, to: 200 })).rejects.toThrow("Tencent Meeting request failed");
++    await expect(client.listMeetings({ from: 100, to: 200 })).rejects.not.toThrow("secret-key-value");
++  });
++
++  test("downloads only returned HTTPS Tencent artifact URLs without sending AK/SK headers", async () => {
++    let request;
++    const client = createTencentClient({
++      config: { secretId: "private-id", secretKey: "private-key", appId: "private-app", userId: "u" },
++      fetchImpl: async (url, options) => {
++        request = { url, options };
++        return { ok: true, headers: { get: () => "3" }, arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer };
++      },
++    });
++    expect(await client.downloadAttachment("https://download.tencent.com/files/file.txt")).toEqual(Buffer.from([1, 2, 3]));
++    expect(request.options.headers).toEqual({});
++    expect(request.url).toBe("https://download.tencent.com/files/file.txt");
++    await expect(client.downloadAttachment("https://example.com/file.txt")).rejects.toMatchObject({ code: "INVALID_TENCENT_DOWNLOAD_URL" });
++  });
++
++  test("normalizes multiple recording timestamps onto one timeline and exposes only a URL-free manifest", async () => {
++    const firstStart = 1_700_000_000_000;
++    const calls = [];
++    const fetchImpl = async (url) => {
++      const parsed = new URL(url);
++      calls.push(parsed);
++      if (parsed.pathname === "/v1/records") return { ok: true, status: 200, json: async () => ({ total_page: 1, record_meetings: [{
++        meeting_id: "m-1", record_files: [
++          { record_file_id: "rf-1", record_start_time: firstStart, record_end_time: firstStart + 1_000 },
++          { record_file_id: "rf-2", record_start_time: firstStart + 4 * 60 * 60 * 1_000, record_end_time: firstStart + 4 * 60 * 60 * 1_000 + 1_000 },
++        ],
++      }] }) };
++      if (parsed.pathname === "/v1/records/transcripts/details") return { ok: true, status: 200, json: async () => ({ minutes: { paragraphs: [{
++        pid: "0", start_time: 0, end_time: 1000, sentences: [{ words: [{ text: parsed.searchParams.get("record_file_id") }] }],
++      }] } }) };
++      if (parsed.pathname.startsWith("/v1/addresses/")) return { ok: true, status: 200, json: async () => ({ ai_minutes: [{ file_type: "txt", download_address: "https://download.tencent.com/secret-url" }] }) };
++      throw new Error("unexpected endpoint");
++    };
++    const client = createTencentClient({
++      config: { secretId: "id", secretKey: "key", appId: "app", userId: "u", operatorId: "u", capabilities: { transcript: "supported", attachments: "supported" } },
++      fetchImpl, now: () => firstStart, nonce: () => 11,
++    });
++    const content = await client.getContent("m-1", { meetingStartTime: firstStart, meetingEndTime: firstStart + 86_400_000 });
++    expect(content.segments.map((segment) => [segment.text, segment.location.startMs, segment.location.recordFileId])).toEqual([
++      ["rf-1", 0, "rf-1"], ["rf-2", 4 * 60 * 60 * 1_000, "rf-2"],
++    ]);
++    expect(clipContent(content, { from: 0, to: 3 * 60 * 60 * 1_000 }).segments).toHaveLength(1);
++    const manifest = await client.describeMeeting("m-1", { startTime: firstStart, endTime: firstStart + 86_400_000 });
++    expect(manifest.attachments).toEqual([{
++      externalFileId: "rf-1:ai_minutes:txt", name: "rf-1.txt", sourceType: "TENCENT_ORIGINAL", artifactType: "ai_minutes", bytes: null, maxBytes: 100_000_000,
++    }, {
++      externalFileId: "rf-2:ai_minutes:txt", name: "rf-2.txt", sourceType: "TENCENT_ORIGINAL", artifactType: "ai_minutes", bytes: null, maxBytes: 100_000_000,
++    }]);
++    expect(JSON.stringify(manifest)).not.toContain("secret-url");
++    expect(manifest.transcriptDurationMs).toBe(4 * 60 * 60 * 1_000 + 1_000);
++  });
++
++  test("redacts credentials from public configuration and keeps audit records secret-free", async () => {
++    const rows = [];
++    const prisma = {
++      meeting_connections: {
++        findFirst: async () => rows[0] || null,
++        upsert: async ({ create, update }) => {
++          rows[0] = { id: 1, ...create, ...(rows[0] ? update : {}) };
++          return rows[0];
++        },
++      },
++    };
++    const auditEntries = [];
++    const encryption = {
++      encrypt: (value) => `enc:${value}`,
++      decrypt: (value) => value.slice(4),
++    };
++    const service = createMeetingConfig({ prisma, encryption, audit: async (entry) => auditEntries.push(entry) });
++    await service.save({ id: 1, name: "Ops", secretId: "secret-id", secretKey: "secret-key", appId: "tenant", userId: "user" }, 9);
++    const publicConfig = await service.getPublic();
++    expect(publicConfig).toMatchObject({ name: "Ops", configured: true });
++    expect(publicConfig).not.toMatchObject({ secretId: "secret-id", secretKey: "secret-key" });
++    expect(await service.getPrivate()).toMatchObject({ secretId: "secret-id", secretKey: "secret-key" });
++    expect(JSON.stringify(auditEntries)).not.toContain("secret-key");
++  });
++});
+diff --git a/server/modules/meetings/config.js b/server/modules/meetings/config.js
+new file mode 100644
+index 00000000..8b5fd9ed
+--- /dev/null
++++ b/server/modules/meetings/config.js
+@@ -0,0 +1,164 @@
++const { MeetingError } = require("./errors");
++
++const PRIVATE_FIELDS = ["secretId", "secretKey", "stsToken"];
++
++function parseConfig(value) {
++  try {
++    return typeof value === "string" ? JSON.parse(value) : value || {};
++  } catch {
++    throw new MeetingError(
++      "Meeting connection configuration is invalid",
++      "INVALID_MEETING_CONFIG",
++      500
++    );
++  }
++}
++
++function createMeetingConfig({
++  prisma,
++  encryption,
++  audit = async () => {},
++} = {}) {
++  if (!prisma?.meeting_connections)
++    throw new TypeError("createMeetingConfig requires a Prisma client");
++  if (!encryption?.encrypt || !encryption?.decrypt)
++    throw new TypeError(
++      "Meeting credentials require encryption.encrypt and encryption.decrypt"
++    );
++  let selectedId = null;
++
++  async function findConnection(id) {
++    if (id != null)
++      return prisma.meeting_connections.findUnique
++        ? prisma.meeting_connections.findUnique({ where: { id: Number(id) } })
++        : prisma.meeting_connections.findFirst({ where: { id: Number(id) } });
++    return prisma.meeting_connections.findFirst({ orderBy: { id: "asc" } });
++  }
++
++  async function getPrivate(id) {
++    const row = await findConnection(id ?? selectedId);
++    if (!row) return null;
++    const stored = parseConfig(row.config);
++    let credentials = {};
++    if (stored.credentials) {
++      try {
++        credentials = JSON.parse(await encryption.decrypt(stored.credentials));
++      } catch {
++        throw new MeetingError(
++          "Meeting connection credentials could not be decrypted",
++          "MEETING_CREDENTIALS_UNAVAILABLE",
++          500
++        );
++      }
++    }
++    return { ...stored.settings, ...credentials, id: row.id, name: row.name };
++  }
++
++  async function getPublic(id) {
++    const row = await findConnection(id ?? selectedId);
++    if (!row) return null;
++    selectedId = row.id;
++    const stored = parseConfig(row.config);
++    const settings = stored.settings || {};
++    return {
++      id: row.id,
++      name: row.name,
++      configured: Boolean(stored.credentials),
++      ...(settings.userId ? { userId: settings.userId } : {}),
++      ...(settings.operatorIdType != null
++        ? { operatorIdType: settings.operatorIdType }
++        : {}),
++      capabilities: settings.capabilities || {},
++      credentialHints: stored.credentialHints || {},
++    };
++  }
++
++  async function save(input = {}, userId) {
++    const id = input.id == null ? undefined : Number(input.id);
++    const name = String(input.name || "Tencent Meeting").trim();
++    if (!name)
++      throw new MeetingError(
++        "A connection name is required",
++        "INVALID_CONNECTION_NAME"
++      );
++    const existing = id == null ? null : await findConnection(id);
++    const old = existing ? parseConfig(existing.config) : {};
++    const credentials = {};
++    let priorCredentials = {};
++    if (existing?.config) {
++      const prior = parseConfig(existing.config);
++      if (prior.credentials) {
++        try {
++          priorCredentials = JSON.parse(
++            await encryption.decrypt(prior.credentials)
++          );
++        } catch {
++          throw new MeetingError(
++            "Meeting connection credentials could not be decrypted",
++            "MEETING_CREDENTIALS_UNAVAILABLE",
++            500
++          );
++        }
++      }
++    }
++    for (const field of PRIVATE_FIELDS) {
++      if (input[field] != null && input[field] !== "")
++        credentials[field] = String(input[field]);
++      else if (priorCredentials[field])
++        credentials[field] = priorCredentials[field];
++    }
++    const encrypted = Object.keys(credentials).length
++      ? await encryption.encrypt(JSON.stringify(credentials))
++      : null;
++    const settings = {};
++    for (const field of [
++      "appId",
++      "sdkId",
++      "userId",
++      "operatorId",
++      "operatorIdType",
++      "instanceId",
++      "capabilities",
++    ]) {
++      if (input[field] != null) settings[field] = input[field];
++      else if (old.settings?.[field] != null)
++        settings[field] = old.settings[field];
++    }
++    const credentialHints = Object.fromEntries(
++      PRIVATE_FIELDS.filter((field) => credentials[field]).map((field) => [
++        field,
++        `••••${credentials[field].slice(-4)}`,
++      ])
++    );
++    const config = JSON.stringify({
++      settings,
++      credentials: encrypted,
++      credentialHints,
++    });
++    const data = { name, config };
++    let row;
++    if (prisma.meeting_connections.upsert && id != null) {
++      row = await prisma.meeting_connections.upsert({
++        where: { id },
++        create: data,
++        update: data,
++      });
++    } else if (id != null && existing) {
++      row = await prisma.meeting_connections.update({ where: { id }, data });
++    } else {
++      row = await prisma.meeting_connections.create({ data });
++    }
++    selectedId = row.id;
++    await audit({
++      action: "MEETING_CONNECTION_SAVED",
++      connectionId: row.id,
++      userId: userId ?? null,
++      name,
++    });
++    return getPublic(row.id);
++  }
++
++  return { getPublic, save, getPrivate };
++}
++
++module.exports = { createMeetingConfig };
+diff --git a/server/modules/meetings/importer.js b/server/modules/meetings/importer.js
+new file mode 100644
+index 00000000..2aa0ce4a
+--- /dev/null
++++ b/server/modules/meetings/importer.js
+@@ -0,0 +1,562 @@
++const { MeetingError } = require("./errors");
++const { LIMITS } = require("./constants");
++const { quarterFor } = require("./policy");
++const { createMeetingService } = require("./meetingService");
++
++function parseJson(value, fallback = {}) {
++  try {
++    return typeof value === "string" ? JSON.parse(value) : value || fallback;
++  } catch {
++    return fallback;
++  }
++}
++
++function makeActiveKey(connectionId, externalId) {
++  return `${Number(connectionId)}:${String(externalId)}`;
++}
++
++function hasSupportedContent(content = {}) {
++  if (
++    String(content.summary || "").trim() ||
++    String(content.transcript || "").trim()
++  )
++    return true;
++  if (
++    (content.segments || []).some((segment) =>
++      String(segment?.text || "").trim()
++    )
++  )
++    return true;
++  return (content.attachments || []).length > 0;
++}
++
++function clipContent(content = {}, scope = {}) {
++  const hasRange = scope.from != null || scope.to != null;
++  if (!hasRange) return content;
++  const from = Number(scope.from ?? 0);
++  const to = Number(scope.to);
++  if (
++    !Number.isFinite(from) ||
++    !Number.isFinite(to) ||
++    from < 0 ||
++    to <= from ||
++    to - from > LIMITS.transcriptDurationMs
++  ) {
++    throw new MeetingError(
++      "Transcript selection must be a positive interval of no more than three hours",
++      "TRANSCRIPT_SCOPE_LIMIT"
++    );
++  }
++  const transcriptSegments = (content.segments || []).filter(
++    (segment) => segment.location?.type === "transcript"
++  );
++  const sourceSegments = (content.segments || []).filter(
++    (segment) => segment.location?.type !== "transcript"
++  );
++  if (content.transcript && !transcriptSegments.length) {
++    throw new MeetingError(
++      "Tencent transcript has no timestamps; a time selection cannot be applied",
++      "TRANSCRIPT_TIMESTAMPS_REQUIRED"
++    );
++  }
++  const selected = transcriptSegments.filter((segment) => {
++    const start = Number(segment.location.startMs);
++    const end = Number(segment.location.endMs);
++    return (
++      Number.isFinite(start) && Number.isFinite(end) && start < to && end > from
++    );
++  });
++  return {
++    ...content,
++    transcript: selected.map((segment) => segment.text).join("\n"),
++    segments: [...sourceSegments, ...selected],
++  };
++}
++
++function createImporter({
++  prisma,
++  meetingService,
++  clientFactory,
++  sourceService,
++  configService,
++  audit = async () => {},
++} = {}) {
++  if (
++    !prisma ||
++    !meetingService ||
++    typeof clientFactory !== "function" ||
++    !sourceService
++  ) {
++    throw new TypeError(
++      "createImporter requires prisma, meetingService, clientFactory and sourceService"
++    );
++  }
++
++  async function connectionConfig(connection) {
++    if (configService?.getPrivate)
++      return configService.getPrivate(connection.id);
++    const stored = parseJson(connection.config);
++    return { ...stored.settings, ...stored };
++  }
++
++  async function assertCurrentLease(db, job) {
++    if (!job.leaseOwner) return;
++    const current = await db.meeting_jobs.findUnique({ where: { id: job.id } });
++    if (
++      !current ||
++      current.status !== "PROCESSING" ||
++      current.leaseOwner !== job.leaseOwner
++    ) {
++      throw new MeetingError(
++        "Import lease expired before the job could commit",
++        "IMPORT_LEASE_LOST",
++        409
++      );
++    }
++  }
++
++  async function completeJob(db, job, data) {
++    const where = job.leaseOwner
++      ? { id: job.id, status: "PROCESSING", leaseOwner: job.leaseOwner }
++      : { id: job.id, status: "CREATED", leaseOwner: null };
++    const result = await db.meeting_jobs.updateMany({ where, data });
++    if (result.count !== 1)
++      throw new MeetingError(
++        "Import lease expired before the job could commit",
++        "IMPORT_LEASE_LOST",
++        409
++      );
++  }
++
++  async function findMetadata(client, externalId, scope) {
++    const seen = new Set();
++    let cursor;
++    while (true) {
++      const page = await client.listMeetings({
++        startTime: scope.startTime,
++        endTime: scope.endTime,
++        cursor,
++      });
++      const match = (page.items || []).find(
++        (item) => String(item.externalId) === String(externalId)
++      );
++      if (match) return match;
++      if (!page.nextCursor || seen.has(String(page.nextCursor))) break;
++      seen.add(String(page.nextCursor));
++      cursor = page.nextCursor;
++    }
++    throw new MeetingError(
++      "Tencent Meeting did not return the selected meeting in this time range",
++      "MEETING_NOT_FOUND",
++      404
++    );
++  }
++
++  async function queue(connectionId, externalId, scope = {}, userId) {
++    const normalizedConnectionId = Number(connectionId);
++    const normalizedExternalId =
++      typeof externalId === "string" ? externalId.trim() : "";
++    if (
++      !Number.isSafeInteger(normalizedConnectionId) ||
++      normalizedConnectionId <= 0 ||
++      !normalizedExternalId
++    ) {
++      throw new MeetingError(
++        "A valid connection and external meeting ID are required",
++        "INVALID_IMPORT_ID"
++      );
++    }
++    const selectedScope = { ...scope };
++    if (selectedScope.from != null || selectedScope.to != null) {
++      const from = Number(selectedScope.from ?? 0);
++      const to = Number(selectedScope.to);
++      if (
++        !Number.isFinite(from) ||
++        !Number.isFinite(to) ||
++        from < 0 ||
++        to <= from ||
++        to - from > LIMITS.transcriptDurationMs
++      ) {
++        throw new MeetingError(
++          "Transcript selection must be a positive interval of no more than three hours",
++          "TRANSCRIPT_SCOPE_LIMIT"
++        );
++      }
++      selectedScope.from = from;
++      selectedScope.to = to;
++    }
++    if (!selectedScope.startTime || !selectedScope.endTime) {
++      throw new MeetingError(
++        "Meeting import requires a date range",
++        "INVALID_IMPORT_SCOPE"
++      );
++    }
++    const searchFrom = new Date(selectedScope.startTime);
++    const searchTo = new Date(selectedScope.endTime);
++    if (
++      Number.isNaN(searchFrom.getTime()) ||
++      Number.isNaN(searchTo.getTime()) ||
++      searchTo <= searchFrom ||
++      searchTo - searchFrom > 90 * 24 * 60 * 60 * 1000
++    ) {
++      throw new MeetingError(
++        "Meeting discovery range must be a valid interval of at most 90 days",
++        "INVALID_IMPORT_SCOPE"
++      );
++    }
++    const connection = (await prisma.meeting_connections.findUnique)
++      ? await prisma.meeting_connections.findUnique({
++          where: { id: normalizedConnectionId },
++        })
++      : await prisma.meeting_connections.findFirst({
++          where: { id: normalizedConnectionId },
++        });
++    if (!connection)
++      throw new MeetingError(
++        "Meeting connection not found",
++        "MEETING_CONNECTION_NOT_FOUND",
++        404
++      );
++    const config = await connectionConfig(connection);
++    const client = clientFactory({ connection, config });
++    const metadata = await findMetadata(
++      client,
++      normalizedExternalId,
++      selectedScope
++    );
++    const startTime = new Date(metadata.startTime);
++    const endTime = metadata.endTime ? new Date(metadata.endTime) : null;
++    if (
++      Number.isNaN(startTime.getTime()) ||
++      (endTime && Number.isNaN(endTime.getTime()))
++    ) {
++      throw new MeetingError(
++        "Tencent returned invalid meeting metadata",
++        "TENCENT_INVALID_MEETING",
++        502
++      );
++    }
++    const quarter = quarterFor(startTime);
++    const activeKey = makeActiveKey(
++      normalizedConnectionId,
++      normalizedExternalId
++    );
++    const payload = {
++      scope: selectedScope,
++      userId: userId ?? null,
++      meeting: {
++        ...metadata,
++        startTime: startTime.toISOString(),
++        endTime: endTime?.toISOString() || null,
++      },
++    };
++    const transaction = (callback) =>
++      prisma.$transaction ? prisma.$transaction(callback) : callback(prisma);
++    try {
++      return await transaction(async (db) => {
++        const duplicateMeeting = await db.meetings.findUnique({
++          where: { activeKey },
++        });
++        if (duplicateMeeting)
++          throw new MeetingError(
++            "This meeting is already imported",
++            "MEETING_DUPLICATE",
++            409
++          );
++        const reservations = await db.meeting_jobs.findMany({
++          where: {
++            kind: "IMPORT",
++            status: { in: ["CREATED", "PROCESSING"] },
++            quarter,
++          },
++        });
++        if (reservations.some((job) => job.activeKey === activeKey)) {
++          throw new MeetingError(
++            "This meeting already has an active import",
++            "MEETING_DUPLICATE",
++            409
++          );
++        }
++        const meetings = await db.meetings.findMany({
++          where: { quarter, deletedAt: null },
++        });
++        const activeMeetingKeys = new Set(
++          meetings.map((meeting) => meeting.activeKey).filter(Boolean)
++        );
++        const reserved = reservations.filter(
++          (job) => !job.activeKey || !activeMeetingKeys.has(job.activeKey)
++        ).length;
++        if (meetings.length + reserved >= LIMITS.meetingsPerQuarter) {
++          throw new MeetingError(
++            "The quarterly meeting limit has been reached",
++            "MEETING_QUARTER_LIMIT",
++            409
++          );
++        }
++        return db.meeting_jobs.create({
++          data: {
++            kind: "IMPORT",
++            meetingId: null,
++            connectionId: normalizedConnectionId,
++            externalId: normalizedExternalId,
++            activeKey,
++            quarter,
++            payload: JSON.stringify(payload),
++            status: "CREATED",
++            stage: "RESERVED",
++            error: null,
++            attempts: 0,
++            leaseOwner: null,
++            leaseUntil: null,
++          },
++        });
++      });
++    } catch (error) {
++      if (error.code === "P2002")
++        throw new MeetingError(
++          "This meeting already has an active import",
++          "MEETING_DUPLICATE",
++          409
++        );
++      throw error;
++    }
++  }
++
++  async function process(jobInput) {
++    const job =
++      typeof jobInput === "number"
++        ? await prisma.meeting_jobs.findUnique({ where: { id: jobInput } })
++        : jobInput;
++    if (!job || job.kind !== "IMPORT")
++      throw new MeetingError(
++        "Import job not found",
++        "IMPORT_JOB_NOT_FOUND",
++        404
++      );
++    const payload = parseJson(job.payload);
++    try {
++      await assertCurrentLease(prisma, job);
++      const connection = await (prisma.meeting_connections.findUnique
++        ? prisma.meeting_connections.findUnique({
++            where: { id: job.connectionId },
++          })
++        : prisma.meeting_connections.findFirst({
++            where: { id: job.connectionId },
++          }));
++      if (!connection)
++        throw new MeetingError(
++          "Meeting connection not found",
++          "MEETING_CONNECTION_NOT_FOUND",
++          404
++        );
++      const config = await connectionConfig(connection);
++      const client = clientFactory({ connection, config });
++      const metadata = payload.meeting;
++      if (!metadata)
++        throw new MeetingError(
++          "Import job is missing reserved meeting metadata",
++          "IMPORT_METADATA_MISSING",
++          500
++        );
++      const contentScope = {
++        ...(payload.scope || {}),
++        meetingStartTime: metadata.startTime,
++        meetingEndTime: metadata.endTime,
++      };
++      if (!contentScope.meetingEndTime)
++        contentScope.meetingEndTime = payload.scope?.endTime;
++      const content = clipContent(
++        await client.getContent(job.externalId, contentScope),
++        payload.scope || {}
++      );
++
++      const attachments = [];
++      let attachmentBytes = 0;
++      for (const attachment of content.attachments || []) {
++        if (
++          payload.scope?.attachmentIds &&
++          !payload.scope.attachmentIds.includes(attachment.externalFileId)
++        )
++          continue;
++        if (!client.downloadAttachment) {
++          if (!attachment.buffer)
++            throw new MeetingError(
++              "Tencent artifact download is required before import",
++              "IMPORT_DOWNLOAD_UNAVAILABLE",
++              502
++            );
++          attachments.push(attachment);
++        } else {
++          const buffer = await client.downloadAttachment(
++            attachment.downloadUrl,
++            LIMITS.fileBytes
++          );
++          if (buffer.byteLength > LIMITS.fileBytes)
++            throw new MeetingError(
++              "Tencent artifact exceeds the 100 MB file limit",
++              "FILE_SIZE_LIMIT",
++              413
++            );
++          attachments.push({ ...attachment, buffer, bytes: buffer.byteLength });
++        }
++        const bytes = Number(
++          attachments[attachments.length - 1].bytes ??
++            attachments[attachments.length - 1].buffer?.byteLength ??
++            0
++        );
++        if (bytes > LIMITS.fileBytes)
++          throw new MeetingError(
++            "Tencent artifact exceeds the 100 MB file limit",
++            "FILE_SIZE_LIMIT",
++            413
++          );
++        attachmentBytes += bytes;
++        if (attachments.length > LIMITS.filesPerMeeting)
++          throw new MeetingError(
++            "A meeting can have no more than 20 active files",
++            "MEETING_FILE_COUNT_LIMIT",
++            413
++          );
++        if (attachmentBytes > LIMITS.meetingBytes)
++          throw new MeetingError(
++            "A meeting can contain no more than 500 MB of files",
++            "MEETING_SIZE_LIMIT",
++            413
++          );
++      }
++      const selectedContent = { ...content, attachments };
++      const hasContent = hasSupportedContent(selectedContent);
++      const availableCapabilities = Object.values(
++        selectedContent.capabilities || {}
++      ).some((capability) => capability?.status === "supported");
++      if (!hasContent && availableCapabilities) {
++        throw new MeetingError(
++          "Tencent reported content capability but returned no usable content",
++          "TENCENT_CONTENT_EMPTY",
++          502
++        );
++      }
++      if (!hasContent) {
++        const transaction = (callback) =>
++          prisma.$transaction
++            ? prisma.$transaction(callback)
++            : callback(prisma);
++        const meeting = await transaction(async (tx) => {
++          await assertCurrentLease(tx, job);
++          const transactionalService = createMeetingService({
++            prisma: tx,
++            audit,
++          });
++          const created = await transactionalService.createMetadata(
++            {
++              connectionId: job.connectionId,
++              externalId: job.externalId,
++              title: metadata.title,
++              startTime: metadata.startTime,
++              endTime: metadata.endTime,
++              coverage: JSON.stringify(selectedContent.capabilities || {}),
++            },
++            payload.userId
++          );
++          await completeJob(tx, job, {
++            status: "SUCCESS",
++            stage: "METADATA_ONLY",
++            meetingId: created.id,
++            activeKey: null,
++            error: null,
++            leaseOwner: null,
++            leaseUntil: null,
++          });
++          return created;
++        });
++        await audit({
++          action: "MEETING_IMPORT_METADATA_ONLY",
++          meetingId: meeting.id,
++          userId: payload.userId ?? null,
++        });
++        return meeting;
++      }
++      if (
++        typeof sourceService.prepareImport !== "function" ||
++        typeof sourceService.commitImport !== "function"
++      ) {
++        throw new MeetingError(
++          "Meeting source importer is unavailable",
++          "IMPORT_SOURCE_SERVICE_UNAVAILABLE",
++          500
++        );
++      }
++      const prepared = await sourceService.prepareImport(selectedContent);
++      if (!prepared || (Array.isArray(prepared) && prepared.length === 0)) {
++        throw new MeetingError(
++          "Tencent content did not produce any located source material",
++          "IMPORT_CONTENT_UNUSABLE",
++          422
++        );
++      }
++      const transaction = (callback) =>
++        prisma.$transaction ? prisma.$transaction(callback) : callback(prisma);
++      const meeting = await transaction(async (tx) => {
++        await assertCurrentLease(tx, job);
++        const transactionalService = createMeetingService({
++          prisma: tx,
++          audit,
++        });
++        const created = await transactionalService.createMetadata(
++          {
++            connectionId: job.connectionId,
++            externalId: job.externalId,
++            title: metadata.title,
++            startTime: metadata.startTime,
++            endTime: metadata.endTime,
++            summary: selectedContent.summary || null,
++            transcript: selectedContent.transcript || null,
++            coverage: JSON.stringify(selectedContent.capabilities || {}),
++          },
++          payload.userId
++        );
++        const indexing = await tx.meetings.update({
++          where: { id: created.id },
++          data: { retrievalStatus: "INDEXING", generation: 1 },
++        });
++        await sourceService.commitImport(tx, indexing, prepared);
++        await completeJob(tx, job, {
++          status: "SUCCESS",
++          stage: "COMMITTED",
++          meetingId: indexing.id,
++          activeKey: null,
++          error: null,
++          leaseOwner: null,
++          leaseUntil: null,
++        });
++        return indexing;
++      });
++      await audit({
++        action: "MEETING_IMPORT_COMMITTED",
++        meetingId: meeting.id,
++        userId: payload.userId ?? null,
++      });
++      return meeting;
++    } catch (error) {
++      await prisma.meeting_jobs.updateMany({
++        where: {
++          id: job.id,
++          status: { in: ["CREATED", "PROCESSING"] },
++          leaseOwner: job.leaseOwner ?? null,
++        },
++        data: {
++          status: "FAILED",
++          error: String(error?.message || "Import failed").slice(0, 1000),
++          activeKey: null,
++          leaseOwner: null,
++          leaseUntil: null,
++        },
++      });
++      throw error;
++    }
++  }
++
++  return { queue, process };
++}
++
++module.exports = { createImporter, clipContent, hasSupportedContent };
+diff --git a/server/modules/meetings/jobs.js b/server/modules/meetings/jobs.js
+new file mode 100644
+index 00000000..b6952333
+--- /dev/null
++++ b/server/modules/meetings/jobs.js
+@@ -0,0 +1,240 @@
++const crypto = require("crypto");
++const { MeetingError } = require("./errors");
++const { LIMITS } = require("./constants");
++
++function createJobRunner({
++  prisma,
++  handlers = {},
++  pollMs = 2000,
++  leaseMs = 30_000,
++  runnerId = crypto.randomUUID(),
++} = {}) {
++  if (!prisma?.meeting_jobs)
++    throw new TypeError("createJobRunner requires a Prisma client");
++  let timer = null;
++  let ticking = false;
++
++  async function transaction(callback) {
++    return prisma.$transaction
++      ? prisma.$transaction(callback)
++      : callback(prisma);
++  }
++
++  async function enqueue(kind, payload, identity = {}) {
++    const data = {
++      kind: String(kind),
++      payload:
++        typeof payload === "string" ? payload : JSON.stringify(payload || {}),
++      status: "CREATED",
++      attempts: 0,
++      stage: null,
++      error: null,
++      meetingId: identity.meetingId ?? null,
++      connectionId: identity.connectionId ?? null,
++      externalId: identity.externalId ?? null,
++      activeKey: identity.activeKey ?? null,
++      quarter: identity.quarter ?? null,
++    };
++    try {
++      return await prisma.meeting_jobs.create({ data });
++    } catch (error) {
++      if (error.code === "P2002")
++        throw new MeetingError(
++          "This meeting import is already queued",
++          "MEETING_DUPLICATE",
++          409
++        );
++      throw error;
++    }
++  }
++
++  async function claimNext() {
++    return transaction(async (db) => {
++      const now = new Date();
++      const candidates = await db.meeting_jobs.findMany({
++        where: { status: "CREATED" },
++        orderBy: { createdAt: "asc" },
++        take: 1,
++      });
++      let candidate = candidates[0];
++      let stale = false;
++      if (!candidate) {
++        const expired = await db.meeting_jobs.findMany({
++          where: { status: "PROCESSING", leaseUntil: { lte: now } },
++          orderBy: { updatedAt: "asc" },
++          take: 1,
++        });
++        candidate = expired[0];
++        stale = Boolean(candidate);
++      }
++      if (!candidate) return null;
++      const where = stale
++        ? { id: candidate.id, status: "PROCESSING", leaseUntil: { lte: now } }
++        : { id: candidate.id, status: "CREATED" };
++      const leaseOwner = `${runnerId}:${crypto.randomUUID()}`;
++      const claimed = await db.meeting_jobs.updateMany({
++        where,
++        data: {
++          status: "PROCESSING",
++          leaseOwner,
++          leaseUntil: new Date(now.getTime() + leaseMs),
++          attempts: Number(candidate.attempts || 0) + 1,
++        },
++      });
++      if (claimed.count !== 1) return null;
++      return db.meeting_jobs.findUnique({ where: { id: candidate.id } });
++    });
++  }
++
++  async function runOnce() {
++    const job = await claimNext();
++    if (!job) return false;
++    const heartbeatMs = Math.max(1, Math.floor(leaseMs / 3));
++    const heartbeat = setInterval(() => {
++      prisma.meeting_jobs
++        .updateMany({
++          where: {
++            id: job.id,
++            status: "PROCESSING",
++            leaseOwner: job.leaseOwner,
++          },
++          data: { leaseUntil: new Date(Date.now() + leaseMs) },
++        })
++        .catch(() => {});
++    }, heartbeatMs);
++    heartbeat.unref?.();
++    try {
++      const handler = handlers[job.kind];
++      if (typeof handler !== "function")
++        throw new MeetingError(
++          `No handler is registered for ${job.kind}`,
++          "JOB_HANDLER_MISSING",
++          500
++        );
++      await handler(job);
++      await prisma.meeting_jobs.updateMany({
++        where: { id: job.id, status: "PROCESSING", leaseOwner: job.leaseOwner },
++        data: {
++          status: "SUCCESS",
++          error: null,
++          leaseOwner: null,
++          leaseUntil: null,
++          activeKey: null,
++        },
++      });
++    } catch (error) {
++      await prisma.meeting_jobs.updateMany({
++        where: { id: job.id, status: "PROCESSING", leaseOwner: job.leaseOwner },
++        data: {
++          status: "FAILED",
++          error: String(error?.message || "Job failed").slice(0, 1000),
++          leaseOwner: null,
++          leaseUntil: null,
++          activeKey: null,
++        },
++      });
++      throw error;
++    } finally {
++      clearInterval(heartbeat);
++    }
++    return true;
++  }
++
++  async function retry(id) {
++    return transaction(async (db) => {
++      const job = await db.meeting_jobs.findUnique({
++        where: { id: Number(id) },
++      });
++      if (!job || job.status !== "FAILED")
++        throw new MeetingError(
++          "Only failed jobs can be retried",
++          "JOB_NOT_RETRYABLE",
++          409
++        );
++      let activeKey = job.activeKey;
++      if (job.kind === "IMPORT") {
++        activeKey = `${job.connectionId}:${job.externalId}`;
++        if (await db.meetings.findUnique({ where: { activeKey } })) {
++          throw new MeetingError(
++            "This meeting is already imported",
++            "MEETING_DUPLICATE",
++            409
++          );
++        }
++        const [meetings, reservations] = await Promise.all([
++          db.meetings.findMany({
++            where: { quarter: job.quarter, deletedAt: null },
++          }),
++          db.meeting_jobs.findMany({
++            where: {
++              kind: "IMPORT",
++              quarter: job.quarter,
++              status: { in: ["CREATED", "PROCESSING"] },
++            },
++          }),
++        ]);
++        const activeKeys = new Set(
++          meetings.map((meeting) => meeting.activeKey).filter(Boolean)
++        );
++        const reserved = reservations.filter(
++          (reservation) =>
++            reservation.id !== job.id &&
++            (!reservation.activeKey || !activeKeys.has(reservation.activeKey))
++        ).length;
++        if (meetings.length + reserved >= LIMITS.meetingsPerQuarter) {
++          throw new MeetingError(
++            "The quarterly meeting limit has been reached",
++            "MEETING_QUARTER_LIMIT",
++            409
++          );
++        }
++      }
++      try {
++        return await db.meeting_jobs.update({
++          where: { id: job.id },
++          data: {
++            status: "CREATED",
++            activeKey,
++            error: null,
++            stage: null,
++            leaseOwner: null,
++            leaseUntil: null,
++          },
++        });
++      } catch (error) {
++        if (error.code === "P2002")
++          throw new MeetingError(
++            "This meeting import already has an active reservation",
++            "MEETING_DUPLICATE",
++            409
++          );
++        throw error;
++      }
++    });
++  }
++
++  function start() {
++    if (timer) return;
++    timer = setInterval(async () => {
++      if (ticking) return;
++      ticking = true;
++      try {
++        await runOnce();
++      } catch {
++        /* job state records the failure */
++      } finally {
++        ticking = false;
++      }
++    }, pollMs);
++    timer.unref?.();
++  }
++
++  function stop() {
++    if (timer) clearInterval(timer);
++    timer = null;
++  }
++
++  return { start, stop, enqueue, retry, runOnce };
++}
++
++module.exports = { createJobRunner };
+diff --git a/server/modules/meetings/tencent.js b/server/modules/meetings/tencent.js
+new file mode 100644
+index 00000000..4fbaa8ff
+--- /dev/null
++++ b/server/modules/meetings/tencent.js
+@@ -0,0 +1,562 @@
++const crypto = require("crypto");
++const { MeetingError } = require("./errors");
++
++const API_ORIGIN = "https://api.meeting.qq.com";
++const DEFAULT_TIMEOUT_MS = 15_000;
++const MAX_FILE_BYTES = 100_000_000;
++
++function toUnixSeconds(value) {
++  const numeric = Number(value);
++  if (Number.isFinite(numeric) && numeric > 0)
++    return Math.floor(numeric > 10_000_000_000 ? numeric / 1000 : numeric);
++  const parsed = new Date(value).getTime();
++  if (!Number.isFinite(parsed))
++    throw new MeetingError(
++      "A valid Tencent Meeting time range is required",
++      "INVALID_IMPORT_SCOPE"
++    );
++  return Math.floor(parsed / 1000);
++}
++
++function toIso(value) {
++  if (value == null || value === "") return null;
++  const number = Number(value);
++  const date = Number.isFinite(number)
++    ? new Date(number > 10_000_000_000 ? number : number * 1000)
++    : new Date(value);
++  return Number.isNaN(date.getTime()) ? null : date.toISOString();
++}
++
++function canonicalSignature({
++  secretId,
++  secretKey,
++  method,
++  nonce,
++  timestamp,
++  uri,
++  body = "",
++}) {
++  const headerString = `X-TC-Key=${secretId}&X-TC-Nonce=${nonce}&X-TC-Timestamp=${timestamp}`;
++  const text = `${method}\n${headerString}\n${uri}\n${body}`;
++  const hex = crypto
++    .createHmac("sha256", secretKey)
++    .update(text, "utf8")
++    .digest("hex");
++  return Buffer.from(hex, "utf8").toString("base64");
++}
++
++function createTencentClient({
++  config = {},
++  fetchImpl = globalThis.fetch,
++  timeoutMs = DEFAULT_TIMEOUT_MS,
++  now = Date.now,
++  nonce,
++} = {}) {
++  if (typeof fetchImpl !== "function")
++    throw new TypeError("createTencentClient requires fetch");
++  if (!config.secretId || !config.secretKey || !config.appId) {
++    throw new MeetingError(
++      "Tencent Meeting AK/SK credentials and enterprise AppId are required",
++      "MEETING_CONNECTION_UNCONFIGURED",
++      400
++    );
++  }
++  const randomNonce = nonce || (() => crypto.randomInt(1, 2_147_483_647));
++  const capabilities = config.capabilities || {};
++
++  async function request(
++    path,
++    { method = "GET", body = "", download = false, urlOverride } = {}
++  ) {
++    const target = urlOverride
++      ? new URL(urlOverride)
++      : new URL(path, API_ORIGIN);
++    if (
++      target.protocol !== "https:" ||
++      (urlOverride &&
++        !/(?:^|\.)(?:tencent\.com|qcloud\.com|myqcloud\.com)$/i.test(
++          target.hostname
++        ))
++    ) {
++      throw new MeetingError(
++        "Tencent returned an unsupported download address",
++        "INVALID_TENCENT_DOWNLOAD_URL",
++        502
++      );
++    }
++    const uri = `${target.pathname}${target.search}`;
++    const timestamp = String(Math.floor(now() / 1000));
++    const requestNonce = String(randomNonce());
++    const headers = urlOverride
++      ? {}
++      : {
++          "Content-Type": "application/json",
++          "X-TC-Key": String(config.secretId),
++          "X-TC-Timestamp": timestamp,
++          "X-TC-Nonce": requestNonce,
++          "X-TC-Signature": canonicalSignature({
++            secretId: String(config.secretId),
++            secretKey: String(config.secretKey),
++            method,
++            nonce: requestNonce,
++            timestamp,
++            uri,
++            body,
++          }),
++          AppId: String(config.appId),
++          "X-TC-Registered": "1",
++        };
++    if (!urlOverride && config.sdkId) headers.SdkId = String(config.sdkId);
++    if (!urlOverride && config.stsToken)
++      headers["STS-Token"] = String(config.stsToken);
++    const controller = new AbortController();
++    const timeout = setTimeout(() => controller.abort(), timeoutMs);
++    try {
++      const response = await fetchImpl(target.toString(), {
++        method,
++        headers,
++        ...(body ? { body } : {}),
++        signal: controller.signal,
++      });
++      if (!response.ok) {
++        let apiCode = null;
++        try {
++          const errorBody = await response.json();
++          apiCode = errorBody.error_code ?? errorBody.code ?? null;
++        } catch {
++          /* keep upstream error details private */
++        }
++        const error = new MeetingError(
++          `Tencent Meeting request failed (HTTP ${response.status})`,
++          "TENCENT_API_FAILURE",
++          502
++        );
++        error.apiCode = apiCode == null ? null : String(apiCode);
++        throw error;
++      }
++      if (download) return response;
++      try {
++        return await response.json();
++      } catch {
++        throw new MeetingError(
++          "Tencent Meeting returned an invalid response",
++          "TENCENT_INVALID_RESPONSE",
++          502
++        );
++      }
++    } catch (error) {
++      if (error instanceof MeetingError) throw error;
++      if (error?.name === "AbortError")
++        throw new MeetingError(
++          "Tencent Meeting request timed out",
++          "TENCENT_TIMEOUT",
++          504
++        );
++      throw new MeetingError(
++        "Tencent Meeting request failed",
++        "TENCENT_API_FAILURE",
++        502
++      );
++    } finally {
++      clearTimeout(timeout);
++    }
++  }
++
++  async function listMeetings(query = {}) {
++    const userId = config.userId;
++    if (!userId)
++      throw new MeetingError(
++        "Tencent operator user ID is required",
++        "MEETING_CONNECTION_UNCONFIGURED",
++        400
++      );
++    const from = toUnixSeconds(query.from ?? query.startTime);
++    const to = toUnixSeconds(query.to ?? query.endTime);
++    if (to <= from || to - from > 90 * 24 * 60 * 60) {
++      throw new MeetingError(
++        "Tencent history search must be a positive interval of at most 90 days",
++        "INVALID_IMPORT_SCOPE"
++      );
++    }
++    const page = Math.max(1, Number.parseInt(query.cursor || "1", 10) || 1);
++    const params = new URLSearchParams({
++      page_size: "20",
++      page: String(page),
++      start_time: String(from),
++      end_time: String(to),
++    });
++    const data = await request(
++      `/v1/history/meetings/${encodeURIComponent(userId)}?${params}`
++    );
++    const items = (data.meeting_info_list || []).map((meeting) => ({
++      externalId: String(meeting.meeting_id),
++      title: String(meeting.subject || ""),
++      startTime: toIso(meeting.start_time),
++      endTime: toIso(meeting.end_time),
++    }));
++    const totalPage = Number(data.total_page || 0);
++    return { items, nextCursor: page < totalPage ? String(page + 1) : null };
++  }
++
++  async function discoverRecord(externalId, range = {}) {
++    const operatorId = config.operatorId || config.userId;
++    const operatorIdType = Number(config.operatorIdType || 1);
++    const from = toUnixSeconds(range.meetingStartTime ?? range.startTime);
++    const to = toUnixSeconds(range.meetingEndTime ?? range.endTime);
++    if (to <= from || to - from > 31 * 24 * 60 * 60) {
++      throw new MeetingError(
++        "Tencent recording search must be a positive interval of at most 31 days",
++        "INVALID_IMPORT_SCOPE"
++      );
++    }
++    const recordings = [];
++    let recordPage = 1;
++    let recordPages = 1;
++    while (recordPage <= recordPages) {
++      const recordParams = new URLSearchParams({
++        operator_id: String(operatorId),
++        operator_id_type: String(operatorIdType),
++        start_time: String(from),
++        end_time: String(to),
++        meeting_id: String(externalId),
++        page_size: "20",
++        page: String(recordPage),
++      });
++      const records = await request(`/v1/records?${recordParams}`);
++      recordings.push(...(records.record_meetings || []));
++      recordPages = Math.max(recordPages, Number(records.total_page || 1));
++      recordPage += 1;
++    }
++    const matchingRecords = recordings.filter(
++      (item) => String(item.meeting_id) === String(externalId)
++    );
++    const files = matchingRecords
++      .flatMap((item) => item.record_files || [])
++      .sort(
++        (left, right) =>
++          Number(left.record_start_time || 0) -
++          Number(right.record_start_time || 0)
++      );
++    if (
++      files.length > 1 &&
++      files.some((file) => !Number.isFinite(Number(file.record_start_time)))
++    ) {
++      throw new MeetingError(
++        "Tencent did not return recording start times needed to join multiple transcripts",
++        "TENCENT_RECORD_TIMING_MISSING",
++        502
++      );
++    }
++    return { matchingRecords, files, from, to, operatorId, operatorIdType };
++  }
++
++  async function getContent(externalId, scope = {}) {
++    const { files, operatorId, operatorIdType } = await discoverRecord(
++      externalId,
++      scope
++    );
++    const timelineStart = files.length ? Number(files[0].record_start_time) : 0;
++    const transcriptCapability =
++      capabilities.transcript === "supported" ||
++      capabilities.transcript?.status === "supported";
++    const summaryCapability =
++      capabilities.summary === "supported" ||
++      capabilities.summary?.status === "supported";
++    const attachmentCapability =
++      capabilities.attachments === "supported" ||
++      capabilities.attachments?.status === "supported";
++    const result = {
++      summary: null,
++      transcript: null,
++      segments: [],
++      attachments: [],
++      capabilities: {
++        transcript: transcriptCapability
++          ? { status: "supported" }
++          : {
++              status: "unsupported",
++              reason:
++                "Structured transcript retrieval is not enabled for this connection; add transcript text manually if needed.",
++            },
++        summary: summaryCapability
++          ? { status: "supported" }
++          : {
++              status: "unsupported",
++              reason:
++                "Summary retrieval is not enabled for this connection. Add minutes manually if needed.",
++            },
++        attachments: attachmentCapability
++          ? { status: "supported" }
++          : {
++              status: "unsupported",
++              reason:
++                "Recording artifact downloads are not enabled for this connection. Add files manually if needed.",
++            },
++      },
++    };
++    if (!files.length) {
++      result.capabilities.transcript = {
++        status: "absent",
++        reason: "Tencent returned no recording file for this meeting.",
++      };
++      result.capabilities.summary = {
++        status: "absent",
++        reason: "Tencent returned no recording file for this meeting.",
++      };
++      result.capabilities.attachments = {
++        status: "absent",
++        reason: "Tencent returned no recording file for this meeting.",
++      };
++      return result;
++    }
++    for (const file of files) {
++      const fileId = String(file.record_file_id);
++      const fileOffsetMs = Math.max(
++        0,
++        Number(file.record_start_time || timelineStart) - timelineStart
++      );
++      if (transcriptCapability) {
++        const transcriptParams = new URLSearchParams({
++          record_file_id: fileId,
++          meeting_id: String(externalId),
++          operator_id: String(operatorId),
++          operator_id_type: String(operatorIdType),
++        });
++        try {
++          const transcript = await request(
++            `/v1/records/transcripts/details?${transcriptParams}`
++          );
++          const paragraphs = transcript.minutes?.paragraphs || [];
++          const segments = paragraphs
++            .map((paragraph, index) => ({
++              text: (paragraph.sentences || [])
++                .map((sentence) =>
++                  (sentence.words || []).map((word) => word.text || "").join("")
++                )
++                .join(""),
++              location: {
++                type: "transcript",
++                paragraph: Number(paragraph.pid ?? index),
++                startMs: fileOffsetMs + Number(paragraph.start_time),
++                endMs: fileOffsetMs + Number(paragraph.end_time),
++                recordFileId: fileId,
++              },
++            }))
++            .filter((segment) => segment.text.trim());
++          result.segments.push(...segments);
++          result.transcript = result.segments
++            .map((segment) => segment.text)
++            .join("\n");
++          if (!segments.length)
++            result.capabilities.transcript = {
++              status: "absent",
++              reason:
++                "Tencent returned no generated transcript paragraphs for this recording.",
++            };
++        } catch (error) {
++          if (
++            error.code === "TENCENT_API_FAILURE" &&
++            ["30001", "30002", "4049"].includes(error.apiCode)
++          ) {
++            result.capabilities.transcript = {
++              status: "absent",
++              reason:
++                "Tencent returned no generated transcript for this recording.",
++            };
++          } else throw error;
++        }
++      }
++      if (summaryCapability) {
++        const minuteParams = new URLSearchParams({
++          operator_id_type: String(operatorIdType),
++          operator_id: String(operatorId),
++          minute_type: "0",
++          text_type: "1",
++        });
++        const minute = await request(
++          `/v1/smart/minutes/${encodeURIComponent(fileId)}?${minuteParams}`
++        );
++        result.summary = minute.meeting_minute?.minute || null;
++        if (!result.summary)
++          result.capabilities.summary = {
++            status: "absent",
++            reason:
++              "Tencent returned no generated smart minutes for this recording.",
++          };
++      }
++      if (attachmentCapability) {
++        const detailParams = new URLSearchParams({
++          operator_id: String(operatorId),
++          operator_id_type: String(operatorIdType),
++        });
++        const detail = await request(
++          `/v1/addresses/${encodeURIComponent(fileId)}?${detailParams}`
++        );
++        for (const type of [
++          "meeting_summary",
++          "ai_meeting_transcripts",
++          "ai_minutes",
++          "ai_topic_minutes",
++          "ai_speaker_minutes",
++          "ai_ds_minutes",
++        ]) {
++          for (const artifact of detail[type] || []) {
++            if (!artifact.download_address) continue;
++            result.attachments.push({
++              name: `${fileId}.${String(artifact.file_type || "txt")}`,
++              downloadUrl: artifact.download_address,
++              externalFileId: `${fileId}:${type}:${artifact.file_type || "txt"}`,
++              sourceType: "TENCENT_ORIGINAL",
++              artifactType: type,
++            });
++          }
++        }
++      }
++    }
++    return result;
++  }
++
++  async function describeMeeting(externalId, range = {}) {
++    const { matchingRecords, files, operatorId, operatorIdType } =
++      await discoverRecord(externalId, range);
++    const transcriptEnabled =
++      capabilities.transcript === "supported" ||
++      capabilities.transcript?.status === "supported";
++    const summaryEnabled =
++      capabilities.summary === "supported" ||
++      capabilities.summary?.status === "supported";
++    const attachmentEnabled =
++      capabilities.attachments === "supported" ||
++      capabilities.attachments?.status === "supported";
++    const manifest = {
++      attachments: [],
++      transcriptDurationMs: files.reduce(
++        (maximum, file) =>
++          Math.max(
++            maximum,
++            Number(file.record_end_time || 0) -
++              Number(files[0]?.record_start_time || file.record_start_time || 0)
++          ),
++        0
++      ),
++      recordings: files.map((file) => ({
++        recordFileId: String(file.record_file_id),
++        startOffsetMs:
++          Number(file.record_start_time || files[0]?.record_start_time || 0) -
++          Number(files[0]?.record_start_time || file.record_start_time || 0),
++        durationMs: Math.max(
++          0,
++          Number(file.record_end_time || 0) -
++            Number(file.record_start_time || 0)
++        ),
++      })),
++      capabilities: {
++        transcript: transcriptEnabled
++          ? { status: files.length ? "supported" : "absent" }
++          : {
++              status: "unsupported",
++              reason:
++                "Structured transcript retrieval is not enabled for this connection.",
++            },
++        summary: summaryEnabled
++          ? { status: files.length ? "supported" : "absent" }
++          : {
++              status: "unsupported",
++              reason: "Summary retrieval is not enabled for this connection.",
++            },
++        attachments: attachmentEnabled
++          ? { status: files.length ? "supported" : "absent" }
++          : {
++              status: "unsupported",
++              reason:
++                "Recording artifact downloads are not enabled for this connection.",
++            },
++      },
++    };
++    if (!matchingRecords.length) return manifest;
++    if (attachmentEnabled) {
++      for (const file of files) {
++        const params = new URLSearchParams({
++          operator_id: String(operatorId),
++          operator_id_type: String(operatorIdType),
++        });
++        const detail = await request(
++          `/v1/addresses/${encodeURIComponent(file.record_file_id)}?${params}`
++        );
++        for (const type of [
++          "meeting_summary",
++          "ai_meeting_transcripts",
++          "ai_minutes",
++          "ai_topic_minutes",
++          "ai_speaker_minutes",
++          "ai_ds_minutes",
++        ]) {
++          for (const artifact of detail[type] || []) {
++            if (!artifact.download_address) continue;
++            const fileType = String(artifact.file_type || "txt");
++            manifest.attachments.push({
++              externalFileId: `${file.record_file_id}:${type}:${fileType}`,
++              name: `${file.record_file_id}.${fileType}`,
++              sourceType: "TENCENT_ORIGINAL",
++              artifactType: type,
++              bytes: null,
++              maxBytes: MAX_FILE_BYTES,
++            });
++          }
++        }
++      }
++    }
++    return manifest;
++  }
++
++  async function downloadAttachment(downloadUrl, maxBytes = MAX_FILE_BYTES) {
++    const response = await request("/", {
++      urlOverride: downloadUrl,
++      download: true,
++    });
++    const advertised = Number(response.headers?.get?.("content-length"));
++    if (Number.isFinite(advertised) && advertised > maxBytes)
++      throw new MeetingError(
++        "Tencent artifact exceeds the 100 MB file limit",
++        "FILE_SIZE_LIMIT",
++        413
++      );
++    if (!response.body?.getReader) {
++      const buffer = Buffer.from(await response.arrayBuffer());
++      if (buffer.length > maxBytes)
++        throw new MeetingError(
++          "Tencent artifact exceeds the 100 MB file limit",
++          "FILE_SIZE_LIMIT",
++          413
++        );
++      return buffer;
++    }
++    const reader = response.body.getReader();
++    const chunks = [];
++    let total = 0;
++    while (true) {
++      const { done, value } = await reader.read();
++      if (done) break;
++      total += value.byteLength;
++      if (total > maxBytes) {
++        await reader.cancel();
++        throw new MeetingError(
++          "Tencent artifact exceeds the 100 MB file limit",
++          "FILE_SIZE_LIMIT",
++          413
++        );
++      }
++      chunks.push(Buffer.from(value));
++    }
++    return Buffer.concat(chunks, total);
++  }
++
++  return { listMeetings, getContent, describeMeeting, downloadAttachment };
++}
++
++module.exports = {
++  createTencentClient,
++  canonicalSignature,
++  toUnixSeconds,
++  MAX_FILE_BYTES,
++};
+diff --git a/server/prisma/migrations/20261014010000_meeting_job_leases/migration.sql b/server/prisma/migrations/20261014010000_meeting_job_leases/migration.sql
+new file mode 100644
+index 00000000..318423d1
+--- /dev/null
++++ b/server/prisma/migrations/20261014010000_meeting_job_leases/migration.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE "meeting_jobs" ADD COLUMN "leaseOwner" TEXT;
++ALTER TABLE "meeting_jobs" ADD COLUMN "leaseUntil" DATETIME;
+diff --git a/server/prisma/schema.prisma b/server/prisma/schema.prisma
+index bba9a42f..763163e0 100644
+--- a/server/prisma/schema.prisma
++++ b/server/prisma/schema.prisma
+@@ -575,20 +575,22 @@ model meeting_jobs {
+   meetingId    Int?
+   connectionId Int?
+   externalId   String?
+   activeKey    String?              @unique
+   quarter      String?
+   payload      String
+   status       String
+   stage        String?
+   error        String?
+   attempts     Int                  @default(0)
++  leaseOwner   String?
++  leaseUntil   DateTime?
+   createdAt    DateTime             @default(now())
+   updatedAt    DateTime             @updatedAt
+   meeting      meetings?            @relation(fields: [meetingId], references: [id])
+   connection   meeting_connections? @relation(fields: [connectionId], references: [id])
+ 
+   @@index([status, kind])
+   @@index([meetingId, status])
+   @@index([quarter, status])
+ }
+ 
