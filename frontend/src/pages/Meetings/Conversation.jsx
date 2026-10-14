@@ -1,9 +1,20 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Meetings } from "@/models/meetings";
-import { getCitationLocationLabel } from "@/models/meetingRules";
+import {
+  getCitationLocationLabel,
+  getReanswerDraft,
+} from "@/models/meetingRules";
 import paths from "@/utils/paths";
-import { Button, Notice, Page, Panel, Status, formatDate } from "./MeetingsUI";
+import {
+  Button,
+  CoverageBadge,
+  Notice,
+  Page,
+  Panel,
+  Status,
+  formatDate,
+} from "./MeetingsUI";
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -197,11 +208,18 @@ export default function MeetingConversation() {
               <input
                 type="checkbox"
                 checked={Boolean(reanswerId)}
-                onChange={(e) =>
-                  setReanswerId(
-                    e.target.checked ? String(latestAnswer?.id || "") : ""
-                  )
-                }
+                onChange={(e) => {
+                  if (e.target.checked && latestAnswer) {
+                    const draft = getReanswerDraft(latestAnswer);
+                    setReanswerId(draft.reanswerId);
+                    setQuestion(draft.question);
+                    setClarification(draft.clarification);
+                  } else {
+                    setReanswerId("");
+                    setQuestion("");
+                    setClarification("");
+                  }
+                }}
                 disabled={blocked || !answers.length}
               />
               <span>基于最新回答重新回答</span>
@@ -255,10 +273,12 @@ export default function MeetingConversation() {
                 key={answer.id}
                 answer={answer}
                 blocked={blocked}
+                meetings={meetings}
                 onReanswer={() => {
-                  setReanswerId(String(answer.id));
-                  setQuestion(answer.question || "");
-                  setClarification(answer.clarification || "");
+                  const draft = getReanswerDraft(answer);
+                  setReanswerId(draft.reanswerId);
+                  setQuestion(draft.question);
+                  setClarification(draft.clarification);
                   window.scrollTo({ top: 0, behavior: "smooth" });
                 }}
               />
@@ -270,7 +290,7 @@ export default function MeetingConversation() {
   );
 }
 
-function AnswerCard({ answer, blocked, onReanswer }) {
+function AnswerCard({ answer, blocked, meetings, onReanswer }) {
   const citations = asArray(answer.citations);
   const snapshots =
     answer.sourceState?.citedSources || answer.sourceState?.manifest || [];
@@ -323,6 +343,10 @@ function AnswerCard({ answer, blocked, onReanswer }) {
             <Citation
               key={`${citation.id || citation.sourceId || index}-${index}`}
               citation={citation}
+              answer={answer}
+              meeting={meetings.find(
+                (item) => String(item.id) === String(citation.meetingId)
+              )}
             />
           ))}
         </div>
@@ -336,7 +360,7 @@ function AnswerCard({ answer, blocked, onReanswer }) {
   );
 }
 
-function Citation({ citation }) {
+export function Citation({ citation, answer, meeting }) {
   const meetingId = citation.meetingId || citation.meeting?.id;
   const sourceId = citation.sourceId || citation.id;
   const workspace =
@@ -350,22 +374,27 @@ function Citation({ citation }) {
     citation.name || citation.sourceName || citation.documentName || "来源";
   const location = citation.location || {};
   const locationText = getCitationLocationLabel(location);
+  const citationSnapshot = asArray(answer?.sourceState?.citedSources).find(
+    (item) =>
+      item.sourceType === "WORKSPACE"
+        ? String(item.workspaceId) === String(workspace?.id) &&
+          String(item.documentId) === String(workspace?.documentId)
+        : String(item.meetingId) === String(meetingId) &&
+          String(item.id) === String(sourceId)
+  );
+  const meetingTitle = meeting?.title || citation.meetingName || "工作区来源";
+  const meetingStartTime = meeting?.startTime;
   return (
     <div className="rounded-lg border border-theme-sidebar-border p-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="font-medium">{sourceName}</div>
         <div className="flex flex-wrap gap-2 text-xs">
           <Status value={citation.reviewStatus} />
-          <Status value={citation.coverage} />
+          <CoverageBadge coverage={citation.coverage} />
         </div>
       </div>
       <p className="mt-1 text-xs text-theme-text-secondary">
-        {citation.meetingTitle ||
-          citation.meeting?.title ||
-          citation.workspaceName ||
-          "工作区来源"}{" "}
-        · {formatDate(citation.meetingStartTime || citation.startTime)} ·{" "}
-        {locationText}
+        {meetingTitle} · {formatDate(meetingStartTime)} · {locationText}
         {workspace || citation.sourceType === "WORKSPACE"
           ? "（工作区来源仅支持文件级定位）"
           : citation.preciseLocation === false
@@ -385,13 +414,15 @@ function Citation({ citation }) {
                 quote,
                 sourceName,
                 location,
-                meetingTitle: citation.meetingTitle || citation.meeting?.title,
-                meetingStartTime:
-                  citation.meetingStartTime || citation.startTime,
+                meetingTitle,
+                meetingStartTime,
                 coverage: citation.coverage,
                 reviewStatus: citation.reviewStatus,
-                sourceRevision: citation.sourceRevision,
-                sourceState: citation.sourceState,
+                citedSource: citationSnapshot,
+                freshness: {
+                  stale: answer?.stale,
+                  newSources: answer?.newSources,
+                },
               },
             }}
           >
@@ -408,7 +439,7 @@ function Citation({ citation }) {
                 quote,
                 sourceName,
                 location,
-                sourceRevision: citation.sourceRevision,
+                citedSource: citationSnapshot,
               },
             }}
           >

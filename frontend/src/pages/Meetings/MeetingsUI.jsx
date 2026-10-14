@@ -93,6 +93,39 @@ export function Status({ value }) {
   );
 }
 
+export function CoverageBadge({ coverage }) {
+  let value = coverage;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return <span>{value || "未说明"}</span>;
+    }
+  }
+  if (!value || typeof value !== "object") return <span>未说明</span>;
+  const labels = { transcript: "转写", summary: "摘要", attachments: "附件" };
+  const entries = Object.entries(value);
+  if (!entries.length) return <span>未说明</span>;
+  const incomplete = entries.some(
+    ([, item]) =>
+      (typeof item === "object" ? item?.status : item) !== "supported"
+  );
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      {incomplete && <Status value="PARTIAL" />}
+      {entries.map(([key, item]) => (
+        <span
+          key={key}
+          className="rounded bg-theme-bg-primary px-2 py-0.5 text-xs"
+        >
+          {labels[key] || key}:{" "}
+          {typeof item === "object" ? item?.status || "未知" : String(item)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export function Notice({ children, tone = "info" }) {
   const colors =
     tone === "error"

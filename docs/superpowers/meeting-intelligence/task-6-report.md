@@ -16,3 +16,27 @@ From `frontend/`:
 The successful build retains existing warnings: Piper externalizes Node `fs`, `path`, and `crypto` for browser compatibility; two existing pages are both statically and dynamically imported; and existing minified chunks exceed 500 kB. The first build attempt found that the worktree's installed modules lacked the already-required `regenerator-runtime`; installing the exact pinned package resolved that baseline failure. A second install aligned the locally installed Phosphor package to the Yarn lock version after npm had selected a newer semver-compatible release; no extra dependency change was retained.
 
 No backend or UI server was started. The shared Prisma client uses a hard-coded SQLite URL without datasource override support, so `DATABASE_URL`/storage environment overrides would not isolate startup. The Task 5b report documents the separate smoke database; this task did not access it or any original user data. No screenshot or live Tencent/OCR/provider behavior is claimed. Browser interaction against isolated meeting fixtures remains for Task 7.
+
+## Review round 1 fixes
+
+Addressed the review's eight important findings and latest-answer control:
+
+- Remote history now sends `startTime`/`endTime`, unwraps the actual `{ meetings: { items, nextCursor } }` page, appends later pages, and carries the selected discovery window into the durable import scope.
+- Citation cards render structured coverage through a shared component; meeting title/date come from the resolved meeting record. A server-side React render probe exercises an actual meeting citation with object-shaped coverage.
+- The action matrix now allows approved summary/transcript edits, supplemental text addition, and supplemental text deletion (which the service returns to DRAFT), while supplemental file add/delete stays DRAFT-only.
+- Imports without a supported transcript no longer require elapsed offsets. Full supported transcripts are accepted only when within three hours; partial ranges are validated. Selected attachments are checked for 20 files and known per-file/combined decimal byte limits. Tencent currently reports attachment `bytes: null`, so the UI labels unknown sizes and leaves final byte enforcement to the existing backend importer.
+- Source viewer compares the answer's actual saved `citedSources` fingerprint (`contentHash`, `activeHash`, `updatedAt`) with the current archived source and labels unchanged, modified, deleted, or unverifiable originals. The saved quote remains separate from the live source.
+- Detail polling preserves editable summary/transcript drafts. Center background polling reuses the active quarter/date filter and retains selected IDs. Upload errors survive a successful refresh, and partial batches show the successful count.
+- The “latest answer” control now fills the same saved question and clarification as the history-card reanswer action.
+
+## Review round 1 verification
+
+From `frontend/` after the final edits:
+
+- `node --test src/models/meetings.node-test.mjs` — 17/17 passed. The focused regressions cover the actual remote envelope, approved action matrix, metadata-only and selected-transcript scopes, attachment count/size limits, current-versus-cited source state, latest-answer reanswer fields, the live React citation render, draft-safe polling, active date-filter polling, and upload error/partial-success feedback. New contract tests were observed failing before the corresponding helpers/exports were added.
+- `node node_modules/eslint/bin/eslint.js src/models/meetingRules.js src/models/meetings.js src/models/meetings.node-test.mjs src/pages/Meetings src/main.jsx src/components/Sidebar/index.jsx src/utils/paths.js` — passed.
+- `node node_modules/prettier/bin/prettier.cjs --check src/models/meetingRules.js src/models/meetings.js src/models/meetings.node-test.mjs src/pages/Meetings/*.jsx src/main.jsx src/components/Sidebar/index.jsx src/utils/paths.js package.json` — passed.
+- `npm run build` — passed, including Vite production build and `scripts/postbuild.js` (exit 0).
+- `git diff --check` — passed before commit.
+
+The final build emitted the same known Piper `fs`/`path`/`crypto` browser-externalization warnings, existing static-plus-dynamic import warnings for LLMPreference and Security, and the existing >500 kB chunk warning. No shared backend or application server was started; database isolation and Task 7 browser interaction remain as described above.

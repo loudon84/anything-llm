@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { saveAs } from "file-saver";
 import { fetchMeetingBlob, Meetings } from "@/models/meetings";
+import { compareCitedSource } from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import { Button, Notice, Page, Panel, Status, formatDate } from "./MeetingsUI";
 
@@ -82,10 +83,11 @@ export default function MeetingSourceViewer() {
   }
 
   const title = snapshot?.sourceName || source?.name || "证据来源";
-  const sourceChanged =
-    snapshot?.sourceRevision &&
-    source?.revision &&
-    snapshot.sourceRevision !== source.revision;
+  const sourceState = source
+    ? compareCitedSource(snapshot?.citedSource, source)
+    : error
+      ? "unavailable"
+      : "loading";
   const latestContent = source?.contentText || source?.text || "";
   const targetIndex = snapshot?.location
     ? segments.findIndex((segment) =>
@@ -126,6 +128,11 @@ export default function MeetingSourceViewer() {
           <p className="mt-2 text-xs text-theme-text-secondary">
             该摘录属于回答时保存的快照。即使当前文件已修改或删除，历史引用仍保持原样。
           </p>
+          {snapshot.freshness?.stale && (
+            <Notice tone="warning">
+              回答历史标记为资料已变化；请分别核对当时快照和当前来源。
+            </Notice>
+          )}
         </Panel>
       )}
       {workspace ? (
@@ -158,14 +165,24 @@ export default function MeetingSourceViewer() {
           ) : (
             source && (
               <>
-                {source.deletedAt && (
+                {(sourceState === "deleted" ||
+                  source.deletedAt ||
+                  source.deleted) && (
                   <Notice tone="warning">
                     此来源已从当前会议删除。下面的回答引用仍是原始快照；若存储保留期限已过，当前文件可能无法读取。
                   </Notice>
                 )}
-                {sourceChanged && (
+                {sourceState === "modified" && (
                   <Notice tone="warning">
                     当前来源版本已变化。上方引用是回答时快照，下面展示的是当前来源。
+                  </Notice>
+                )}
+                {sourceState === "unchanged" && (
+                  <Notice>当前来源与回答时保存的来源版本一致。</Notice>
+                )}
+                {sourceState === "unavailable" && (
+                  <Notice tone="warning">
+                    当前来源可读取，但回答时没有保存可核对的版本指纹；上方引用仍是回答时保存的摘录。
                   </Notice>
                 )}
                 <Panel

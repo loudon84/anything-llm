@@ -1,7 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Meetings } from "@/models/meetings";
-import { canSupplementSource } from "@/models/meetingRules";
+import {
+  canDeleteSupplement,
+  getMeetingDraftValues,
+  getMeetingActionCapabilities,
+  getUploadBatchFeedback,
+} from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import {
   Button,
@@ -25,6 +36,7 @@ export default function MeetingDetail() {
   const [sources, setSources] = useState([]);
   const [summary, setSummary] = useState("");
   const [transcript, setTranscript] = useState("");
+  const contentDraft = useRef({ summary: "", transcript: "" });
   const [textName, setTextName] = useState("");
   const [textBody, setTextBody] = useState("");
   const [search, setSearch] = useState("");
@@ -34,15 +46,23 @@ export default function MeetingDetail() {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(
-    async (showLoading = true) => {
+    async (
+      showLoading = true,
+      { clearError = true, syncContent = false } = {}
+    ) => {
       if (showLoading) setLoading(true);
-      setError("");
+      if (clearError) setError("");
       try {
         const result = await Meetings.detail(id);
         setMeeting(result.meeting);
         setSources(result.sources || []);
-        setSummary(result.meeting.summary || "");
-        setTranscript(result.meeting.transcript || "");
+        contentDraft.current = getMeetingDraftValues(
+          contentDraft.current,
+          result.meeting,
+          !syncContent
+        );
+        setSummary(contentDraft.current.summary);
+        setTranscript(contentDraft.current.transcript);
       } catch (e) {
         setError(e.message);
       } finally {
@@ -52,7 +72,7 @@ export default function MeetingDetail() {
     [id]
   );
   useEffect(() => {
-    refresh();
+    refresh(true, { syncContent: true });
   }, [refresh]);
   useEffect(() => {
     const active =
@@ -70,9 +90,8 @@ export default function MeetingDetail() {
     (total, source) => total + Number(source.bytes || 0),
     0
   );
-  const activeFileCount = activeSources.filter(
-    (source) =>
-      Number(source.bytes || 0) > 0 && source.sourceType !== "SUPPLEMENT_TEXT"
+  const activeFileCount = activeSources.filter((source) =>
+    ["TENCENT_ORIGINAL", "SUPPLEMENT_FILE"].includes(source.sourceType)
   ).length;
   const supplementalSources = activeSources.filter((source) =>
     source.sourceType.startsWith("SUPPLEMENT_")
@@ -80,7 +99,8 @@ export default function MeetingDetail() {
   const originalSources = activeSources.filter(
     (source) => source.sourceType === "TENCENT_ORIGINAL"
   );
-  const canEdit = meeting?.reviewStatus === "DRAFT";
+  const actions = getMeetingActionCapabilities(meeting);
+  const canEdit = actions.editContent;
   const queryReady = meeting?.retrievalStatus === "AVAILABLE";
   const searched = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -92,13 +112,13 @@ export default function MeetingDetail() {
     );
   }, [search, summary, transcript]);
 
-  async function perform(action, message) {
+  async function perform(action, message, { syncContent = false } = {}) {
     setBusy(true);
     setError("");
     setNotice("");
     try {
       await action();
-      await refresh();
+      await refresh(true, { syncContent });
       if (message) setNotice(message);
     } catch (e) {
       setError(e.message);
@@ -128,13 +148,23 @@ export default function MeetingDetail() {
     setBusy(true);
     setError("");
     setNotice("");
+    let uploaded = 0;
     try {
-      for (const file of selected) await Meetings.addFile(id, file);
-      setNotice(`已提交 ${selected.length} 个补充文件，解析任务将在后台继续。`);
-      await refresh();
+      for (const file of selected) {
+        await Meetings.addFile(id, file);
+        uploaded += 1;
+      }
+      setNotice(getUploadBatchFeedback(uploaded, selected.length).notice);
+      await refresh(false, { clearError: false });
     } catch (e) {
-      setError(e.message);
-      await refresh();
+      const feedback = getUploadBatchFeedback(
+        uploaded,
+        selected.length,
+        e.message
+      );
+      setError(feedback.error);
+      setNotice(feedback.notice);
+      await refresh(false, { clearError: false });
     } finally {
       setBusy(false);
     }
@@ -209,7 +239,7 @@ export default function MeetingDetail() {
         )}
         <div className="mt-3 flex flex-wrap gap-2">
           <Button
-            disabled={!queryReady || !canEdit || busy}
+            disabled={!queryReady || !actions.approve || busy}
             onClick={() => perform(() => Meetings.approve(id), "会议已审核。")}
           >
             审核通过
@@ -225,7 +255,7 @@ export default function MeetingDetail() {
           >
             手动重建索引
           </Button>
-          {canEdit && (
+          {actions.deleteMeeting && (
             <Button
               variant="danger"
               disabled={busy}
@@ -249,7 +279,13 @@ export default function MeetingDetail() {
             <textarea
               className={`${inputClass} min-h-48`}
               value={summary}
-              onChange={(e) => setSummary(e.target.value)}
+              onChange={(e) => {
+                contentDraft.current = {
+                  ...contentDraft.current,
+                  summary: e.target.value,
+                };
+                setSummary(e.target.value);
+              }}
               disabled={!canEdit}
             />
           </Field>
@@ -257,7 +293,13 @@ export default function MeetingDetail() {
             <textarea
               className={`${inputClass} min-h-48`}
               value={transcript}
-              onChange={(e) => setTranscript(e.target.value)}
+              onChange={(e) => {
+                contentDraft.current = {
+                  ...contentDraft.current,
+                  transcript: e.target.value,
+                };
+                setTranscript(e.target.value);
+              }}
               disabled={!canEdit}
             />
           </Field>
@@ -270,7 +312,8 @@ export default function MeetingDetail() {
               onClick={() =>
                 perform(
                   () => Meetings.updateContent(id, { summary, transcript }),
-                  "摘要和转写已保存。"
+                  "摘要和转写已保存。",
+                  { syncContent: true }
                 )
               }
             >
@@ -328,7 +371,7 @@ export default function MeetingDetail() {
       <Panel
         title={`补充文件（${supplementalSources.filter((source) => source.sourceType === "SUPPLEMENT_FILE").length}）`}
         actions={
-          canEdit && (
+          actions.addSupplementFile && (
             <label className="cursor-pointer rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm">
               添加文件
               <input
@@ -361,7 +404,7 @@ export default function MeetingDetail() {
                   source={source}
                   meetingId={id}
                   busy={busy}
-                  canDelete={canSupplementSource(meeting, source)}
+                  canDelete={canDeleteSupplement(meeting, source)}
                   onDelete={() =>
                     perform(
                       () => Meetings.deleteSource(id, source.id),
@@ -385,7 +428,7 @@ export default function MeetingDetail() {
         title={`补充文本（${supplementalSources.filter((source) => source.sourceType === "SUPPLEMENT_TEXT").length}）`}
       >
         <p className="mb-3 text-xs text-theme-text-secondary">
-          补充文本提交后不可直接编辑；请删除当前草稿中的文本来源，再添加修改后的文本。文本占用会议的
+          补充文本提交后不可直接编辑；请删除现有文本来源，再添加修改后的文本。已审核会议删除文本后会返回草稿。文本占用会议的
           500 MB 总容量，不计入文件数量。
         </p>
         {supplementalSources
@@ -396,7 +439,7 @@ export default function MeetingDetail() {
               source={source}
               meetingId={id}
               busy={busy}
-              canDelete={canSupplementSource(meeting, source)}
+              canDelete={canDeleteSupplement(meeting, source)}
               onDelete={() =>
                 perform(
                   () => Meetings.deleteSource(id, source.id),
@@ -405,7 +448,7 @@ export default function MeetingDetail() {
               }
             />
           ))}
-        {canEdit && (
+        {actions.addSupplementText && (
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="文本名称">
               <input

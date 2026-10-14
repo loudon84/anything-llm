@@ -1,10 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Meetings, getMeetingSelectionState } from "@/models/meetings";
-import { getDateBounds } from "@/models/meetingRules";
+import {
+  getDateBounds,
+  getPollingListParams,
+  getRemoteMeetingPage,
+  validateMeetingImport,
+} from "@/models/meetingRules";
 import paths from "@/utils/paths";
 import {
   Button,
+  CoverageBadge,
   Field,
   inputClass,
   Notice,
@@ -37,45 +49,13 @@ function shanghaiDate(offsetDays = 0) {
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
-function CoverageBadge({ coverage }) {
-  let value = coverage;
-  if (typeof value === "string") {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      return <span>{value || "未说明"}</span>;
-    }
-  }
-  if (!value || typeof value !== "object") return <span>未说明</span>;
-  const labels = { transcript: "转写", summary: "摘要", attachments: "附件" };
-  const entries = Object.entries(value);
-  if (!entries.length) return <span>未说明</span>;
-  const incomplete = entries.some(
-    ([, item]) =>
-      (typeof item === "object" ? item?.status : item) !== "supported"
-  );
-  return (
-    <span className="flex flex-wrap items-center gap-1.5">
-      {incomplete && <Status value="PARTIAL" />}
-      {entries.map(([key, item]) => (
-        <span
-          key={key}
-          className="rounded bg-theme-bg-primary px-2 py-0.5 text-xs"
-        >
-          {labels[key] || key}:{" "}
-          {typeof item === "object" ? item?.status || "未知" : String(item)}
-        </span>
-      ))}
-    </span>
-  );
-}
-
 export default function MeetingsCenter() {
   const navigate = useNavigate();
   const [quarter, setQuarter] = useState(currentQuarter());
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [meetings, setMeetings] = useState([]);
+  const activeListQuery = useRef({ quarter });
   const [selected, setSelected] = useState(new Set());
   const [jobs, setJobs] = useState([]);
   const [remote, setRemote] = useState([]);
@@ -89,6 +69,7 @@ export default function MeetingsCenter() {
   const [attachmentIds, setAttachmentIds] = useState(new Set());
   const [scopeFrom, setScopeFrom] = useState("");
   const [scopeTo, setScopeTo] = useState("");
+  const [discoveryWindow, setDiscoveryWindow] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
@@ -131,7 +112,9 @@ export default function MeetingsCenter() {
   }, []);
 
   useEffect(() => {
-    refreshMeetings({ quarter });
+    const query = { quarter };
+    activeListQuery.current = query;
+    refreshMeetings(query);
     refreshJobs();
     Meetings.config()
       .then((config) => setConnectionId(config?.id || null))
@@ -145,7 +128,7 @@ export default function MeetingsCenter() {
     if (!active) return undefined;
     const timer = window.setInterval(() => {
       refreshJobs();
-      refreshMeetings({ quarter }, true);
+      refreshMeetings(getPollingListParams(activeListQuery.current), true);
     }, 3000);
     return () => window.clearInterval(timer);
   }, [jobs, quarter, refreshJobs, refreshMeetings]);
@@ -159,6 +142,7 @@ export default function MeetingsCenter() {
     try {
       const bounds = getDateBounds(from, to);
       setError("");
+      activeListQuery.current = bounds;
       await refreshMeetings(bounds);
     } catch (e) {
       setError(e.message);
@@ -172,21 +156,21 @@ export default function MeetingsCenter() {
       const bounds = getDateBounds(remoteFrom, remoteTo);
       if (new Date(bounds.to) - new Date(bounds.from) > 90 * 86_400_000)
         throw new Error("腾讯会议历史查询区间最多 90 天。");
-      const result = await Meetings.remote({
-        ...bounds,
+      const query = {
+        startTime: bounds.from,
+        endTime: bounds.to,
         connectionId: connectionId || undefined,
         ...(next ? { cursor: next } : {}),
-      });
-      const rows = Array.isArray(result)
-        ? result
-        : result?.items || result?.meetings || [];
-      setRemote(
-        rows.map((row) => ({
-          ...row,
-          connectionId: row.connectionId || connectionId,
-        }))
-      );
-      setNextCursor(result?.nextCursor || result?.cursor || "");
+      };
+      const result = await Meetings.remote(query);
+      const { items: rows, nextCursor: cursor } = getRemoteMeetingPage(result);
+      setDiscoveryWindow({ startTime: bounds.from, endTime: bounds.to });
+      const mappedRows = rows.map((row) => ({
+        ...row,
+        connectionId: row.connectionId || connectionId,
+      }));
+      setRemote((current) => (next ? [...current, ...mappedRows] : mappedRows));
+      setNextCursor(cursor);
       setRemoteOpen(true);
     } catch (e) {
       setError(e.message);
@@ -202,10 +186,14 @@ export default function MeetingsCenter() {
     setError("");
     try {
       const bounds = getDateBounds(remoteFrom, remoteTo);
+      const window = discoveryWindow || {
+        startTime: bounds.from,
+        endTime: bounds.to,
+      };
       const response = await Meetings.manifest(row.externalId, {
         connectionId: row.connectionId,
-        startTime: row.startTime || bounds?.from,
-        endTime: row.endTime || bounds?.to,
+        startTime: row.startTime || window.startTime,
+        endTime: row.endTime || window.endTime,
       });
       setManifest(response);
       setAttachmentIds(
@@ -227,40 +215,19 @@ export default function MeetingsCenter() {
 
   async function startImport() {
     if (!manifestTarget || actionBusy) return;
-    const fromMs = scopeFrom === "" ? undefined : Number(scopeFrom);
-    const toMs = scopeTo === "" ? undefined : Number(scopeTo);
-    const maxDuration = 3 * 60 * 60 * 1000;
-    if (
-      (fromMs !== undefined && (!Number.isFinite(fromMs) || fromMs < 0)) ||
-      (toMs !== undefined && (!Number.isFinite(toMs) || toMs < 0))
-    ) {
-      setError("时间范围必须是非负毫秒数。");
-      return;
-    }
-    const duration = Number(manifest?.transcriptDurationMs);
-    const effectiveFrom = fromMs ?? 0;
-    const effectiveTo =
-      toMs ??
-      (Number.isFinite(duration) && duration > 0 ? duration : undefined);
-    if (toMs !== undefined && toMs <= effectiveFrom) {
-      setError("结束偏移必须晚于开始偏移。");
-      return;
-    }
-    if (
-      effectiveTo === undefined &&
-      (fromMs !== undefined || toMs === undefined)
-    ) {
-      setError(
-        "无法确认完整转写是否在 3 小时以内，请输入明确的开始和结束偏移。"
-      );
-      return;
-    }
-    if (
-      effectiveTo !== undefined &&
-      (effectiveTo <= effectiveFrom ||
-        effectiveTo - effectiveFrom > maxDuration)
-    ) {
-      setError("请选择有效时间范围，单次最多 3 小时。");
+    const selectedAttachments = (manifest?.attachments || []).filter(
+      ({ externalFileId }) => attachmentIds.has(externalFileId)
+    );
+    const validation = validateMeetingImport({
+      manifest,
+      attachments: selectedAttachments,
+      from: scopeFrom,
+      to: scopeTo,
+      discoveryStart: discoveryWindow?.startTime,
+      discoveryEnd: discoveryWindow?.endTime,
+    });
+    if (!validation.valid) {
+      setError(validation.errors.join(" "));
       return;
     }
     setActionBusy(true);
@@ -269,11 +236,7 @@ export default function MeetingsCenter() {
       await Meetings.importMeeting({
         connectionId: manifestTarget.connectionId,
         externalId: manifestTarget.externalId,
-        scope: {
-          ...(fromMs === undefined ? {} : { from: fromMs }),
-          ...(toMs === undefined ? {} : { to: toMs }),
-          attachmentIds: [...attachmentIds],
-        },
+        scope: validation.scope,
       });
       setManifestTarget(null);
       setManifest(null);
@@ -340,7 +303,7 @@ export default function MeetingsCenter() {
         title="会议范围"
         actions={
           <Button
-            onClick={() => refreshMeetings({ quarter })}
+            onClick={() => refreshMeetings(activeListQuery.current)}
             disabled={loading}
           >
             {loading ? "加载中…" : "刷新"}
@@ -591,6 +554,7 @@ export default function MeetingsCenter() {
               <p className="py-6">正在读取附件清单…</p>
             ) : (
               <div className="mt-4 space-y-4">
+                {error && <Notice tone="error">{error}</Notice>}
                 <fieldset>
                   <legend className="mb-2 text-sm font-medium">
                     附件（可多选）
@@ -617,7 +581,9 @@ export default function MeetingsCenter() {
                           />
                           <span>
                             {item.name} ·{" "}
-                            {Number(item.bytes || 0).toLocaleString()} bytes
+                            {item.bytes == null
+                              ? "大小待下载时确认（服务端执行单文件上限）"
+                              : `${Number(item.bytes).toLocaleString()} bytes`}
                           </span>
                         </label>
                       ))}
@@ -628,33 +594,39 @@ export default function MeetingsCenter() {
                     </p>
                   )}
                 </fieldset>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <Field
-                    label="开始偏移（毫秒）"
-                    hint="留空表示从头开始；0 是有效值。"
-                  >
-                    <input
-                      type="number"
-                      min="0"
-                      value={scopeFrom}
-                      onChange={(e) => setScopeFrom(e.target.value)}
-                      className={inputClass}
-                    />
-                  </Field>
-                  <Field
-                    label="结束偏移（毫秒）"
-                    hint="留空表示到结尾。所选范围最多 3 小时。"
-                  >
-                    <input
-                      type="number"
-                      min="0"
-                      value={scopeTo}
-                      onChange={(e) => setScopeTo(e.target.value)}
-                      className={inputClass}
-                    />
-                  </Field>
-                </div>
-                {error && <Notice tone="error">{error}</Notice>}
+                {manifest?.capabilities?.transcript === "supported" ||
+                manifest?.capabilities?.transcript?.status === "supported" ? (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <Field
+                      label="开始偏移（毫秒）"
+                      hint="两项均留空表示完整转写；只填结束偏移表示从 0 开始；填写开始偏移时也要填写结束偏移。"
+                    >
+                      <input
+                        type="number"
+                        min="0"
+                        value={scopeFrom}
+                        onChange={(e) => setScopeFrom(e.target.value)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field
+                      label="结束偏移（毫秒）"
+                      hint="结束偏移必须晚于开始偏移；选择范围单次最多 3 小时。"
+                    >
+                      <input
+                        type="number"
+                        min="0"
+                        value={scopeTo}
+                        onChange={(e) => setScopeTo(e.target.value)}
+                        className={inputClass}
+                      />
+                    </Field>
+                  </div>
+                ) : (
+                  <Notice>
+                    清单确认没有可选转写；可以直接导入元数据或所选附件，不需要填写虚构的转写偏移。
+                  </Notice>
+                )}
                 <div className="flex justify-end gap-2">
                   <Button
                     onClick={() => {
