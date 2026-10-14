@@ -124,6 +124,12 @@ function createSourceService({
   }
 
   async function createParseJob(tx, meeting, source) {
+    const generation = Number(meeting.generation || 0);
+    const activeKey = `PARSE_SOURCE:${source.id}:${source.contentHash}:${generation}`;
+    const existing = await tx.meeting_jobs.findFirst({
+      where: { activeKey, status: { in: ["CREATED", "PROCESSING"] } },
+    });
+    if (existing) return existing;
     return tx.meeting_jobs.create({
       data: {
         kind: "PARSE_SOURCE",
@@ -131,14 +137,51 @@ function createSourceService({
         connectionId: meeting.connectionId,
         externalId: meeting.externalId,
         quarter: meeting.quarter,
-        activeKey: `PARSE_SOURCE:${source.id}:${source.contentHash}`,
+        activeKey,
         payload: JSON.stringify({
           sourceId: source.id,
           sourceRevision: source.contentHash,
+          generation,
         }),
         status: "CREATED",
         stage: null,
         error: null,
+        attempts: 0,
+      },
+    });
+  }
+
+  async function queueReindexForSourceSet(tx, meeting, sources) {
+    const signature = hash(
+      JSON.stringify(
+        sources
+          .map((source) => ({
+            id: source.id,
+            contentHash: source.contentHash ?? null,
+            parseStatus: source.parseStatus,
+            deletedAt: source.deletedAt ?? null,
+          }))
+          .sort((left, right) => left.id - right.id)
+      )
+    );
+    const activeKey = `REINDEX:${meeting.id}:${meeting.generation}:SOURCES:${signature}`;
+    const existing = await tx.meeting_jobs.findFirst({
+      where: { activeKey, status: { in: ["CREATED", "PROCESSING"] } },
+    });
+    if (existing) return existing;
+    return tx.meeting_jobs.create({
+      data: {
+        kind: "REINDEX",
+        meetingId: meeting.id,
+        connectionId: meeting.connectionId,
+        externalId: meeting.externalId,
+        quarter: meeting.quarter,
+        activeKey,
+        payload: JSON.stringify({
+          generation: meeting.generation,
+          sourceSetRevision: signature,
+        }),
+        status: "CREATED",
         attempts: 0,
       },
     });
@@ -303,9 +346,11 @@ function createSourceService({
           "SOURCE_NOT_FOUND",
           404
         );
-      if (source.sourceType === "TENCENT_ORIGINAL")
+      if (
+        !new Set(["SUPPLEMENT_FILE", "SUPPLEMENT_TEXT"]).has(source.sourceType)
+      )
         throw new MeetingError(
-          "Tencent original sources are read-only",
+          "Only draft supplemental sources can be deleted",
           "SOURCE_IMMUTABLE",
           409
         );
@@ -371,6 +416,60 @@ function createSourceService({
     });
   }
 
+  async function leaseIsCurrent(db, job) {
+    if (!job?.leaseOwner) return true;
+    const current = await db.meeting_jobs.findUnique({
+      where: { id: Number(job.id) },
+    });
+    return Boolean(
+      current &&
+      current.status === "PROCESSING" &&
+      current.leaseOwner === job.leaseOwner &&
+      current.leaseUntil &&
+      new Date(current.leaseUntil).getTime() > Date.now()
+    );
+  }
+
+  async function requeuePendingSourceInTransaction(
+    tx,
+    job,
+    source,
+    meeting,
+    attemptedGeneration
+  ) {
+    if (
+      !source ||
+      source.deletedAt ||
+      source.parseStatus !== "PENDING" ||
+      !meeting ||
+      meeting.deletedAt ||
+      meeting.retrievalStatus === RETRIEVAL.DELETED ||
+      Number(meeting.generation) === Number(attemptedGeneration) ||
+      source.contentHash !== parseJson(job.payload, {}).sourceRevision
+    )
+      return { stale: true };
+    await createParseJob(tx, meeting, source);
+    return { stale: true, requeued: true };
+  }
+
+  async function requeuePendingSource(job, source, meeting) {
+    return transaction(async (tx) => {
+      const currentSource = await tx.meeting_sources.findUnique({
+        where: { id: source.id },
+      });
+      const currentMeeting = await tx.meetings.findUnique({
+        where: { id: meeting.id },
+      });
+      return requeuePendingSourceInTransaction(
+        tx,
+        job,
+        currentSource,
+        currentMeeting,
+        parseJson(job.payload, {}).generation ?? meeting.generation
+      );
+    });
+  }
+
   async function processParseSource(job) {
     const payload = parseJson(job.payload, {});
     const sourceId = Number(payload.sourceId);
@@ -389,6 +488,12 @@ function createSourceService({
       source.contentHash !== payload.sourceRevision
     )
       return { stale: true };
+    const attemptedGeneration = Number(
+      payload.generation ?? meeting.generation
+    );
+    if (attemptedGeneration !== Number(meeting.generation))
+      return requeuePendingSource(job, source, meeting);
+    if (!(await leaseIsCurrent(prisma, job))) return { stale: true };
     try {
       const segments =
         source.sourceType === "SUPPLEMENT_TEXT"
@@ -414,16 +519,23 @@ function createSourceService({
         const currentMeeting = await tx.meetings.findUnique({
           where: { id: source.meetingId },
         });
+        if (!(await leaseIsCurrent(tx, job))) return { stale: true };
         if (
           !currentSource ||
           currentSource.deletedAt ||
           currentSource.contentHash !== payload.sourceRevision ||
           !currentMeeting ||
-          currentMeeting.generation !== meeting.generation ||
+          currentMeeting.generation !== attemptedGeneration ||
           currentMeeting.deletedAt ||
           currentMeeting.retrievalStatus === RETRIEVAL.DELETED
         )
-          return { stale: true };
+          return requeuePendingSourceInTransaction(
+            tx,
+            job,
+            currentSource,
+            currentMeeting,
+            attemptedGeneration
+          );
         await tx.meeting_chunks.deleteMany({ where: { sourceId } });
         for (const chunk of chunks)
           await tx.meeting_chunks.create({
@@ -467,14 +579,25 @@ function createSourceService({
           );
         if (
           hasCompleteCurrentIndex &&
-          [RETRIEVAL.WAITING_CONTENT, RETRIEVAL.INDEX_FAILED].includes(
-            currentMeeting.retrievalStatus
-          )
+          [
+            RETRIEVAL.WAITING_CONTENT,
+            RETRIEVAL.INDEX_FAILED,
+            RETRIEVAL.INDEXING,
+          ].includes(currentMeeting.retrievalStatus)
         )
           await tx.meetings.update({
             where: { id: currentMeeting.id },
             data: { retrievalStatus: RETRIEVAL.AVAILABLE },
           });
+        else if (
+          activeSuccess.length > 0 &&
+          currentMeeting.retrievalStatus !== RETRIEVAL.AVAILABLE
+        ) {
+          const activeSources = await tx.meeting_sources.findMany({
+            where: { meetingId: currentMeeting.id, deletedAt: null },
+          });
+          await queueReindexForSourceSet(tx, currentMeeting, activeSources);
+        }
         return { stale: false, sourceId, chunkCount: chunks.length };
       });
       if (!result.stale)
@@ -486,7 +609,7 @@ function createSourceService({
         });
       return result;
     } catch (error) {
-      const recorded = await transaction(async (tx) => {
+      const failureResult = await transaction(async (tx) => {
         const currentSource = await tx.meeting_sources.findUnique({
           where: { id: sourceId },
         });
@@ -495,31 +618,72 @@ function createSourceService({
           (await tx.meetings.findUnique({
             where: { id: currentSource.meetingId },
           }));
+        if (!(await leaseIsCurrent(tx, job))) return { stale: true };
         if (
           !currentSource ||
           currentSource.deletedAt ||
           currentSource.contentHash !== payload.sourceRevision ||
           !currentMeeting ||
-          currentMeeting.generation !== meeting.generation ||
+          currentMeeting.generation !== attemptedGeneration ||
           currentMeeting.deletedAt
-        )
-          return false;
+        ) {
+          const requeued = await requeuePendingSourceInTransaction(
+            tx,
+            job,
+            currentSource,
+            currentMeeting,
+            attemptedGeneration
+          );
+          return requeued;
+        }
+        if (currentSource.parseStatus === "SUCCESS") return { stale: true };
         await tx.meeting_sources.update({
           where: { id: sourceId },
           data: { parseStatus: "FAILED", error: errorText(error) },
         });
-        if (
-          currentMeeting.retrievalStatus !== RETRIEVAL.AVAILABLE &&
-          currentMeeting.retrievalStatus !== RETRIEVAL.INDEXING
-        ) {
+        if (currentMeeting.retrievalStatus !== RETRIEVAL.AVAILABLE) {
+          const activeSuccess = await tx.meeting_sources.findMany({
+            where: {
+              meetingId: currentMeeting.id,
+              deletedAt: null,
+              parseStatus: "SUCCESS",
+            },
+          });
+          const currentChunks = await tx.meeting_chunks.findMany({
+            where: {
+              meetingId: currentMeeting.id,
+              generation: currentMeeting.generation,
+            },
+          });
+          const chunkedSources = new Set(
+            currentChunks.map((chunk) => chunk.sourceId)
+          );
+          const complete =
+            activeSuccess.length > 0 &&
+            activeSuccess.every((activeSource) =>
+              chunkedSources.has(activeSource.id)
+            );
+          if (!complete && activeSuccess.length > 0) {
+            const activeSources = await tx.meeting_sources.findMany({
+              where: { meetingId: currentMeeting.id, deletedAt: null },
+            });
+            await queueReindexForSourceSet(tx, currentMeeting, activeSources);
+          }
           await tx.meetings.update({
             where: { id: currentMeeting.id },
-            data: { retrievalStatus: RETRIEVAL.INDEX_FAILED },
+            data: {
+              retrievalStatus: complete
+                ? RETRIEVAL.AVAILABLE
+                : activeSuccess.length > 0
+                  ? RETRIEVAL.INDEXING
+                  : RETRIEVAL.INDEX_FAILED,
+            },
           });
         }
-        return true;
+        return { recorded: true };
       });
-      if (recorded)
+      if (!failureResult.recorded) return failureResult;
+      if (failureResult.recorded)
         await recordAudit({
           action: "MEETING_SOURCE_FAILED",
           meetingId: meeting.id,
@@ -549,7 +713,7 @@ function createSourceService({
     )
       return { stale: true, count: 0 };
     try {
-      const result = await indexer.reindex(job.meetingId);
+      const result = await indexer.reindex(job.meetingId, { job });
       if (result.stale) return result;
       if (
         result.generation !== undefined &&
@@ -559,6 +723,7 @@ function createSourceService({
       return result;
     } catch (error) {
       await transaction(async (tx) => {
+        if (!(await leaseIsCurrent(tx, job))) return;
         const meeting = await tx.meetings.findUnique({
           where: { id: Number(job.meetingId) },
         });
@@ -677,7 +842,7 @@ function createSourceService({
     return prepared;
   }
 
-  async function commitImport(tx, meeting, prepared) {
+  async function commitImport(tx, meeting, prepared, { onRollback } = {}) {
     if (!Array.isArray(prepared) || !prepared.length)
       throw new MeetingError(
         "No prepared import sources were supplied",
@@ -713,6 +878,14 @@ function createSourceService({
             mode: 0o600,
           });
           filePaths.push(filePath);
+          if (typeof onRollback === "function" && filePaths.length === 1)
+            onRollback(async () => {
+              await Promise.all(
+                filePaths.map((storedPath) =>
+                  fs.rm(storedPath, { force: true }).catch(() => {})
+                )
+              );
+            });
         }
         const source = await tx.meeting_sources.create({
           data: {

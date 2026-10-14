@@ -158,11 +158,49 @@ function pptxSlides(buffer) {
       (a, b) =>
         Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1])
     );
-  return names.flatMap((name) => {
+  const segments = [];
+  const images = [];
+  for (const name of names) {
     const slide = Number(name.match(/slide(\d+)/)[1]);
-    const text = xmlText(zip.readAsText(name)).trim();
-    return text ? [{ text, location: { type: "slide", slide } }] : [];
-  });
+    const xml = zip.readAsText(name);
+    const text = xmlText(xml).trim();
+    if (text) segments.push({ text, location: { type: "slide", slide } });
+    const relPath = path.posix.join(
+      "ppt/slides/_rels",
+      `${path.posix.basename(name)}.rels`
+    );
+    const relationships = zip.getEntry(relPath) ? zip.readAsText(relPath) : "";
+    const targets = new Map();
+    for (const match of relationships.matchAll(
+      /<Relationship\b([^>]*)\/?\s*>/g
+    )) {
+      const attrs = Object.fromEntries(
+        [...match[1].matchAll(/([\w:]+)="([^"]*)"/g)].map((item) => [
+          item[1],
+          decodeXml(item[2]),
+        ])
+      );
+      if (attrs.Id && /\/image$/.test(attrs.Type || "")) {
+        targets.set(
+          attrs.Id,
+          path.posix.normalize(
+            path.posix.join("ppt/slides", attrs.Target || "")
+          )
+        );
+      }
+    }
+    for (const match of xml.matchAll(/\br:embed="([^"]+)"/g)) {
+      const imagePath = targets.get(match[1]);
+      const image = imagePath && zip.getEntry(imagePath);
+      if (image)
+        images.push({
+          slide,
+          name: path.posix.basename(imagePath),
+          buffer: image.getData(),
+        });
+    }
+  }
+  return { segments, images };
 }
 
 async function spreadsheetCells(buffer) {
@@ -217,16 +255,14 @@ async function pdfPages(buffer) {
       422
     );
   }
-  return pages
-    .map((text, index) => ({
-      text,
-      location: { type: "page", page: index + 1 },
-    }))
-    .filter((item) => item.text);
+  return pages.map((text, index) => ({
+    text,
+    location: { type: "page", page: index + 1 },
+  }));
 }
 
 function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
-  async function parseRemote(name, buffer) {
+  async function parseRemote(name, buffer, expectedType, maxPage = null) {
     const config = services.ocr;
     if (!config?.url)
       throw new MeetingError(
@@ -294,7 +330,23 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
         502
       );
     }
-    return validateSegments(body?.segments);
+    const segments = validateSegments(body?.segments);
+    if (
+      segments.some(
+        (segment) =>
+          segment.location.type !== expectedType ||
+          (expectedType === "page" &&
+            maxPage != null &&
+            segment.location.page > maxPage)
+      )
+    ) {
+      throw new MeetingError(
+        `OCR/document parser locations must use ${expectedType}`,
+        "PARSER_RESPONSE_INVALID",
+        502
+      );
+    }
+    return segments;
   }
 
   return {
@@ -314,12 +366,56 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
       if ([".txt", ".md"].includes(extension))
         segments = segmentsForText(buffer.toString("utf8"));
       else if (extension === ".docx") segments = officeParagraphs(buffer);
-      else if (extension === ".pptx") segments = pptxSlides(buffer);
-      else if (extension === ".xlsx") segments = await spreadsheetCells(buffer);
+      else if (extension === ".pptx") {
+        const result = pptxSlides(buffer);
+        segments = result.segments;
+        for (const image of result.images) {
+          const imageSegments = await parseRemote(
+            image.name,
+            image.buffer,
+            "image"
+          );
+          segments.push(
+            ...imageSegments.map((segment) => ({
+              text: segment.text,
+              location: { type: "slide", slide: image.slide },
+            }))
+          );
+        }
+      } else if (extension === ".xlsx")
+        segments = await spreadsheetCells(buffer);
       else if (extension === ".pdf") {
         segments = await pdfPages(buffer);
-        if (!segments?.length) return parseRemote(name, buffer);
-      } else return parseRemote(name, buffer);
+        if (!segments) return parseRemote(name, buffer, "page");
+        const missingPages = segments.filter((segment) => !segment.text.trim());
+        if (missingPages.length) {
+          const remote = await parseRemote(
+            name,
+            buffer,
+            "page",
+            segments.length
+          );
+          const byPage = new Map(
+            remote.map((segment) => [segment.location.page, segment])
+          );
+          for (const segment of segments) {
+            const page = segment.location.page;
+            const extracted = byPage.get(page);
+            if (!segment.text.trim() && !extracted) {
+              throw new MeetingError(
+                `OCR/document parser did not return scanned PDF page ${page}`,
+                "PARSER_RESPONSE_INVALID",
+                502
+              );
+            }
+          }
+          segments = segments.map((segment) =>
+            segment.text.trim() ? segment : byPage.get(segment.location.page)
+          );
+        }
+        segments = segments.filter((segment) => segment.text.trim());
+        if (!segments.length) return parseRemote(name, buffer, "page");
+      } else return parseRemote(name, buffer, "image");
       return validateSegments(segments || []);
     },
   };

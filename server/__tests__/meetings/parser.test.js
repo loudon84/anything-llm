@@ -1,5 +1,6 @@
 const AdmZip = require("adm-zip");
 const ExcelJS = require("exceljs");
+const { PDFDocument, StandardFonts } = require("pdf-lib");
 const { createParser } = require("../../modules/meetings/parser");
 
 function zipBuffer(entries) {
@@ -87,6 +88,39 @@ describe("located meeting source parsing", () => {
     ]);
   });
 
+  test("runs configured OCR for embedded slide images while retaining native text", async () => {
+    const buffer = zipBuffer({
+      "ppt/slides/slide1.xml":
+        '<p:sld xmlns:p="p"><a:t xmlns:a="a">Native heading</a:t><p:pic><p:blipFill><a:blip xmlns:a="a" r:embed="rId1"/></p:blipFill></p:pic></p:sld>',
+      "ppt/slides/_rels/slide1.xml.rels":
+        '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>',
+      "ppt/media/image1.png": "fake-png-payload",
+    });
+    const fetchImpl = jest.fn(async (_url, options) => {
+      expect(options.body.get("file").name).toBe("image1.png");
+      return {
+        ok: true,
+        json: async () => ({
+          segments: [
+            { text: "Text in screenshot", location: { type: "image" } },
+          ],
+        }),
+      };
+    });
+    const segments = await createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl,
+    }).parse({
+      name: "slides.pptx",
+      buffer,
+    });
+    expect(segments).toEqual([
+      { text: "Native heading", location: { type: "slide", slide: 1 } },
+      { text: "Text in screenshot", location: { type: "slide", slide: 1 } },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test("extracts XLSX nonempty cell values and coordinates", async () => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet("Decisions");
@@ -131,17 +165,67 @@ describe("located meeting source parsing", () => {
       fetchImpl: async () => ({
         ok: true,
         json: async () => ({
-          segments: [
-            { text: "Scanned decision", location: { type: "page", page: 2 } },
-          ],
+          segments: [{ text: "Scanned decision", location: { type: "image" } }],
         }),
       }),
     });
     await expect(
       parser.parse({ name: "scan.png", buffer: Buffer.from("image") })
     ).resolves.toEqual([
-      { text: "Scanned decision", location: { type: "page", page: 2 } },
+      { text: "Scanned decision", location: { type: "image" } },
     ]);
+  });
+
+  test("OCRs textless pages in a mixed text and scanned PDF", async () => {
+    const pdf = await PDFDocument.create();
+    const pageOne = pdf.addPage();
+    pageOne.drawText("Native PDF decision", {
+      font: await pdf.embedFont(StandardFonts.Helvetica),
+    });
+    pdf.addPage();
+    const buffer = Buffer.from(await pdf.save());
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        segments: [
+          { text: "Scanned appendix", location: { type: "page", page: 2 } },
+        ],
+      }),
+    }));
+    const result = await createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl,
+    }).parse({
+      name: "mixed.pdf",
+      buffer,
+    });
+    expect(result).toEqual([
+      { text: "Native PDF decision", location: { type: "page", page: 1 } },
+      { text: "Scanned appendix", location: { type: "page", page: 2 } },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects OCR locations that do not match the uploaded format", async () => {
+    const parser = createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          segments: [
+            {
+              text: "Wrong locator",
+              location: { type: "paragraph", paragraph: 0 },
+            },
+          ],
+        }),
+      }),
+    });
+    await expect(
+      parser.parse({ name: "scan.pdf", buffer: textPdf(" ") })
+    ).rejects.toMatchObject({
+      code: "PARSER_RESPONSE_INVALID",
+    });
   });
 
   test("rejects malformed remote locations", async () => {

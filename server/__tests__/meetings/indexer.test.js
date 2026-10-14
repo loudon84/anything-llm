@@ -32,6 +32,75 @@ function prismaFor({ meetings, chunks, sources }) {
 }
 
 describe("located meeting chunk index", () => {
+  test("reindex preserves ownership when an earlier source segment splits", async () => {
+    const meeting = {
+      id: 1,
+      generation: 2,
+      retrievalStatus: "INDEXING",
+      deletedAt: null,
+      summary: null,
+      transcript: null,
+    };
+    const sources = [
+      {
+        id: 10,
+        meetingId: 1,
+        sourceType: "SUPPLEMENT_TEXT",
+        contentHash: "a",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          {
+            text: "one two three four",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+      },
+      {
+        id: 11,
+        meetingId: 1,
+        sourceType: "SUPPLEMENT_TEXT",
+        contentHash: "b",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          {
+            text: "next source",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+      },
+    ];
+    const inserted = [];
+    const tx = {
+      meetings: {
+        findUnique: async () => meeting,
+        update: async ({ data }) => Object.assign(meeting, data),
+      },
+      meeting_sources: { findMany: async () => sources },
+      meeting_chunks: {
+        deleteMany: async () => {},
+        create: async ({ data }) => inserted.push(data),
+      },
+    };
+    const prisma = {
+      ...tx,
+      $transaction: async (callback) => callback(tx),
+    };
+    const indexer = createIndexer({
+      prisma,
+      embedder: { embedDocuments: async (texts) => texts.map(() => [1, 0]) },
+      chunkCharacters: 8,
+    });
+    await indexer.reindex(1);
+    expect(
+      inserted.filter((chunk) => chunk.sourceId === 10).map((c) => c.text)
+    ).toEqual(["one two", "three", "four"]);
+    expect(
+      inserted.filter((chunk) => chunk.sourceId === 11).map((c) => c.text)
+    ).toEqual(["next", "source"]);
+  });
+
   test("embeds bounded chunks while preserving source locator", async () => {
     const embedder = {
       embedDocuments: async (texts) => texts.map(() => [1, 0]),

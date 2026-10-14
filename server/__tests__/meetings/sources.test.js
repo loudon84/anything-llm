@@ -155,6 +155,28 @@ describe("meeting source identity and lifecycle", () => {
     ).toBe("DRAFT");
   });
 
+  test("does not allow deleting imported summary or transcript sources", async () => {
+    const imported = await prisma.meeting_sources.create({
+      data: {
+        meetingId,
+        sourceType: "SUMMARY",
+        name: "Imported summary",
+        contentHash: "summary",
+        activeHash: "summary",
+        parseStatus: "SUCCESS",
+      },
+    });
+    await expect(
+      service().remove(meetingId, imported.id, 7)
+    ).rejects.toMatchObject({
+      code: "SOURCE_IMMUTABLE",
+    });
+    expect(
+      (await prisma.meeting_sources.findUnique({ where: { id: imported.id } }))
+        .deletedAt
+    ).toBeNull();
+  });
+
   test("uses an opaque safe storage path regardless of a traversal filename", async () => {
     const source = await service().upload(
       meetingId,
@@ -342,6 +364,211 @@ describe("meeting source identity and lifecycle", () => {
     ).toBe("INDEXING");
   });
 
+  test("reindex aborts if a source finishes parsing while embeddings are being prepared", async () => {
+    const original = await prisma.meeting_sources.create({
+      data: {
+        meetingId,
+        sourceType: "SUPPLEMENT_TEXT",
+        name: "existing",
+        contentHash: "existing-hash",
+        activeHash: "existing-hash",
+        segments: JSON.stringify([
+          { text: "Existing", location: { type: "paragraph", paragraph: 0 } },
+        ]),
+        parseStatus: "SUCCESS",
+      },
+    });
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: { generation: 3, retrievalStatus: "INDEXING" },
+    });
+    await prisma.meeting_chunks.create({
+      data: {
+        meetingId,
+        sourceId: original.id,
+        text: "Existing",
+        location: "{}",
+        embedding: "[1,0]",
+        generation: 3,
+      },
+    });
+
+    let signalStarted;
+    const started = new Promise((resolve) => {
+      signalStarted = resolve;
+    });
+    let release;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    const delayedIndex = createIndexer({
+      prisma,
+      embedder: {
+        embedDocuments: async (texts) => {
+          signalStarted();
+          await blocked;
+          return texts.map(() => [0, 1]);
+        },
+      },
+    });
+    const reindexing = delayedIndex.reindex(meetingId);
+    await started;
+    const added = await service().upload(
+      meetingId,
+      { name: "new.txt", buffer: Buffer.from("new evidence") },
+      7
+    );
+    const parseJob = await prisma.meeting_jobs.findFirst({
+      where: { meetingId, kind: "PARSE_SOURCE" },
+    });
+    await service().process(parseJob);
+    release();
+    await expect(reindexing).resolves.toMatchObject({ stale: true });
+    const [meeting, sources, chunks] = await Promise.all([
+      prisma.meetings.findUnique({ where: { id: meetingId } }),
+      prisma.meeting_sources.findMany({
+        where: { meetingId, deletedAt: null },
+      }),
+      prisma.meeting_chunks.findMany({ where: { meetingId, generation: 3 } }),
+    ]);
+    expect(chunks.some((chunk) => chunk.sourceId === added.id)).toBe(true);
+    expect(chunks.some((chunk) => chunk.sourceId === original.id)).toBe(true);
+    expect(
+      sources.every((source) =>
+        chunks.some((chunk) => chunk.sourceId === source.id)
+      )
+    ).toBe(true);
+    expect(meeting.retrievalStatus).toBe("AVAILABLE");
+  });
+
+  test("requeues a pending source when its parse job belongs to an old generation", async () => {
+    let signalStarted;
+    const started = new Promise((resolve) => {
+      signalStarted = resolve;
+    });
+    let release;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const sources = service({
+      parser: {
+        parse: async () => {
+          calls += 1;
+          if (calls === 1) {
+            signalStarted();
+            await blocked;
+          }
+          return [
+            { text: "Parsed", location: { type: "paragraph", paragraph: 0 } },
+          ];
+        },
+      },
+    });
+    const source = await sources.upload(
+      meetingId,
+      { name: "pending.txt", buffer: Buffer.from("pending") },
+      7
+    );
+    const oldJob = await prisma.meeting_jobs.findFirst({
+      where: { meetingId, kind: "PARSE_SOURCE" },
+    });
+    const processing = sources.process(oldJob);
+    await started;
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: { generation: 1, retrievalStatus: "INDEXING" },
+    });
+    release();
+    await expect(processing).resolves.toMatchObject({
+      stale: true,
+      requeued: true,
+    });
+    const [pending, jobs] = await Promise.all([
+      prisma.meeting_sources.findUnique({ where: { id: source.id } }),
+      prisma.meeting_jobs.findMany({
+        where: { meetingId, kind: "PARSE_SOURCE" },
+      }),
+    ]);
+    expect(pending.parseStatus).toBe("PENDING");
+    expect(
+      jobs.some(
+        (job) =>
+          JSON.parse(job.payload).generation === 1 && job.status === "CREATED"
+      )
+    ).toBe(true);
+  });
+
+  test("an expired worker cannot publish success or failure after another lease succeeds", async () => {
+    let signalStarted;
+    const started = new Promise((resolve) => {
+      signalStarted = resolve;
+    });
+    let rejectSlow;
+    const blocked = new Promise((_, reject) => {
+      rejectSlow = reject;
+    });
+    let calls = 0;
+    const sources = service({
+      parser: {
+        parse: async () => {
+          calls += 1;
+          if (calls === 1) {
+            signalStarted();
+            return blocked;
+          }
+          return [
+            { text: "Winner", location: { type: "paragraph", paragraph: 0 } },
+          ];
+        },
+      },
+    });
+    const source = await sources.upload(
+      meetingId,
+      { name: "leased.txt", buffer: Buffer.from("leased") },
+      7
+    );
+    const created = await prisma.meeting_jobs.findFirst({
+      where: { meetingId, kind: "PARSE_SOURCE" },
+    });
+    await prisma.meeting_jobs.update({
+      where: { id: created.id },
+      data: {
+        status: "PROCESSING",
+        leaseOwner: "worker-a",
+        leaseUntil: new Date(Date.now() + 60_000),
+      },
+    });
+    const staleWorker = sources.process({
+      ...created,
+      status: "PROCESSING",
+      leaseOwner: "worker-a",
+    });
+    await started;
+    await prisma.meeting_jobs.update({
+      where: { id: created.id },
+      data: { leaseOwner: "worker-b" },
+    });
+    await sources.process({
+      ...created,
+      status: "PROCESSING",
+      leaseOwner: "worker-b",
+    });
+    rejectSlow(new Error("late parser failure"));
+    await expect(staleWorker).resolves.toMatchObject({ stale: true });
+    const [currentSource, chunks, meeting] = await Promise.all([
+      prisma.meeting_sources.findUnique({ where: { id: source.id } }),
+      prisma.meeting_chunks.findMany({ where: { sourceId: source.id } }),
+      prisma.meetings.findUnique({ where: { id: meetingId } }),
+    ]);
+    expect(currentSource).toMatchObject({
+      parseStatus: "SUCCESS",
+      error: null,
+    });
+    expect(chunks).toHaveLength(1);
+    expect(meeting.retrievalStatus).toBe("AVAILABLE");
+  });
+
   test("a reindex job from an older generation cannot publish after meeting revision", async () => {
     await prisma.meetings.update({
       where: { id: meetingId },
@@ -361,6 +588,72 @@ describe("meeting source identity and lifecycle", () => {
       (await prisma.meetings.findUnique({ where: { id: meetingId } }))
         .retrievalStatus
     ).toBe("INDEXING");
+  });
+
+  test("revision reindex synchronizes summary source text and clears obsolete locators", async () => {
+    const source = await prisma.meeting_sources.create({
+      data: {
+        meetingId,
+        sourceType: "SUMMARY",
+        name: "Tencent summary",
+        contentText: "Original decision",
+        contentHash: "original-hash",
+        activeHash: "SUMMARY:original-hash",
+        segments: JSON.stringify({
+          segments: [
+            {
+              text: "Original decision",
+              location: {
+                type: "paragraph",
+                paragraph: 0,
+                recordFileId: "old-record",
+              },
+            },
+          ],
+          provenance: { recordFileIds: ["old-record"] },
+        }),
+        parseStatus: "SUCCESS",
+      },
+    });
+    await prisma.meetings.update({
+      where: { id: meetingId },
+      data: {
+        summary: "Revised decision",
+        generation: 2,
+        retrievalStatus: "INDEXING",
+      },
+    });
+    const job = await prisma.meeting_jobs.create({
+      data: {
+        kind: "REINDEX",
+        meetingId,
+        connectionId,
+        externalId: "source-test",
+        quarter: "2026-Q2",
+        activeKey: "REINDEX:2",
+        payload: JSON.stringify({ generation: 2 }),
+        status: "CREATED",
+        attempts: 0,
+      },
+    });
+    await service().process(job);
+    const [current, chunks] = await Promise.all([
+      prisma.meeting_sources.findUnique({ where: { id: source.id } }),
+      prisma.meeting_chunks.findMany({ where: { meetingId, generation: 2 } }),
+    ]);
+    expect(current.contentText).toBe("Revised decision");
+    expect(current.contentHash).not.toBe("original-hash");
+    expect(JSON.parse(current.segments)).toEqual([
+      {
+        text: "Revised decision",
+        location: { type: "paragraph", paragraph: 0 },
+      },
+    ]);
+    expect(chunks.map((chunk) => chunk.text)).toEqual(["Revised decision"]);
+    expect(JSON.parse(chunks[0].location)).toEqual({
+      type: "paragraph",
+      paragraph: 0,
+    });
   });
 
   test("keeps the last-source deletion blocked when the next upload fails", async () => {

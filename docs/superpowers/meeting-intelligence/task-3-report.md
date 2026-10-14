@@ -33,3 +33,14 @@ Scanned PDFs, PNG/JPG/JPEG/WebP images, or unsupported embedded slide-image text
 ## Limits
 
 No production credentials, OCR endpoint, or live Tencent APIs were used. Runtime embedding-provider wiring and deployment storage configuration remain integration work for the application task. Local PDF extraction is covered with a valid PDF fixture; scanned PDF/image recognition still requires the configured parser service.
+
+## Review follow-up
+
+The review follow-up added guarded source ownership, active-set and lease checks at index publication, generation-aware pending-source requeue, and deletion restricted to draft supplements. Revisions to imported summary/transcript text now update the source text, hash, segments, and chunk locations in the same publication transaction. The importer registers staged attachment cleanup with the outer transaction caller so a later lost-lease rollback removes files written by a successful source commit.
+
+PPTX parsing now follows slide relationships to embedded images and sends each image to the configured located parser; OCR text is attached to the actual slide. PDF extraction retains empty page identities and sends a mixed document to OCR when any page lacks extractable text, then requires page locations for the scanned pages. Standalone image sources use the whole-asset `image` location.
+
+- RED: the four focused parser/indexer/source/importer suites reproduced 9 new assertions before implementation.
+- GREEN: `npx jest server/__tests__/meetings --runInBand` — 7 suites, 84 tests passed, including Tencent importer and lifecycle regressions.
+- Scoped ESLint passed for parser, indexer, sources, and importer. Targeted Prettier checks and `git diff --check` passed.
+- Runtime extension: `createIndexer().reindex(meetingId, { job })` accepts the durable runner job to guard publication by lease. `commitImport(tx, meeting, prepared, { onRollback })` registers cleanup with the importer's outer transaction; the three-argument call remains valid when the caller owns rollback cleanup.

@@ -334,6 +334,7 @@ function createImporter({
         404
       );
     const payload = parseJson(job.payload);
+    const rollbackCleanups = [];
     try {
       await assertCurrentLease(prisma, job);
       const connection = await (prisma.meeting_connections.findUnique
@@ -536,7 +537,9 @@ function createImporter({
           where: { id: created.id },
           data: { retrievalStatus: "INDEXING", generation: 1 },
         });
-        await sourceService.commitImport(tx, indexing, prepared);
+        await sourceService.commitImport(tx, indexing, prepared, {
+          onRollback: (cleanup) => rollbackCleanups.push(cleanup),
+        });
         await completeJob(tx, job, {
           status: "SUCCESS",
           stage: "COMMITTED",
@@ -548,6 +551,7 @@ function createImporter({
         });
         return indexing;
       });
+      rollbackCleanups.length = 0;
       await audit({
         action: "MEETING_IMPORT_COMMITTED",
         meetingId: meeting.id,
@@ -555,6 +559,9 @@ function createImporter({
       });
       return meeting;
     } catch (error) {
+      await Promise.allSettled(
+        rollbackCleanups.map((cleanup) => Promise.resolve().then(cleanup))
+      );
       await prisma.meeting_jobs.updateMany({
         where: {
           id: job.id,

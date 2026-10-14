@@ -1,7 +1,10 @@
+const crypto = require("crypto");
 const { MeetingError } = require("./errors");
 const { RETRIEVAL } = require("./constants");
 
 const DEFAULT_CHUNK_CHARACTERS = 1200;
+const hashText = (value) =>
+  crypto.createHash("sha256").update(String(value)).digest("hex");
 
 function splitText(text, maxCharacters) {
   const words = String(text).trim().split(/\s+/).filter(Boolean);
@@ -113,7 +116,11 @@ function createIndexer({
       if (!text || !segment.location || typeof segment.location !== "object")
         continue;
       for (const part of splitText(text, chunkCharacters))
-        pieces.push({ text: part, location: segment.location });
+        pieces.push({
+          text: part,
+          location: segment.location,
+          ...(segment.sourceId != null ? { sourceId: segment.sourceId } : {}),
+        });
     }
     if (!pieces.length)
       throw new MeetingError(
@@ -200,7 +207,7 @@ function createIndexer({
       .slice(0, safeLimit);
   }
 
-  async function reindex(meetingId) {
+  async function reindex(meetingId, { job } = {}) {
     const id = Number(meetingId);
     const meeting = await prisma.meetings.findUnique({ where: { id } });
     if (
@@ -210,10 +217,26 @@ function createIndexer({
     )
       return { stale: true, count: 0 };
     const generation = Number(meeting.generation || 0);
+    const sourceSnapshot = await prisma.meeting_sources.findMany({
+      where: { meetingId: id, deletedAt: null },
+    });
+    const snapshotKey = (rows) =>
+      JSON.stringify(
+        rows
+          .map((source) => ({
+            id: source.id,
+            contentHash: source.contentHash ?? null,
+            parseStatus: source.parseStatus,
+            deletedAt: source.deletedAt ?? null,
+          }))
+          .sort((a, b) => a.id - b.id)
+      );
+    const sourceSnapshotKey = snapshotKey(sourceSnapshot);
     const sources = await prisma.meeting_sources.findMany({
       where: { meetingId: id, deletedAt: null, parseStatus: "SUCCESS" },
     });
     const segments = [];
+    const sourceRevisions = new Map();
     for (const source of sources) {
       let current = parseJson(source.segments, []);
       if (!Array.isArray(current) && Array.isArray(current?.segments))
@@ -222,14 +245,24 @@ function createIndexer({
         source.sourceType === "SUMMARY" &&
         meeting.summary != null &&
         meeting.summary !== source.contentText
-      )
+      ) {
         current = splitCurrentText(meeting.summary);
+        sourceRevisions.set(source.id, {
+          segments: current,
+          contentText: meeting.summary,
+        });
+      }
       if (
         source.sourceType === "TRANSCRIPT" &&
         meeting.transcript != null &&
         meeting.transcript !== source.contentText
-      )
+      ) {
         current = splitCurrentText(meeting.transcript);
+        sourceRevisions.set(source.id, {
+          segments: current,
+          contentText: meeting.transcript,
+        });
+      }
       const valid = Array.isArray(current)
         ? current.filter(
             (segment) =>
@@ -242,16 +275,12 @@ function createIndexer({
         segments.push({ ...segment, sourceId: source.id });
     }
     const prepared = segments.length ? await prepare(segments) : [];
-    const ownerIds = segments.map((segment) => segment.sourceId);
-    let cursor = 0;
     const preparedBySource = new Map();
-    for (const segment of segments) {
-      const sourceId = ownerIds[cursor];
-      const pieces = splitText(segment.text, chunkCharacters).length;
+    for (const chunk of prepared) {
+      const sourceId = chunk.sourceId;
       const target = preparedBySource.get(sourceId) || [];
-      target.push(...prepared.slice(cursor, cursor + pieces));
+      target.push(chunk);
       preparedBySource.set(sourceId, target);
-      cursor += pieces;
     }
     const publish = async (tx) => {
       const current = await tx.meetings.findUnique({ where: { id } });
@@ -262,11 +291,66 @@ function createIndexer({
         current.generation !== generation
       )
         return { stale: true, count: 0 };
+      if (job?.leaseOwner) {
+        const lease = await tx.meeting_jobs.findUnique({
+          where: { id: Number(job.id) },
+        });
+        if (
+          !lease ||
+          lease.status !== "PROCESSING" ||
+          lease.leaseOwner !== job.leaseOwner ||
+          !lease.leaseUntil ||
+          new Date(lease.leaseUntil).getTime() <= Date.now()
+        )
+          return { stale: true, count: 0, leaseLost: true };
+      }
       const active = await tx.meeting_sources.findMany({
-        where: { meetingId: id, deletedAt: null, parseStatus: "SUCCESS" },
+        where: { meetingId: id, deletedAt: null },
       });
-      const activeIds = new Set(active.map((source) => source.id));
+      if (snapshotKey(active) !== sourceSnapshotKey) {
+        const sourceSetRevision = crypto
+          .createHash("sha256")
+          .update(snapshotKey(active))
+          .digest("hex");
+        const activeKey = `REINDEX:${id}:${generation}:SOURCES:${sourceSetRevision}`;
+        const existing = await tx.meeting_jobs.findFirst({
+          where: { activeKey, status: { in: ["CREATED", "PROCESSING"] } },
+        });
+        if (!existing)
+          await tx.meeting_jobs.create({
+            data: {
+              kind: "REINDEX",
+              meetingId: id,
+              connectionId: current.connectionId,
+              externalId: current.externalId,
+              quarter: current.quarter,
+              activeKey,
+              payload: JSON.stringify({ generation, sourceSetRevision }),
+              status: "CREATED",
+              attempts: 0,
+            },
+          });
+        return { stale: true, count: 0, sourceSetChanged: true };
+      }
+      const successful = active.filter(
+        (source) => source.parseStatus === "SUCCESS"
+      );
+      const activeIds = new Set(successful.map((source) => source.id));
       await tx.meeting_chunks.deleteMany({ where: { meetingId: id } });
+      for (const [sourceId, revision] of sourceRevisions) {
+        const source = successful.find((row) => row.id === sourceId);
+        if (!source) continue;
+        const contentHash = hashText(revision.contentText);
+        await tx.meeting_sources.update({
+          where: { id: sourceId },
+          data: {
+            contentText: revision.contentText,
+            contentHash,
+            activeHash: `${source.sourceType}:${contentHash}`,
+            segments: JSON.stringify(revision.segments),
+          },
+        });
+      }
       let count = 0;
       for (const [sourceId, sourceChunks] of preparedBySource) {
         if (!activeIds.has(sourceId)) continue;

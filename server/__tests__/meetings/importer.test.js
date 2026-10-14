@@ -165,6 +165,26 @@ describe("durable Tencent meeting imports", () => {
     expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED", activeKey: null });
   });
 
+  test("cleans attachment files when the enclosing transaction rolls back after source commit", async () => {
+    const { db } = fakePrisma();
+    const filePath = path.join(os.tmpdir(), `meeting-rollback-${Date.now()}-${Math.random()}.bin`);
+    const importer = importerWith({ db,
+      client: { getContent: async () => ({ summary: "Summary", transcript: null, segments: [], attachments: [], capabilities: {} }) },
+      sourceService: {
+        prepareImport: async () => [{ sourceType: "TENCENT_ORIGINAL", name: "attachment.bin" }],
+        commitImport: async (tx, _meeting, _prepared, { onRollback }) => {
+          fs.writeFileSync(filePath, "private attachment");
+          onRollback(async () => fs.promises.rm(filePath, { force: true }));
+          const updateMany = tx.meeting_jobs.updateMany;
+          tx.meeting_jobs.updateMany = async (args) => args.data.status === "SUCCESS" ? { count: 0 } : updateMany(args);
+        },
+      },
+    });
+    const job = await importer.queue(1, "m-1", { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" }, 7);
+    await expect(importer.process(job)).rejects.toMatchObject({ code: "IMPORT_LEASE_LOST" });
+    expect(fs.existsSync(filePath)).toBe(false);
+  });
+
   test("queue reserves the same external meeting once and treats active reservations as quota", async () => {
     const { db, state } = fakePrisma();
     const importer = importerWith({ db });
