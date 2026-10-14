@@ -486,3 +486,135 @@ model model_router_rules {
   @@index([router_id])
   @@index([router_id, enabled, priority])
 }
+
+model meeting_connections {
+  id        Int       @id @default(autoincrement())
+  name      String
+  config    String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  meetings  meetings[]
+  jobs      meeting_jobs[]
+}
+
+model meetings {
+  id              Int              @id @default(autoincrement())
+  connectionId    Int
+  externalId      String
+  activeKey       String?          @unique
+  title           String
+  startTime       DateTime
+  endTime         DateTime?
+  quarter         String
+  reviewStatus    String
+  retrievalStatus String
+  summary         String?
+  transcript      String?
+  coverage        String
+  generation      Int              @default(0)
+  deletedAt       DateTime?
+  createdBy       Int?
+  reviewedBy      Int?
+  reviewedAt      DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  connection      meeting_connections @relation(fields: [connectionId], references: [id])
+  sources         meeting_sources[]
+  chunks          meeting_chunks[]
+  jobs            meeting_jobs[]
+
+  @@index([quarter, deletedAt])
+  @@index([connectionId, externalId])
+  @@index([retrievalStatus, reviewStatus])
+}
+
+model meeting_sources {
+  id          Int              @id @default(autoincrement())
+  meetingId   Int
+  sourceType  String
+  name        String
+  contentHash String?
+  activeHash  String?
+  bytes       Int              @default(0)
+  filePath    String?
+  contentText String?
+  segments    String?
+  parseStatus String
+  error       String?
+  deletedAt   DateTime?
+  createdBy   Int?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  meeting     meetings         @relation(fields: [meetingId], references: [id])
+  chunks      meeting_chunks[]
+
+  @@unique([meetingId, activeHash])
+  @@index([meetingId, deletedAt])
+  @@index([contentHash])
+}
+
+model meeting_chunks {
+  id         Int            @id @default(autoincrement())
+  meetingId  Int
+  sourceId   Int
+  text       String
+  location   String
+  embedding  String
+  generation Int
+  createdAt  DateTime       @default(now())
+  meeting    meetings       @relation(fields: [meetingId], references: [id])
+  source     meeting_sources @relation(fields: [sourceId], references: [id])
+
+  @@index([meetingId, generation])
+  @@index([sourceId])
+}
+
+model meeting_jobs {
+  id           Int                  @id @default(autoincrement())
+  kind         String
+  meetingId    Int?
+  connectionId Int?
+  externalId   String?
+  activeKey    String?              @unique
+  quarter      String?
+  payload      String
+  status       String
+  stage        String?
+  error        String?
+  attempts     Int                  @default(0)
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  meeting      meetings?            @relation(fields: [meetingId], references: [id])
+  connection   meeting_connections? @relation(fields: [connectionId], references: [id])
+
+  @@index([status, kind])
+  @@index([meetingId, status])
+  @@index([quarter, status])
+}
+
+model meeting_conversations {
+  id          Int               @id @default(autoincrement())
+  meetingIds  String
+  workspaceIds String
+  createdBy   Int?
+  createdAt   DateTime          @default(now())
+  answers     meeting_answers[]
+}
+
+model meeting_answers {
+  id              Int                   @id @default(autoincrement())
+  conversationId  Int
+  question        String
+  status          String
+  text            String?
+  missingInfo     String?
+  citations       String
+  sourceState     String
+  previousAnswerId Int?
+  error           String?
+  createdAt       DateTime              @default(now())
+  conversation    meeting_conversations @relation(fields: [conversationId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@index([previousAnswerId])
+}
