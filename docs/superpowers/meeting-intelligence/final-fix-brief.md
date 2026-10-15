@@ -2,6 +2,8 @@
 
 Implementer must use GPT-6 Luna, one sequential complete wave, no other agents. Root owns plan/TODO/ledger/reviews/final-verification and never edits code. Read APPROVED PRD, current plan, final-review.md (all12Important+2Minor), relevant task reports/contracts as needed. Verify each finding against actual code/dependency; if technically wrong explain concrete evidence before declining, do not silently omit any. Use TDD/systematic debugging and receiving-code-review. Work only in this managed branch/worktree; no master writes/merge/push, real credentials, external tenant/provider calls, system installs or unavailable Linux claims.
 
+Exact scope files: `prd/PRD-AnythingLLM-Enterprise-Meeting-Intelligence-v1.0.md` and `docs/superpowers/plans/2026-10-14-meeting-intelligence.md`. APPROVED is the PRD status, not a filename; do not invent `APPROVED-PRD.md` or `plan.md`.
+
 ## Complete finding list and boundaries
 
 Address F1-F12 together. Each needs meaningful actual-path coverage, not tests of a copied predicate or wrong API envelopes.

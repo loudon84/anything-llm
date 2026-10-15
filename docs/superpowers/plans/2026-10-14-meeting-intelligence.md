@@ -162,11 +162,11 @@ QA start dialog explicitly selects accessible Workspaces, default none, persiste
 
 **Files:** Integration tests `server/__tests__/meetings/integration.test.js`; `docs/meeting-intelligence-deployment.md`; amend only task-owned implementation gaps; update this plan TODO and execution ledger.
 
-- [ ] Fresh Prisma migration/generate, exercise metadata import → file/text supplement → AVAILABLE → approval → new supplement DRAFT → delete source → cleanup; verify originals readonly, reanswer snapshots and duplicate/quota policies.
-- [ ] Regression tests for scope/source changes during model response; full new meeting suite and frontend production build/scoped lint.
-- [ ] Capture real test evidence and supported formats/services; record credentialless Tencent verification limits and unmeasured Linux/OCR/performance gates honestly.
-- [ ] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review.
-- [ ] Final deliverable links plan/TODO, code worktree and branch; do not claim Linux/live-release gate passed on Windows or absent credentials. Do not push/merge automatically.
+- [x] Fresh Prisma migration/generate, exercise metadata import → file/text supplement → AVAILABLE → approval → new supplement DRAFT → delete source → cleanup; verify originals readonly, reanswer snapshots and duplicate/quota policies.
+- [x] Regression tests for scope/source changes during model response; full new meeting suite and frontend production build/scoped lint.
+- [x] Capture real test evidence and supported formats/services; record credentialless Tencent verification limits and unmeasured Linux/OCR/performance gates honestly.
+- [x] Final branch diff review, fix important findings via GPT-6 Luna, focused retest and review. Final scoped fix commits `e5e98e80`, `b6100eeb`, and `61972819` have clean reviews.
+- [x] Final deliverable links plan/TODO, code worktree and branch; Linux/live-release gates remain explicitly separate. No push or merge performed.
 
 
 
