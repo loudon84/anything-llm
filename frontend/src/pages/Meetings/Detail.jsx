@@ -40,6 +40,8 @@ export default function MeetingDetail() {
   const [sources, setSources] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
   const [selectedWorkspaces, setSelectedWorkspaces] = useState(new Set());
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
+  const [workspaceError, setWorkspaceError] = useState("");
   const [summary, setSummary] = useState("");
   const [transcript, setTranscript] = useState("");
   const contentDraft = useRef({ summary: "", transcript: "" });
@@ -87,19 +89,22 @@ export default function MeetingDetail() {
   useEffect(() => {
     setSelectedWorkspaces(new Set());
   }, [id]);
-  useEffect(() => {
-    let active = true;
-    Meetings.workspaces()
-      .then((rows) => {
-        if (active) setWorkspaces(rows);
-      })
-      .catch(() => {
-        if (active) setWorkspaces([]);
-      });
-    return () => {
-      active = false;
-    };
+  const loadWorkspaces = useCallback(async () => {
+    setWorkspaceLoading(true);
+    setWorkspaceError("");
+    try {
+      setWorkspaces(await Meetings.workspaces());
+    } catch (e) {
+      setWorkspaces([]);
+      setSelectedWorkspaces(new Set());
+      setWorkspaceError(e.message || "工作区列表暂时不可用。");
+    } finally {
+      setWorkspaceLoading(false);
+    }
   }, []);
+  useEffect(() => {
+    loadWorkspaces();
+  }, [loadWorkspaces]);
   useEffect(() => {
     const active =
       meeting?.retrievalStatus === "INDEXING" ||
@@ -262,7 +267,20 @@ export default function MeetingDetail() {
         </p>
         <fieldset className="space-y-2" aria-label="选择用于问答的工作区">
           <legend className="mb-2 font-medium">可选工作区</legend>
-          {workspaces.length ? (
+          {workspaceLoading ? (
+            <p role="status" className="text-sm text-theme-text-secondary">
+              正在读取可访问的工作区…
+            </p>
+          ) : workspaceError ? (
+            <div role="alert" className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-red-300">
+                工作区列表读取失败：{workspaceError}
+              </span>
+              <Button onClick={loadWorkspaces} disabled={workspaceLoading}>
+                重试读取工作区
+              </Button>
+            </div>
+          ) : workspaces.length ? (
             workspaces.map((workspace) => (
               <label
                 key={workspace.id}

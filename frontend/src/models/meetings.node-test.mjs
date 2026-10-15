@@ -396,6 +396,7 @@ test("Detail keeps the meeting fixed and submits only explicitly selected Worksp
       createConversation: meetingsModel.createConversation,
     };
     const createConversation = [];
+    let workspaceAttempts = 0;
     meetingsModel.detail = async () => ({
       meeting: {
         id: 23,
@@ -406,10 +407,15 @@ test("Detail keeps the meeting fixed and submits only explicitly selected Worksp
       },
       sources: [],
     });
-    meetingsModel.workspaces = async () => [
-      { id: 11, name: "Operations" },
-      { id: 12, name: "Finance" },
-    ];
+    meetingsModel.workspaces = async () => {
+      workspaceAttempts += 1;
+      if (workspaceAttempts === 1)
+        throw new Error("synthetic Workspace list failure");
+      return [
+        { id: 11, name: "Operations" },
+        { id: 12, name: "Finance" },
+      ];
+    };
     meetingsModel.createConversation = async (meetingIds, workspaceIds) => {
       createConversation.push({ meetingIds, workspaceIds });
       return { id: 41 };
@@ -447,6 +453,30 @@ test("Detail keeps the meeting fixed and submits only explicitly selected Worksp
     );
     assert.ok(workspaceFieldset);
     assert.match(document.body.textContent, /Fixed planning review/);
+    assert.match(
+      document.body.textContent,
+      /工作区列表读取失败：synthetic Workspace list failure/
+    );
+    assert.equal(
+      workspaceFieldset.querySelector('[role="alert"]') !== null,
+      true
+    );
+    assert.equal(
+      document.body.textContent.includes("当前没有可访问工作区"),
+      false
+    );
+    assert.ok(
+      [...document.querySelectorAll("button")].some((button) =>
+        button.textContent.includes("只用本场会议开始问答")
+      )
+    );
+    const retry = [...workspaceFieldset.querySelectorAll("button")].find(
+      (button) => button.textContent.includes("重试读取工作区")
+    );
+    assert.ok(retry);
+    await React.act(async () => retry.click());
+    assert.equal(workspaceAttempts, 2);
+
     const operations = document.querySelector(
       'input[aria-label="加入工作区 Operations"]'
     );
