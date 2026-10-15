@@ -102,6 +102,7 @@ describe("Tencent Meeting connector", () => {
     expect(content.segments.map((segment) => [segment.text, segment.location.startMs, segment.location.recordFileId])).toEqual([
       ["rf-1", 0, "rf-1"], ["rf-2", 4 * 60 * 60 * 1_000, "rf-2"],
     ]);
+    expect(content.transcriptDurationMs).toBe(4 * 60 * 60 * 1_000 + 1_000);
     expect(clipContent(content, { from: 0, to: 3 * 60 * 60 * 1_000 }).segments).toHaveLength(1);
     const manifest = await client.describeMeeting("m-1", { startTime: firstStart, endTime: firstStart + 86_400_000 });
     expect(manifest.attachments).toEqual([{
@@ -133,6 +134,13 @@ describe("Tencent Meeting connector", () => {
     await service.save({ id: 1, name: "Ops", secretId: "secret-id", secretKey: "secret-key", appId: "tenant", userId: "user" }, 9);
     const publicConfig = await service.getPublic();
     expect(publicConfig).toMatchObject({ name: "Ops", configured: true });
+    expect(publicConfig.credentialHints).toMatchObject({
+      secretIdPresent: true,
+      secretKeyPresent: true,
+      stsTokenPresent: false,
+    });
+    expect(JSON.stringify(publicConfig)).not.toContain("cret-id");
+    expect(JSON.stringify(publicConfig)).not.toContain("cret-key");
     expect(publicConfig).not.toMatchObject({ secretId: "secret-id", secretKey: "secret-key" });
     expect(await service.getPrivate()).toMatchObject({ secretId: "secret-id", secretKey: "secret-key" });
     expect(JSON.stringify(auditEntries)).not.toContain("secret-key");
@@ -194,6 +202,24 @@ describe("Tencent Meeting connector", () => {
       operatorId: "operator",
       services: { ocr: { url: "https://ocr.example/parse", configured: true } },
     });
+    expect((await service.getPublic()).services.ocr.timeoutMs).toBe(120000);
+    await expect(
+      service.save(
+        {
+          id: 1,
+          services: { ocr: { url: "https://ocr.example/parse", timeoutMs: 4000 } },
+        },
+        7
+      )
+    ).rejects.toMatchObject({ code: "INVALID_MEETING_CONFIG" });
+    await service.save(
+      {
+        id: 1,
+        services: { ocr: { url: "https://ocr.example/parse", timeoutMs: 5000 } },
+      },
+      7
+    );
+    expect((await service.getPublic()).services.ocr.timeoutMs).toBe(5000);
     expect(JSON.stringify(await service.getPublic())).not.toContain(
       "synthetic-ocr-secret"
     );
@@ -228,6 +254,43 @@ describe("Tencent Meeting connector", () => {
     expect(rows[0].name).toBe("Tencent Meeting");
   });
 
+  test("records an administrator identity and time when unsupported capability is confirmed", async () => {
+    const rows = [];
+    const service = createMeetingConfig({
+      prisma: {
+        meeting_connections: {
+          findFirst: async () => rows[0] || null,
+          create: async ({ data }) => {
+            rows[0] = { id: 1, ...data };
+            return rows[0];
+          },
+          update: async ({ data }) => {
+            rows[0] = { ...rows[0], ...data };
+            return rows[0];
+          },
+        },
+      },
+      encryption: { encrypt: (value) => value, decrypt: (value) => value },
+    });
+    const saved = await service.save(
+      {
+        name: "Ops",
+        capabilities: {
+          transcript: "unsupported",
+          summary: "unknown",
+          attachments: "supported",
+        },
+      },
+      41
+    );
+    expect(saved.capabilities.transcript).toMatchObject({
+      status: "unsupported",
+      verifiedBy: 41,
+    });
+    expect(saved.capabilities.transcript.verifiedAt).toBeTruthy();
+    expect(saved.capabilities.summary).toEqual({ status: "unknown" });
+  });
+
   const connectorConfig = (capabilities = {}) => ({
     secretId: "id", secretKey: "key", appId: "app", userId: "u", operatorId: "u", capabilities,
   });
@@ -238,6 +301,27 @@ describe("Tencent Meeting connector", () => {
   const validParagraph = (pid, text = `p${pid}`) => ({
     pid: String(pid), start_time: pid * 1000, end_time: pid * 1000 + 500,
     sentences: [{ words: [{ text }] }],
+  });
+
+  test("legacy unsupported capability without admin verification remains unknown", async () => {
+    const calls = [];
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "unsupported" }),
+      now: () => 1_700_000_000_000,
+      nonce: () => 1,
+      fetchImpl: async (url) => {
+        calls.push(new URL(url).pathname);
+        return recordsResponse();
+      },
+    });
+    const content = await client.getContent("m-1", {
+      meetingStartTime: 1_700_000_000_000,
+      meetingEndTime: 1_700_086_400_000,
+    });
+    expect(content.capabilities.transcript).toMatchObject({
+      status: "unknown",
+    });
+    expect(calls).toEqual(["/v1/records"]);
   });
 
   test("follows transcript `more` pages by the next paragraph id and retains every paragraph", async () => {
@@ -291,6 +375,58 @@ describe("Tencent Meeting connector", () => {
       .rejects.toMatchObject({ code: "TENCENT_INVALID_RESPONSE" });
   });
 
+  test("decodes official nested error_info codes into confirmed transcript absence", async () => {
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported" }),
+      now: () => 1_700_000_000_000,
+      nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/v1/records") return recordsResponse();
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({
+            error_info: { error_code: 30001, error_message: "private upstream detail" },
+          }),
+        };
+      },
+    });
+    const content = await client.getContent("m-1", {
+      meetingStartTime: 1_700_000_000_000,
+      meetingEndTime: 1_700_086_400_000,
+    });
+    expect(content.capabilities.transcript).toMatchObject({ status: "absent" });
+    expect(content.transcript).toBeNull();
+    expect(JSON.stringify(content)).not.toContain("private upstream detail");
+  });
+
+  test.each(["10009", "50000"])(
+    "nested permission/transient error %s remains a failure",
+    async (apiCode) => {
+      const client = createTencentClient({
+        config: connectorConfig({ transcript: "supported" }),
+        now: () => 1_700_000_000_000,
+        nonce: () => 1,
+        fetchImpl: async (url) => {
+          const parsed = new URL(url);
+          if (parsed.pathname === "/v1/records") return recordsResponse();
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error_info: { error_code: apiCode } }),
+          };
+        },
+      });
+      await expect(
+        client.getContent("m-1", {
+          meetingStartTime: 1_700_000_000_000,
+          meetingEndTime: 1_700_086_400_000,
+        })
+      ).rejects.toMatchObject({ code: "TENCENT_API_FAILURE", apiCode });
+    }
+  );
+
   test("aggregates mixed recording transcript and smart minutes without losing provenance", async () => {
     const base = 1_700_000_000_000;
     const files = [
@@ -303,7 +439,7 @@ describe("Tencent Meeting connector", () => {
         const parsed = new URL(url);
         if (parsed.pathname === "/v1/records") return recordsResponse(files);
         if (parsed.pathname === "/v1/records/transcripts/details") {
-          if (parsed.searchParams.get("record_file_id") === "rf-2") return { ok: false, status: 500, json: async () => ({ error_code: 30001 }) };
+          if (parsed.searchParams.get("record_file_id") === "rf-2") return { ok: false, status: 500, json: async () => ({ error_info: { error_code: 30001 } }) };
           return { ok: true, status: 200, json: async () => ({ more: false, minutes: { paragraphs: [validParagraph(0, "rf-1")] } }) };
         }
         if (parsed.pathname.startsWith("/v1/smart/minutes/")) return { ok: true, status: 200, json: async () => parsed.pathname.endsWith("rf-1")

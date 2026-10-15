@@ -194,6 +194,12 @@ export const Meetings = {
     return (await meetingRequest(`/conversations/${encodeURIComponent(id)}`))
       .conversation;
   },
+  async conversations() {
+    const history = await meetingRequest("/conversations");
+    if (!Array.isArray(history.conversations))
+      throw new Error("会议服务返回了无效的会话列表。");
+    return history.conversations;
+  },
   async answers(id) {
     const history = await meetingRequest(
       `/conversations/${encodeURIComponent(id)}/answers`

@@ -39,6 +39,8 @@ function fakePrisma({ meetingRows, sourceRows, chunkRows } = {}) {
       },
       findUnique: async ({ where }) =>
         conversations.find((row) => row.id === where.id) || null,
+      findMany: async ({ where = {} }) =>
+        conversations.filter((row) => row.createdBy === where.createdBy),
     },
     meeting_answers: {
       create: async ({ data }) => {
@@ -54,6 +56,7 @@ function fakePrisma({ meetingRows, sourceRows, chunkRows } = {}) {
     $transaction: async (callback) => callback(fake),
     _conversations: conversations,
     _answers: answers,
+    _meetings: meetings,
     _sources: sources,
     _chunks: chunks,
   };
@@ -62,6 +65,8 @@ function fakePrisma({ meetingRows, sourceRows, chunkRows } = {}) {
 
 const availableMeeting = (id = 1) => ({
   id,
+  title: "Quarterly Planning",
+  startTime: new Date("2026-05-18T09:30:00Z"),
   generation: 1,
   retrievalStatus: "AVAILABLE",
   reviewStatus: "DRAFT",
@@ -87,6 +92,8 @@ const citation = (evidenceId, quote = "The project starts in May.") => ({
   evidenceId,
   quote,
   meetingId: 1,
+  meetingName: "Quarterly Planning",
+  meetingStartTime: "2026-05-18T09:30:00.000Z",
   sourceId: 1,
   sourceType: "SUPPLEMENT_TEXT",
   name: "notes.txt",
@@ -138,6 +145,22 @@ function setup(overrides = {}) {
 }
 
 describe("fixed-scope meeting QA and history", () => {
+  test("lists only the current owner's recent fixed-scope conversations", async () => {
+    const prisma = fakePrisma({ meetingRows: [availableMeeting()] });
+    const { service: qa } = setup({ prisma });
+    await qa.createConversation({ meetingIds: [1], workspaceIds: [] }, 8);
+    prisma._conversations.push({
+      id: 2,
+      createdBy: 9,
+      createdAt: new Date(),
+      meetingIds: "[99]",
+      workspaceIds: "[]",
+    });
+    const list = await qa.listConversations(8);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: 1, meetingIds: [1], workspaceIds: [] });
+    expect(JSON.stringify(list)).not.toContain("99");
+  });
   test("marks saved Workspace citations stale when their current document revision changes", async () => {
     let currentDocument = {
       workspaceId: 2,
@@ -248,6 +271,10 @@ describe("fixed-scope meeting QA and history", () => {
     expect(history.answers[0].citations[0].quote).toBe(
       "The project starts in May."
     );
+    expect(history.answers[0].citations[0]).toMatchObject({
+      meetingName: "Quarterly Planning",
+      meetingStartTime: "2026-05-18T09:30:00.000Z",
+    });
     expect(history.answers[0].clarification).toBe("Warehouse B");
     expect(history.answers[0].stale).toBe(true);
     expect(history.conversation.scopeState.available).toBe(true);
@@ -434,7 +461,7 @@ describe("fixed-scope meeting QA and history", () => {
     });
   });
 
-  test("preserves citation snapshots when a meeting becomes unavailable", async () => {
+  test("preserves citation snapshots after the meeting is soft-deleted", async () => {
     const prisma = fakePrisma({
       meetingRows: [availableMeeting()],
       sourceRows: [activeSource()],
@@ -450,18 +477,19 @@ describe("fixed-scope meeting QA and history", () => {
       { question: "When?", clarification: "Warehouse B" },
       9
     );
-    prisma.meetings.findMany = async () => [
-      { ...availableMeeting(), retrievalStatus: "WAITING_CONTENT" },
-    ];
+    prisma._meetings[0].deletedAt = new Date("2026-10-14T00:00:00Z");
+    prisma._meetings[0].retrievalStatus = "DELETED";
     const history = await service.history(conversation.id, 9);
     expect(history.answers[0].citations[0].quote).toBe(
       "The project starts in May."
     );
+    expect(history.answers[0].citations[0]).toMatchObject({
+      meetingName: "Quarterly Planning",
+      meetingStartTime: "2026-05-18T09:30:00.000Z",
+    });
     expect(history.answers[0].stale).toBe(false);
     expect(history.conversation.scopeState.available).toBe(false);
-    expect(history.conversation.scopeState.blockedReason).toContain(
-      "WAITING_CONTENT"
-    );
+    expect(history.conversation.scopeState.blockedReason).toContain("DELETED");
     await expect(
       service.ask(
         conversation.id,

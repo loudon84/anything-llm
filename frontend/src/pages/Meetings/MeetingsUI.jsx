@@ -109,7 +109,35 @@ export function CoverageBadge({ coverage }) {
   const incomplete = entries.some(
     ([, item]) =>
       (typeof item === "object" ? item?.status : item) !== "supported"
-  );
+  ) ||
+    value.transcript?.selection?.mode === "selected" ||
+    value.attachments?.excluded?.length > 0;
+  const scopeLabels = [];
+  if (value.transcript?.selection?.mode === "selected") {
+    const { from, to } = value.transcript.selection;
+    scopeLabels.push(`转写所选时段 ${from}–${to} 毫秒`);
+  } else if (value.transcript?.selection?.mode === "full") {
+    scopeLabels.push("完整转写");
+  }
+  if (value.summary?.coverage === "whole_meeting")
+    scopeLabels.push(
+      value.summary.included
+        ? "摘要覆盖整场会议"
+        : "整场摘要未包含"
+    );
+  if (value.attachments) {
+    const selectedNames = (value.attachments.selected || [])
+      .map((item) => item.name)
+      .filter(Boolean);
+    const excludedNames = (value.attachments.excluded || [])
+      .map((item) => item.name)
+      .filter(Boolean);
+    scopeLabels.push(
+      `腾讯附件已选 ${selectedNames.length}${selectedNames.length ? `（${selectedNames.join("、")}）` : ""}`
+    );
+    if (excludedNames.length)
+      scopeLabels.push(`腾讯附件已排除（${excludedNames.join("、")}）`);
+  }
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {incomplete && <Status value="PARTIAL" />}
@@ -120,6 +148,11 @@ export function CoverageBadge({ coverage }) {
         >
           {labels[key] || key}:{" "}
           {typeof item === "object" ? item?.status || "未知" : String(item)}
+        </span>
+      ))}
+      {scopeLabels.map((label) => (
+        <span key={label} className="rounded bg-theme-bg-primary px-2 py-0.5 text-xs">
+          {label}
         </span>
       ))}
     </span>

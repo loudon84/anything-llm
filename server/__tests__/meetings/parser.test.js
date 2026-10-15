@@ -7,6 +7,7 @@ const {
   createParser,
   isPdfImageOperator,
 } = require("../../modules/meetings/parser");
+const { createJobRunner } = require("../../modules/meetings/jobs");
 
 function zipBuffer(entries) {
   const zip = new AdmZip();
@@ -142,7 +143,7 @@ describe("located meeting source parsing", () => {
       "ppt/presentation.xml":
         '<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/><p:sldId r:id="rId2"/></p:sldIdLst></p:presentation>',
       "ppt/_rels/presentation.xml.rels":
-        '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>',
+        '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/><Relationship Id="rId2" Target="slides/slide2.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>',
       "ppt/slides/slide1.xml":
         '<p:sld xmlns:p="p"><a:t xmlns:a="a">Plan</a:t></p:sld>',
       "ppt/slides/slide2.xml":
@@ -160,6 +161,10 @@ describe("located meeting source parsing", () => {
 
   test("runs configured OCR for embedded slide images while retaining native text", async () => {
     const buffer = zipBuffer({
+      "ppt/presentation.xml":
+        '<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>',
+      "ppt/_rels/presentation.xml.rels":
+        '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>',
       "ppt/slides/slide1.xml":
         '<p:sld xmlns:p="p"><a:t xmlns:a="a">Native heading</a:t><p:pic><p:blipFill><a:blip xmlns:a="a" r:embed="rId1"/></p:blipFill></p:pic></p:sld>',
       "ppt/slides/_rels/slide1.xml.rels":
@@ -189,6 +194,129 @@ describe("located meeting source parsing", () => {
       { text: "Text in screenshot", location: { type: "slide", slide: 1 } },
     ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ["fetch headers", async () => new Promise(() => {})],
+    ["response body", async () => ({ ok: true, json: () => new Promise(() => {}) })],
+  ])("bounds OCR deadline while waiting for %s", async (_phase, fetchImpl) => {
+    const buffer = zipBuffer({
+      "ppt/presentation.xml":
+        '<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>',
+      "ppt/_rels/presentation.xml.rels":
+        '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>',
+      "ppt/slides/slide1.xml":
+        '<p:sld xmlns:p="p"><p:pic><p:blipFill><a:blip xmlns:a="a" r:embed="rIdImage"/></p:blipFill></p:pic></p:sld>',
+      "ppt/slides/_rels/slide1.xml.rels":
+        '<Relationships><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image.png"/></Relationships>',
+      "ppt/media/image.png": "image",
+    });
+    const controllerSignals = [];
+    const parser = createParser({
+      services: { ocr: { url: "http://parser.local/parse", timeoutMs: 10 } },
+      fetchImpl: (url, options) => {
+        controllerSignals.push(options.signal);
+        return fetchImpl();
+      },
+    });
+
+    await expect(parser.parse({ name: "stalled.pptx", buffer })).rejects.toMatchObject({
+      code: "PARSER_TIMEOUT",
+      status: 504,
+    });
+    expect(controllerSignals[0].aborted).toBe(true);
+  });
+
+  test("marks a timed-out OCR job failed and lets the next durable job run", async () => {
+    const jobs = [
+      { id: 1, kind: "OCR", status: "CREATED", attempts: 0, createdAt: new Date(1) },
+      { id: 2, kind: "FOLLOW_UP", status: "CREATED", attempts: 0, createdAt: new Date(2) },
+    ];
+    const matches = (row, where = {}) =>
+      Object.entries(where).every(([key, value]) => {
+        if (value && typeof value === "object" && "in" in value)
+          return value.in.includes(row[key]);
+        if (value && typeof value === "object" && "lte" in value)
+          return row[key] != null && new Date(row[key]) <= value.lte;
+        return row[key] === value;
+      });
+    const prisma = {
+      meeting_jobs: {
+        findMany: async ({ where = {} }) =>
+          jobs.filter((row) => matches(row, where)).sort((a, b) => a.id - b.id),
+        findUnique: async ({ where }) => jobs.find((row) => row.id === where.id),
+        updateMany: async ({ where, data }) => {
+          const selected = jobs.filter((row) => matches(row, where));
+          selected.forEach((row) => Object.assign(row, data));
+          return { count: selected.length };
+        },
+      },
+      $transaction: async (callback) => callback(prisma),
+    };
+    const timedOutPptx = zipBuffer({
+      "ppt/presentation.xml":
+        '<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>',
+      "ppt/_rels/presentation.xml.rels":
+        '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>',
+      "ppt/slides/slide1.xml":
+        '<p:sld xmlns:p="p"><p:pic><p:blipFill><a:blip xmlns:a="a" r:embed="rIdImage"/></p:blipFill></p:pic></p:sld>',
+      "ppt/slides/_rels/slide1.xml.rels":
+        '<Relationships><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image.png"/></Relationships>',
+      "ppt/media/image.png": "image",
+    });
+    const parser = createParser({
+      services: { ocr: { url: "http://parser.local/parse", timeoutMs: 10 } },
+      fetchImpl: async () => ({ ok: true, json: () => new Promise(() => {}) }),
+    });
+    const completed = [];
+    const runner = createJobRunner({
+      prisma,
+      handlers: {
+        OCR: async () => parser.parse({ name: "stalled.pptx", buffer: timedOutPptx }),
+        FOLLOW_UP: async () => completed.push("follow-up"),
+      },
+    });
+
+    await expect(runner.runOnce()).rejects.toMatchObject({ code: "PARSER_TIMEOUT" });
+    expect(jobs[0].status).toBe("FAILED");
+    await expect(runner.runOnce()).resolves.toBe(true);
+    expect(jobs[1].status).toBe("SUCCESS");
+    expect(completed).toEqual(["follow-up"]);
+  });
+
+  test("uses presentation relationship order for native and OCR slide citations", async () => {
+    const buffer = zipBuffer({
+      "ppt/presentation.xml":
+        '<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>',
+      "ppt/_rels/presentation.xml.rels":
+        '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/><Relationship Id="rId2" Target="slides/slide2.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>',
+      "ppt/slides/slide1.xml":
+        '<p:sld xmlns:p="p"><a:t xmlns:a="a">Second displayed slide</a:t></p:sld>',
+      "ppt/slides/slide2.xml":
+        '<p:sld xmlns:p="p"><a:t xmlns:a="a">First displayed slide</a:t><p:pic><p:blipFill><a:blip xmlns:a="a" r:embed="rIdImage"/></p:blipFill></p:pic></p:sld>',
+      "ppt/slides/_rels/slide2.xml.rels":
+        '<Relationships><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>',
+      "ppt/media/image1.png": "fake-png-payload",
+    });
+    const segments = await createParser({
+      services: { ocr: { url: "http://parser.local/parse" } },
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          segments: [{ text: "OCR on first displayed slide", location: { type: "image" } }],
+        }),
+      }),
+    }).parse({ name: "reordered.pptx", buffer });
+
+    expect(
+      Object.fromEntries(
+        segments.map((segment) => [segment.text, segment.location.slide])
+      )
+    ).toEqual({
+      "First displayed slide": 1,
+      "OCR on first displayed slide": 1,
+      "Second displayed slide": 2,
+    });
   });
 
   test("extracts XLSX nonempty cell values and coordinates", async () => {

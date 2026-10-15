@@ -13,6 +13,7 @@ function fakePrisma(seed = {}) {
     meeting_sources: seed.meeting_sources || [],
     meeting_chunks: seed.meeting_chunks || [],
     meeting_jobs: seed.meeting_jobs || [],
+    stageHistory: [],
   };
   let nextJob = 1;
   let nextMeeting = 1;
@@ -41,6 +42,8 @@ function fakePrisma(seed = {}) {
     },
     updateMany: async ({ where, data }) => {
       const rows = state[collection].filter((row) => matches(row, where));
+      if (collection === "meeting_jobs" && data.stage)
+        rows.forEach((row) => state.stageHistory.push([row.id, data.stage]));
       rows.forEach((row) => Object.assign(row, data, { updatedAt: new Date() }));
       return { count: rows.length };
     },
@@ -77,6 +80,40 @@ const importerWith = ({ db = fakePrisma().db, client = {}, sourceService = {}, m
 });
 
 describe("durable Tencent meeting imports", () => {
+  test("persists fetch, parse/OCR, index, and publication stages in order", async () => {
+    const { db, state } = fakePrisma();
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          summary: "A meeting summary.",
+          transcript: null,
+          segments: [],
+          attachments: [],
+          capabilities: { summary: { status: "supported" } },
+        }),
+      },
+      sourceService: {
+        prepareImport: async (_content, { onStage }) => {
+          await onStage("INDEXING");
+          return [{ sourceType: "SUMMARY", name: "summary" }];
+        },
+      },
+    });
+    const job = await importer.queue(
+      1,
+      "m-1",
+      { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" },
+      7
+    );
+
+    await importer.process(job);
+
+    expect(
+      state.stageHistory.filter(([jobId]) => jobId === job.id).map(([, stage]) => stage)
+    ).toEqual(["FETCHING", "PARSING_OCR", "INDEXING", "PUBLISHING", "COMMITTED"]);
+    expect(state.meeting_jobs[0]).toMatchObject({ status: "SUCCESS", stage: "COMMITTED" });
+  });
   test("preserves an offset boundary of zero and rejects ranges over three hours", () => {
     const content = { transcript: "start end", segments: [
       { text: "start", location: { type: "transcript", startMs: 0, endMs: 10 } },
@@ -99,17 +136,213 @@ describe("durable Tencent meeting imports", () => {
     expect(state.meeting_jobs).toHaveLength(1);
   });
 
+  test("worker rejects a full transcript exceeding three hours when offsets are omitted", async () => {
+    const { db, state } = fakePrisma();
+    const prepareImport = jest.fn(async () => [
+      { sourceType: "TRANSCRIPT", name: "transcript" },
+    ]);
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          transcript: "four hour transcript",
+          segments: [
+            {
+              text: "late speech within a four-hour recording",
+              location: {
+                type: "transcript",
+                startMs: 3 * 60 * 60 * 1000,
+                endMs: 4 * 60 * 60 * 1000,
+              },
+            },
+          ],
+          transcriptDurationMs: 4 * 60 * 60 * 1000,
+          attachments: [],
+          capabilities: { transcript: { status: "supported" } },
+        }),
+      },
+      sourceService: { prepareImport },
+    });
+    const job = await importer.queue(1, "m-1", {
+      startTime: "2026-04-01T00:00:00Z",
+      endTime: "2026-04-02T00:00:00Z",
+    }, 7);
+
+    await expect(importer.process(job)).rejects.toMatchObject({
+      code: "TRANSCRIPT_SCOPE_LIMIT",
+    });
+    expect(state.meetings).toHaveLength(0);
+    expect(prepareImport).not.toHaveBeenCalled();
+    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED" });
+  });
+
+  test("allows a selected silent interval within authoritative recording duration", () => {
+    const content = {
+      summary: "Whole-meeting summary",
+      transcript: null,
+      segments: [],
+      transcriptDurationMs: 3 * 60 * 60 * 1000,
+    };
+    expect(
+      clipContent(content, {
+        from: 2 * 60 * 60 * 1000,
+        to: 3 * 60 * 60 * 1000,
+      })
+    ).toMatchObject({ summary: "Whole-meeting summary", segments: [] });
+  });
+
+  test("worker rejects selected transcript bounds beyond the returned transcript", async () => {
+    const { db, state } = fakePrisma();
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          transcript: "one hour transcript",
+          segments: [
+            {
+              text: "one hour transcript",
+              location: { type: "transcript", startMs: 0, endMs: 60 * 60 * 1000 },
+            },
+          ],
+          attachments: [],
+          capabilities: { transcript: { status: "supported" } },
+        }),
+      },
+    });
+    const job = await importer.queue(1, "m-1", {
+      startTime: "2026-04-01T00:00:00Z",
+      endTime: "2026-04-02T00:00:00Z",
+      from: 0,
+      to: 2 * 60 * 60 * 1000,
+    }, 7);
+
+    await expect(importer.process(job)).rejects.toMatchObject({
+      code: "TRANSCRIPT_SCOPE_OUT_OF_RANGE",
+    });
+    expect(state.meetings).toHaveLength(0);
+  });
+
+  test("persists selected coverage and whole-summary scope for citations", async () => {
+    const { db, state } = fakePrisma();
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          summary: "Whole meeting summary",
+          transcript: "Selected transcript",
+          segments: [
+            { text: "Selected transcript", location: { type: "transcript", startMs: 0, endMs: 100 } },
+          ],
+          attachments: [
+            { externalFileId: "file-a", name: "selected.txt", buffer: Buffer.from("a") },
+            { externalFileId: "file-b", name: "excluded.txt", buffer: Buffer.from("b") },
+          ],
+          capabilities: {
+            transcript: { status: "supported" },
+            summary: { status: "supported" },
+            attachments: { status: "supported" },
+          },
+        }),
+      },
+      sourceService: {
+        prepareImport: async () => [{ sourceType: "SUMMARY", name: "summary" }],
+        commitImport: async () => {},
+      },
+    });
+    const job = await importer.queue(1, "m-1", {
+      startTime: "2026-04-01T00:00:00Z",
+      endTime: "2026-04-02T00:00:00Z",
+      from: 0,
+      to: 100,
+      attachmentIds: ["file-a"],
+    }, 7);
+
+    await importer.process(job);
+    const coverage = JSON.parse(state.meetings[0].coverage);
+    expect(coverage).toMatchObject({
+      transcript: { status: "supported", selection: { mode: "selected", from: 0, to: 100 } },
+      summary: { status: "supported", coverage: "whole_meeting" },
+      attachments: {
+        status: "supported",
+        selection: "selected",
+        selected: [{ externalFileId: "file-a", name: "selected.txt" }],
+        excluded: [{ externalFileId: "file-b", name: "excluded.txt" }],
+      },
+    });
+    expect(JSON.stringify(coverage)).not.toContain("downloadUrl");
+  });
+
   test("creates a metadata-only waiting meeting when content is confirmed unavailable", async () => {
     const { db, state } = fakePrisma();
     const importer = importerWith({ db, client: { getContent: async () => ({
       summary: null, transcript: null, segments: [], attachments: [],
-      capabilities: { transcript: { status: "unsupported", reason: "Transcript feature is unavailable for this tenant." } },
+      capabilities: {
+        transcript: { status: "unsupported", reason: "Transcript feature is unavailable for this tenant." },
+        summary: { status: "unsupported" },
+        attachments: { status: "unsupported" },
+      },
     }) } });
     const job = await importer.queue(1, "m-1", { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" }, 7);
     await importer.process(job);
     expect(state.meetings).toHaveLength(1);
     expect(state.meetings[0]).toMatchObject({ externalId: "m-1", retrievalStatus: "WAITING_CONTENT", reviewStatus: "DRAFT" });
     expect(state.meeting_jobs[0]).toMatchObject({ status: "SUCCESS", activeKey: null });
+  });
+
+  test("refuses metadata-only success while any Tencent capability remains unknown", async () => {
+    const { db, state } = fakePrisma();
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          summary: null,
+          transcript: null,
+          segments: [],
+          attachments: [],
+          capabilities: {
+            transcript: { status: "unknown" },
+            summary: { status: "unsupported" },
+            attachments: { status: "absent" },
+          },
+        }),
+      },
+    });
+    const job = await importer.queue(1, "m-1", {
+      startTime: "2026-04-01T00:00:00Z",
+      endTime: "2026-04-02T00:00:00Z",
+    }, 7);
+
+    await expect(importer.process(job)).rejects.toMatchObject({
+      code: "TENCENT_CAPABILITY_UNVERIFIED",
+    });
+    expect(state.meetings).toHaveLength(0);
+    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED" });
+  });
+
+  test("treats missing capability configuration as unknown rather than absence", async () => {
+    const { db, state } = fakePrisma();
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          summary: null,
+          transcript: null,
+          segments: [],
+          attachments: [],
+        }),
+      },
+    });
+    const job = await importer.queue(
+      1,
+      "m-1",
+      { startTime: "2026-04-01T00:00:00Z", endTime: "2026-04-02T00:00:00Z" },
+      7
+    );
+
+    await expect(importer.process(job)).rejects.toMatchObject({
+      code: "TENCENT_CAPABILITY_UNVERIFIED",
+    });
+    expect(state.meetings).toHaveLength(0);
   });
 
   test("propagates configured API failures and releases the failed reservation without creating a meeting", async () => {
@@ -247,7 +480,17 @@ describe("durable imports with SQLite", () => {
     meetingService: createMeetingService({ prisma }),
     clientFactory: () => ({
       listMeetings: async () => ({ items: [officialMeeting], nextCursor: null }),
-      getContent: async () => ({ summary: null, transcript: null, segments: [], attachments: [], capabilities: { transcript: { status: "unsupported" } } }),
+      getContent: async () => ({
+        summary: null,
+        transcript: null,
+        segments: [],
+        attachments: [],
+        capabilities: {
+          transcript: { status: "unsupported" },
+          summary: { status: "unsupported" },
+          attachments: { status: "unsupported" },
+        },
+      }),
       ...overrides.client,
     }),
     sourceService: { prepareImport: async () => [], commitImport: async () => {}, ...overrides.sourceService },

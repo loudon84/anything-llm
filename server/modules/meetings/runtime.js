@@ -45,8 +45,31 @@ function createWorkspaceSearchAdapter({
         502
       );
     }
+    if (
+      !result ||
+      !Array.isArray(result.sources) ||
+      result.success === false ||
+      result.error
+    )
+      throw new MeetingError(
+        "Workspace retrieval failed",
+        "WORKSPACE_RETRIEVAL_FAILED",
+        502
+      );
+    if (result.message && result.message !== false) {
+      const documents = await prisma.workspace_documents.findMany({
+        where: { workspaceId: Number(workspace.id) },
+        select: { docId: true },
+      });
+      if (documents.length)
+        throw new MeetingError(
+          "Workspace retrieval failed",
+          "WORKSPACE_RETRIEVAL_FAILED",
+          502
+        );
+    }
     const evidence = [];
-    for (const projected of result?.sources || []) {
+    for (const projected of result.sources) {
       const metadata = projected?.metadata || projected || {};
       const vectorId = String(metadata.vectorId || metadata.id || "");
       if (!vectorId) continue;
@@ -379,10 +402,7 @@ function createMeetingRuntime({
         });
         if (!meeting)
           throw new MeetingError("Meeting not found", "MEETING_NOT_FOUND", 404);
-        return (await operation(meeting.connectionId)).indexer.reindex(
-          job.meetingId,
-          { job }
-        );
+        return (await operation(meeting.connectionId)).sources.process(job);
       },
     },
   });

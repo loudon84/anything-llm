@@ -281,6 +281,21 @@ describe("authenticated meeting endpoints", () => {
     );
   });
 
+  test("conversation list passes the authenticated owner to the QA service", async () => {
+    const conversations = [{ id: 2, meetingIds: [1], workspaceIds: [] }];
+    const { routes, runtime } = setup({
+      qa: { listConversations: jest.fn(async () => conversations) },
+    });
+    const response = await invoke(
+      routes.find(
+        (item) => item.method === "get" && item.path === "/meetings/conversations"
+      ),
+      { user: { id: 19, role: "default" } }
+    );
+    expect(runtime.qa.listConversations).toHaveBeenCalledWith(19);
+    expect(response.value).toEqual({ conversations });
+  });
+
   test("non-admin config response contains only connection status", async () => {
     const publicConfig = {
       id: 4,

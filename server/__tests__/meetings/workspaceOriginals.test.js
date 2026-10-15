@@ -134,6 +134,7 @@ describe("retained Workspace originals", () => {
       });
     await Promise.all([binding(1, "doc-a"), binding(2, "doc-b")]);
     await binding(1, "doc-a");
+    await Promise.all([binding(1, "same-doc"), binding(1, "same-doc")]);
     await originals.unbind({ referenceId, workspaceId: 1, docId: "doc-a" });
     await binding(1, "doc-a-readded");
     await expect(

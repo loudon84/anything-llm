@@ -152,6 +152,8 @@ describe("located meeting chunk index", () => {
     const meetings = [
       {
         id: 1,
+        title: "Quarterly Planning",
+        startTime: new Date("2026-05-18T09:30:00Z"),
         retrievalStatus: "AVAILABLE",
         deletedAt: null,
         reviewStatus: "DRAFT",
@@ -220,6 +222,8 @@ describe("located meeting chunk index", () => {
     expect(result[0]).toMatchObject({
       id: 100,
       meetingId: 1,
+      meetingName: "Quarterly Planning",
+      meetingStartTime: "2026-05-18T09:30:00.000Z",
       sourceId: 10,
       sourceType: "SUPPLEMENT_TEXT",
       name: "notes",

@@ -150,18 +150,67 @@ function officeParagraphs(buffer) {
 
 function pptxSlides(buffer) {
   const zip = new AdmZip(buffer);
-  const names = zip
-    .getEntries()
-    .map((entry) => entry.entryName)
-    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-    .sort(
-      (a, b) =>
-        Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1])
+  const presentationEntry = zip.getEntry("ppt/presentation.xml");
+  const relationshipEntry = zip.getEntry("ppt/_rels/presentation.xml.rels");
+  if (!presentationEntry || !relationshipEntry)
+    throw new MeetingError(
+      "PPTX presentation order metadata is missing",
+      "SOURCE_PARSE_FAILED"
+    );
+  const relationships = new Map();
+  const relationshipXml = relationshipEntry.getData().toString("utf8");
+  for (const match of relationshipXml.matchAll(
+    /<Relationship\b([^>]*)\/?\s*>/g
+  )) {
+    const attrs = Object.fromEntries(
+      [...match[1].matchAll(/([\w:]+)="([^"]*)"/g)].map((item) => [
+        item[1],
+        decodeXml(item[2]),
+      ])
+    );
+    if (attrs.Id && /\/slide$/.test(attrs.Type || "")) {
+      const target = String(attrs.Target || "").replace(/^\//, "");
+      relationships.set(
+        attrs.Id,
+        target.startsWith("ppt/")
+          ? path.posix.normalize(target)
+          : path.posix.normalize(path.posix.join("ppt", target))
+      );
+    }
+  }
+  const presentationXml = presentationEntry.getData().toString("utf8");
+  const names = [];
+  for (const match of presentationXml.matchAll(
+    /<(?:(?:\w+):)?sldId\b([^>]*)\/?\s*>/g
+  )) {
+    const attrs = Object.fromEntries(
+      [...match[1].matchAll(/([\w:]+)="([^"]*)"/g)].map((item) => [
+        item[1],
+        decodeXml(item[2]),
+      ])
+    );
+    const target = relationships.get(attrs["r:id"]);
+    if (!target || !/^ppt\/slides\/slide\d+\.xml$/.test(target))
+      throw new MeetingError(
+        "PPTX slide order references an unavailable slide",
+        "SOURCE_PARSE_FAILED"
+      );
+    names.push(target);
+  }
+  if (!names.length || new Set(names).size !== names.length)
+    throw new MeetingError(
+      "PPTX slide order metadata is invalid",
+      "SOURCE_PARSE_FAILED"
     );
   const segments = [];
   const images = [];
-  for (const name of names) {
-    const slide = Number(name.match(/slide(\d+)/)[1]);
+  for (const [index, name] of names.entries()) {
+    if (!zip.getEntry(name))
+      throw new MeetingError(
+        "PPTX slide content is missing",
+        "SOURCE_PARSE_FAILED"
+      );
+    const slide = index + 1;
     const xml = zip.readAsText(name);
     const text = xmlText(xml).trim();
     if (text) segments.push({ text, location: { type: "slide", slide } });
@@ -333,55 +382,87 @@ function createParser({ services = {}, fetchImpl = global.fetch } = {}) {
       );
     const form = new FormData();
     form.append("file", new Blob([buffer]), path.basename(name));
+    const timeoutMs = Math.min(
+      300_000,
+      Math.max(1, Number(config.timeoutMs) || 120_000)
+    );
+    const controller = new AbortController();
+    let timeoutId;
+    let timedOut = false;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(
+          new MeetingError(
+            "OCR/document parser request timed out",
+            "PARSER_TIMEOUT",
+            504
+          )
+        );
+      }, timeoutMs);
+      timeoutId.unref?.();
+    });
     let response;
     try {
-      response = await fetchImpl(endpoint, {
-        method: "POST",
-        headers: config.token
-          ? { Authorization: `Bearer ${config.token}` }
-          : {},
-        body: form,
-      });
-    } catch {
+      response = await Promise.race([
+        fetchImpl(endpoint, {
+          method: "POST",
+          headers: config.token
+            ? { Authorization: `Bearer ${config.token}` }
+            : {},
+          body: form,
+          signal: controller.signal,
+        }),
+        timeout,
+      ]);
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (timedOut) throw error;
       throw new MeetingError(
         "OCR/document parser request failed",
         "PARSER_SERVICE_FAILED",
         502
       );
     }
-    if (!response?.ok)
-      throw new MeetingError(
-        `OCR/document parser returned HTTP ${response?.status || "error"}`,
-        "PARSER_SERVICE_FAILED",
-        502
-      );
-    let body;
     try {
-      body = await response.json();
-    } catch {
-      throw new MeetingError(
-        "OCR/document parser returned invalid JSON",
-        "PARSER_RESPONSE_INVALID",
-        502
-      );
+      if (!response?.ok)
+        throw new MeetingError(
+          `OCR/document parser returned HTTP ${response?.status || "error"}`,
+          "PARSER_SERVICE_FAILED",
+          502
+        );
+      let body;
+      try {
+        body = await Promise.race([response.json(), timeout]);
+      } catch (error) {
+        if (timedOut) throw error;
+        throw new MeetingError(
+          "OCR/document parser returned invalid JSON",
+          "PARSER_RESPONSE_INVALID",
+          502
+        );
+      }
+      const segments = validateSegments(body?.segments);
+      if (
+        segments.some(
+          (segment) =>
+            segment.location.type !== expectedType ||
+            (expectedType === "page" &&
+              maxPage != null &&
+              segment.location.page > maxPage)
+        )
+      ) {
+        throw new MeetingError(
+          `OCR/document parser locations must use ${expectedType}`,
+          "PARSER_RESPONSE_INVALID",
+          502
+        );
+      }
+      return segments;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    const segments = validateSegments(body?.segments);
-    if (
-      segments.some(
-        (segment) =>
-          segment.location.type !== expectedType ||
-          (expectedType === "page" &&
-            maxPage != null &&
-            segment.location.page > maxPage)
-      )
-    ) {
-      throw new MeetingError(
-        `OCR/document parser locations must use ${expectedType}`,
-        "PARSER_RESPONSE_INVALID",
-        502
-      );
-    }
-    return segments;
   }
 
   return {

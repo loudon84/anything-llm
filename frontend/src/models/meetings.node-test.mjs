@@ -279,13 +279,30 @@ test("coverage object renders as ordinary React text instead of an invalid objec
     const html = renderToStaticMarkup(
       React.createElement(CoverageBadge, {
         coverage: {
-          transcript: { status: "supported" },
-          attachments: { status: "absent" },
+          transcript: {
+            status: "supported",
+            selection: { mode: "selected", from: 0, to: 3600000 },
+          },
+          summary: {
+            status: "supported",
+            coverage: "whole_meeting",
+            included: true,
+          },
+          attachments: {
+            status: "supported",
+            selected: [{ externalFileId: "a", name: "included.pdf" }],
+            excluded: [{ externalFileId: "b", name: "excluded.pptx" }],
+          },
         },
       })
     );
     assert.match(html, /转写: supported/);
-    assert.match(html, /附件: absent/);
+    assert.match(html, /摘要: supported/);
+    assert.match(html, /附件: supported/);
+    assert.match(html, /included\.pdf/);
+    assert.match(html, /excluded\.pptx/);
+    assert.match(html, /摘要覆盖整场会议/);
+    assert.match(html, /部分导入/);
   } finally {
     await vite.close();
   }
@@ -311,6 +328,8 @@ test("actual meeting citation renders object-shaped coverage with resolved meeti
       location: { paragraph: 2 },
       reviewStatus: "APPROVED",
       coverage: { transcript: { status: "supported" } },
+      meetingName: "项目周会快照",
+      meetingStartTime: "2026-10-14T01:00:00.000Z",
     };
     const html = renderToStaticMarkup(
       React.createElement(
@@ -334,6 +353,15 @@ test("actual meeting citation renders object-shaped coverage with resolved meeti
     assert.match(html, /项目周会/);
     assert.match(html, /转写: supported/);
     assert.match(html, /决定于周五完成/);
+    const historicalHtml = renderToStaticMarkup(
+      React.createElement(
+        StaticRouter,
+        { location: "/meetings/conversations/1" },
+        React.createElement(Citation, { citation, meeting: null, answer: {} })
+      )
+    );
+    assert.match(historicalHtml, /项目周会快照/);
+    assert.match(historicalHtml, /2026/);
   } finally {
     await vite.close();
   }
@@ -367,6 +395,10 @@ test("meeting answer history consumes the API array envelope and rejects malform
       });
 
     assert.deepEqual(await Meetings.answers(4), [answer]);
+    responseBody.conversations = [
+      { id: 4, meetingIds: [1], workspaceIds: [] },
+    ];
+    assert.deepEqual(await Meetings.conversations(), responseBody.conversations);
 
     responseBody = {
       answers: {

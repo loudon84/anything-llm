@@ -1,6 +1,9 @@
 const { MeetingError } = require("./errors");
 
 const PRIVATE_FIELDS = ["secretId", "secretKey", "stsToken", "ocrToken"];
+const OCR_TIMEOUT_DEFAULT_MS = 120_000;
+const OCR_TIMEOUT_MIN_MS = 5_000;
+const OCR_TIMEOUT_MAX_MS = 300_000;
 
 function parseConfig(value) {
   try {
@@ -12,6 +15,26 @@ function parseConfig(value) {
       500
     );
   }
+}
+
+function normalizeCapabilities(value, userId) {
+  const result = {};
+  for (const field of ["transcript", "summary", "attachments"]) {
+    const entry = value?.[field];
+    const status = entry && typeof entry === "object" ? entry.status : entry;
+    if (status === "unsupported") {
+      result[field] = {
+        status,
+        verifiedBy: userId == null ? null : Number(userId),
+        verifiedAt: new Date().toISOString(),
+      };
+    } else {
+      result[field] = {
+        status: status === "supported" ? "supported" : "unknown",
+      };
+    }
+  }
+  return result;
 }
 
 function createMeetingConfig({
@@ -89,7 +112,12 @@ function createMeetingConfig({
         ? { operatorIdType: settings.operatorIdType }
         : {}),
       capabilities: settings.capabilities || {},
-      credentialHints: stored.credentialHints || {},
+      credentialHints: Object.fromEntries(
+        ["secretId", "secretKey", "stsToken"].map((field) => [
+          `${field}Present`,
+          Boolean(stored.credentialHints?.[field]),
+        ])
+      ),
       ...(settings.services
         ? {
             services: {
@@ -99,6 +127,9 @@ function createMeetingConfig({
                     ocr: {
                       url: settings.services.ocr.url,
                       configured: Boolean(settings.services.ocr.url),
+                      timeoutMs:
+                        settings.services.ocr.timeoutMs ||
+                        OCR_TIMEOUT_DEFAULT_MS,
                       tokenPresent: Boolean(
                         credentialsHint(stored, "ocrToken")
                       ),
@@ -162,7 +193,9 @@ function createMeetingConfig({
       "instanceId",
       "capabilities",
     ]) {
-      if (input[field] != null) settings[field] = input[field];
+      if (field === "capabilities" && input[field] != null)
+        settings[field] = normalizeCapabilities(input[field], userId);
+      else if (input[field] != null) settings[field] = input[field];
       else if (old.settings?.[field] != null)
         settings[field] = old.settings[field];
     }
@@ -170,6 +203,18 @@ function createMeetingConfig({
     const priorOcr = old.settings?.services?.ocr || {};
     if (ocrInput || priorOcr.url) {
       const url = ocrInput?.url ?? priorOcr.url ?? "";
+      const timeoutMs = Number(
+        ocrInput?.timeoutMs ?? priorOcr.timeoutMs ?? OCR_TIMEOUT_DEFAULT_MS
+      );
+      if (
+        !Number.isInteger(timeoutMs) ||
+        timeoutMs < OCR_TIMEOUT_MIN_MS ||
+        timeoutMs > OCR_TIMEOUT_MAX_MS
+      )
+        throw new MeetingError(
+          `OCR timeout must be between ${OCR_TIMEOUT_MIN_MS} and ${OCR_TIMEOUT_MAX_MS} milliseconds`,
+          "INVALID_MEETING_CONFIG"
+        );
       if (url) {
         let parsed;
         try {
@@ -193,7 +238,7 @@ function createMeetingConfig({
       }
       settings.services = {
         ...(old.settings?.services || {}),
-        ocr: { url, configured: Boolean(url) },
+        ocr: { url, configured: Boolean(url), timeoutMs },
       };
     } else if (old.settings?.services)
       settings.services = old.settings.services;
@@ -244,4 +289,4 @@ function credentialsHint(stored, field) {
   return stored.credentialHints?.[field] || null;
 }
 
-module.exports = { createMeetingConfig };
+module.exports = { createMeetingConfig, normalizeCapabilities };

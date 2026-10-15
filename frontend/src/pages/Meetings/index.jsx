@@ -49,12 +49,22 @@ function shanghaiDate(offsetDays = 0) {
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
+const stageLabels = {
+  FETCHING: "正在获取会议内容和附件",
+  PARSING_OCR: "正在解析附件或执行 OCR",
+  INDEXING: "正在生成检索索引",
+  PUBLISHING: "正在发布会议记录",
+  METADATA_ONLY: "已保存元数据草稿",
+  COMMITTED: "会议记录已发布",
+};
+
 export default function MeetingsCenter() {
   const navigate = useNavigate();
   const [quarter, setQuarter] = useState(currentQuarter());
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [meetings, setMeetings] = useState([]);
+  const [conversationHistory, setConversationHistory] = useState([]);
   const activeListQuery = useRef({ quarter });
   const [selected, setSelected] = useState(new Set());
   const [jobs, setJobs] = useState([]);
@@ -116,6 +126,9 @@ export default function MeetingsCenter() {
     activeListQuery.current = query;
     refreshMeetings(query);
     refreshJobs();
+    Meetings.conversations()
+      .then(setConversationHistory)
+      .catch((e) => setError(e.message));
     Meetings.config()
       .then((config) => setConnectionId(config?.id || null))
       .catch((e) => setError(e.message));
@@ -299,6 +312,28 @@ export default function MeetingsCenter() {
       }
     >
       {error && <Notice tone="error">{error}</Notice>}
+      <Panel title="最近的问答会话">
+        {conversationHistory.length ? (
+          <ul className="space-y-2">
+            {conversationHistory.map((conversation) => (
+              <li key={conversation.id}>
+                <Link
+                  className="block rounded-lg bg-theme-bg-primary p-3 text-sm underline"
+                  to={paths.meetings.conversation(conversation.id)}
+                >
+                  会话 #{conversation.id} · {conversation.meetingIds.length}{" "}
+                  场会议 · {conversation.workspaceIds.length} 个工作区 ·{" "}
+                  {formatDate(conversation.createdAt)}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-theme-text-secondary">
+            暂无可访问的历史会话。
+          </p>
+        )}
+      </Panel>
       <Panel
         title="会议范围"
         actions={
@@ -444,9 +479,17 @@ export default function MeetingsCenter() {
                 key={job.id}
                 className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-theme-bg-primary p-3 text-sm"
               >
-                <span>
-                  {job.kind} · {job.stage || job.error || "处理中"}
-                </span>
+                <div className="min-w-0">
+                  <div>
+                    {job.kind} ·{" "}
+                    {stageLabels[job.stage] || job.stage || "处理中"}
+                  </div>
+                  {job.error && (
+                    <div className="mt-1 break-words text-xs text-red-300">
+                      错误：{job.error}
+                    </div>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   <Status value={job.status} />
                   {job.status === "FAILED" && (
@@ -555,6 +598,24 @@ export default function MeetingsCenter() {
             ) : (
               <div className="mt-4 space-y-4">
                 {error && <Notice tone="error">{error}</Notice>}
+                {manifest && (
+                  <Notice>
+                    摘要：如存在则保留整场摘要；转写：
+                    {scopeFrom || scopeTo
+                      ? `所选 ${scopeFrom || 0}–${scopeTo || "未填写"} 毫秒`
+                      : "完整转写"}
+                    ；已选附件：
+                    {(manifest.attachments || [])
+                      .filter((item) => attachmentIds.has(item.externalFileId))
+                      .map((item) => item.name)
+                      .join("、") || "无"}
+                    ；排除附件：
+                    {(manifest.attachments || [])
+                      .filter((item) => !attachmentIds.has(item.externalFileId))
+                      .map((item) => item.name)
+                      .join("、") || "无"}
+                  </Notice>
+                )}
                 <fieldset>
                   <legend className="mb-2 text-sm font-medium">
                     附件（可多选）

@@ -954,10 +954,11 @@ function createSourceService({
     }
   }
 
-  async function prepareImport(content) {
+  async function prepareImport(content, { onStage } = {}) {
     const prepared = [];
     const add = async (sourceType, name, segments, metadata = {}) => {
       const located = validateSegments(segments);
+      await onStage?.("INDEXING");
       const chunks = await indexer.prepare(located);
       if (!chunks.length)
         throw new MeetingError(
@@ -1030,6 +1031,7 @@ function createSourceService({
           "IMPORT_ATTACHMENT_INVALID",
           422
         );
+      await onStage?.("PARSING_OCR");
       const segments = await parser.parse({
         name: attachment.name,
         buffer: attachment.buffer,
@@ -1122,10 +1124,11 @@ function createSourceService({
             name: String(item.name).slice(0, 255),
             contentHash:
               item.contentHash || hash(Buffer.from(item.contentText || "")),
-            activeHash:
-              item.sourceType === "TENCENT_ORIGINAL" && item.externalFileId
-                ? `tencent:${item.externalFileId}`
-                : `${item.sourceType}:${item.contentHash || hash(Buffer.from(item.contentText || ""))}`,
+            activeHash: ["TENCENT_ORIGINAL", "SUPPLEMENT_FILE"].includes(
+              item.sourceType
+            )
+              ? item.contentHash || hash(Buffer.from(item.contentText || ""))
+              : `${item.sourceType}:${item.contentHash || hash(Buffer.from(item.contentText || ""))}`,
             bytes: Number(item.bytes || item.buffer?.byteLength || 0),
             filePath,
             contentText: item.contentText || null,

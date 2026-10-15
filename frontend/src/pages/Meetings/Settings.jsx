@@ -14,10 +14,11 @@ export default function MeetingSettings() {
     secretId: "",
     secretKey: "",
     ocrUrl: "",
+    ocrTimeoutMs: "120000",
     ocrToken: "",
-    transcript: "",
-    summary: "",
-    attachments: "",
+    transcript: "unknown",
+    summary: "unknown",
+    attachments: "unknown",
   });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -40,18 +41,19 @@ export default function MeetingSettings() {
             operatorId: value.operatorId || "",
             operatorIdType: String(value.operatorIdType ?? 1),
             ocrUrl: value.services?.ocr?.url || "",
+            ocrTimeoutMs: String(value.services?.ocr?.timeoutMs || 120000),
             transcript:
               value.capabilities?.transcript?.status ||
               value.capabilities?.transcript ||
-              "",
+              "unknown",
             summary:
               value.capabilities?.summary?.status ||
               value.capabilities?.summary ||
-              "",
+              "unknown",
             attachments:
               value.capabilities?.attachments?.status ||
               value.capabilities?.attachments ||
-              "",
+              "unknown",
           }));
       })
       .catch((e) => {
@@ -89,7 +91,13 @@ export default function MeetingSettings() {
           summary: form.summary,
           attachments: form.attachments,
         },
-        services: { ocr: { url: form.ocrUrl, token: form.ocrToken } },
+        services: {
+          ocr: {
+            url: form.ocrUrl,
+            timeoutMs: Number(form.ocrTimeoutMs),
+            token: form.ocrToken,
+          },
+        },
       });
       setConfig(saved);
       setForm((current) => ({
@@ -206,6 +214,20 @@ export default function MeetingSettings() {
                 />
               </Field>
               <Field
+                label="OCR 超时（毫秒）"
+                hint="默认 120000 毫秒；有效范围 5000–300000 毫秒。超时会将当前文件记录为失败并继续后续任务。"
+              >
+                <input
+                  type="number"
+                  min="5000"
+                  max="300000"
+                  step="1000"
+                  className={inputClass}
+                  value={form.ocrTimeoutMs}
+                  onChange={(e) => change("ocrTimeoutMs", e.target.value)}
+                />
+              </Field>
+              <Field
                 label="OCR 令牌"
                 hint={`存储状态：${config?.services?.ocr?.tokenPresent ? "已配置" : "未配置"}。留空会保留原令牌。`}
               >
@@ -224,9 +246,7 @@ export default function MeetingSettings() {
               </Field>
             </div>
             <fieldset className="grid gap-3 md:grid-cols-3">
-              <legend className="mb-2 font-medium">
-                租户内容能力（supported / unsupported / unknown）
-              </legend>
+              <legend className="mb-2 font-medium">腾讯内容能力状态</legend>
               {[
                 ["transcript", "转写"],
                 ["summary", "摘要"],
@@ -238,13 +258,18 @@ export default function MeetingSettings() {
                     value={form[key]}
                     onChange={(e) => change(key, e.target.value)}
                   >
-                    <option value="">未知（运行时探测）</option>
+                    <option value="unknown">未知（须先验证或配置）</option>
                     <option value="supported">支持</option>
-                    <option value="unsupported">不支持</option>
+                    <option value="unsupported">
+                      已验证不支持（管理员确认）
+                    </option>
                   </select>
                 </Field>
               ))}
             </fieldset>
+            <Notice tone="warning">
+              当前不会自动探测未验证的内容接口。未知能力会阻止仅元数据导入；只有管理员保存“已验证不支持”或接口确认该场会议内容不存在时，系统才会接受仅元数据草稿。
+            </Notice>
             <div className="flex items-center gap-3">
               <Button variant="primary" type="submit" disabled={saving}>
                 {saving ? "正在保存…" : "保存设置"}

@@ -1083,6 +1083,43 @@ describe("meeting source identity and lifecycle", () => {
     ).rejects.toMatchObject({ code: "IMPORT_CONTENT_UNUSABLE" });
   });
 
+  test("deduplicates imported Tencent file bytes against renamed supplements", async () => {
+    const sources = service();
+    const prepared = await sources.prepareImport({
+      attachments: [
+        {
+          name: "original.txt",
+          externalFileId: "tencent-file-1",
+          artifactType: "recording",
+          bytes: 4,
+          buffer: Buffer.from("same"),
+        },
+      ],
+    });
+    await prisma.$transaction(async (tx) => {
+      const meeting = await tx.meetings.update({
+        where: { id: meetingId },
+        data: { retrievalStatus: "INDEXING", generation: 1 },
+      });
+      await sources.commitImport(tx, meeting, prepared);
+    });
+
+    await expect(
+      sources.upload(
+        meetingId,
+        { name: "renamed.txt", buffer: Buffer.from("same") },
+        7
+      )
+    ).rejects.toMatchObject({ code: "SOURCE_DUPLICATE" });
+    const original = await prisma.meeting_sources.findFirst({
+      where: { meetingId, sourceType: "TENCENT_ORIGINAL" },
+    });
+    expect(JSON.parse(original.segments).provenance).toMatchObject({
+      externalFileId: "tencent-file-1",
+      artifactType: "recording",
+    });
+  });
+
   test("rejects mixed dimensions across separately prepared Tencent sources before publishing", async () => {
     let batch = 0;
     const indexer = createIndexer({

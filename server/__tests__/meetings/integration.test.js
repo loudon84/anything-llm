@@ -410,6 +410,7 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       uploadRoot: path.join(temporaryRoot, "runtime-uploads"),
       audit: async () => {},
     });
+
     const ocrRequests = [[], []];
     const servers = [];
     const startOcrService = async (index, responseText) => {
@@ -581,4 +582,84 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       else process.env.EMBEDDING_ENGINE = originalEngine;
     }
   }, 30_000);
+
+  test("runtime reindex failure marks the current meeting INDEX_FAILED", async () => {
+    const { createMeetingRuntime } = require("../../modules/meetings/runtime");
+    const originalEngine = process.env.EMBEDDING_ENGINE;
+    process.env.EMBEDDING_ENGINE = "native";
+    let failEmbedding = false;
+    const runtime = createMeetingRuntime({
+      prisma,
+      encryption: { encrypt: (value) => value, decrypt: (value) => value },
+      getEmbedder: () => ({
+        model: "runtime-reindex-failure",
+        embedChunks: async (texts) => {
+          if (failEmbedding) throw new Error("embedding unavailable");
+          return texts.map(() => [1, 0]);
+        },
+        embedTextInput: async () => [1, 0],
+      }),
+      getVectorDb: () => ({ performSimilaritySearch: async () => ({ sources: [] }) }),
+      resolveConnector: async () => ({ connector: {} }),
+      storageRoot: path.join(temporaryRoot, "runtime-reindex-storage"),
+      uploadRoot: path.join(temporaryRoot, "runtime-reindex-uploads"),
+      audit: async () => {},
+    });
+    try {
+      const meeting = await runtime.meetings.createMetadata(
+        {
+          connectionId,
+          externalId: "runtime-reindex-failure",
+          title: "Runtime reindex failure",
+          startTime: "2026-04-03T02:00:00.000Z",
+        },
+        7
+      );
+      const source = await runtime.upload(
+        meeting.id,
+        { name: "reindex.txt", buffer: Buffer.from("reindex evidence") },
+        7
+      );
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        if (
+          (await prisma.meeting_sources.findUnique({ where: { id: source.id } }))
+            .parseStatus === "SUCCESS"
+        )
+          break;
+        if (!(await runtime.jobs.runOnce())) break;
+      }
+      failEmbedding = true;
+      const reindex = await runtime.requestReindex(meeting.id, 7);
+      await expect(runtime.jobs.runOnce()).rejects.toThrow(
+        "Configured embedding service request failed"
+      );
+      expect(
+        await prisma.meeting_jobs.findUnique({ where: { id: reindex.id } })
+      ).toMatchObject({ status: "FAILED" });
+      expect(
+        await prisma.meetings.findUnique({ where: { id: meeting.id } })
+      ).toMatchObject({ retrievalStatus: "INDEX_FAILED" });
+
+      failEmbedding = false;
+      const superseded = await runtime.requestReindex(meeting.id, 7);
+      await prisma.meetings.update({
+        where: { id: meeting.id },
+        data: {
+          generation: JSON.parse(superseded.payload).generation + 1,
+          retrievalStatus: "AVAILABLE",
+        },
+      });
+      await expect(runtime.jobs.runOnce()).resolves.toBe(true);
+      expect(
+        await prisma.meeting_jobs.findUnique({ where: { id: superseded.id } })
+      ).toMatchObject({ status: "SUCCESS" });
+      expect(
+        await prisma.meetings.findUnique({ where: { id: meeting.id } })
+      ).toMatchObject({ retrievalStatus: "AVAILABLE" });
+    } finally {
+      failEmbedding = false;
+      if (originalEngine === undefined) delete process.env.EMBEDDING_ENGINE;
+      else process.env.EMBEDDING_ENGINE = originalEngine;
+    }
+  });
 });

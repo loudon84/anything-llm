@@ -385,7 +385,10 @@ export function Citation({ citation, answer, meeting }) {
           String(item.id) === String(sourceId)
   );
   const meetingTitle = meeting?.title || citation.meetingName || "工作区来源";
-  const meetingStartTime = meeting?.startTime;
+  const meetingStartTime =
+    meeting?.startTime ||
+    citation.meetingStartTime ||
+    citation.meeting?.startTime;
   return (
     <div className="rounded-lg border border-theme-sidebar-border p-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">

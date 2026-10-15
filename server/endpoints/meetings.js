@@ -320,6 +320,9 @@ function createMeetingsEndpoints(
   route("post", "/conversations", noRole, async (req, _res, user) => ({
     conversation: await runtime.qa.createConversation(reqBody(req), user?.id),
   }));
+  route("get", "/conversations", noRole, async (_req, _res, user) => ({
+    conversations: await runtime.qa.listConversations(user?.id),
+  }));
   route("get", "/conversations/:id", noRole, async (req, _res, user) => ({
     conversation: await runtime.qa.getConversation(
       numericId(req.params.id, "Conversation ID"),

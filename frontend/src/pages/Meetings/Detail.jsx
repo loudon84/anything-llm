@@ -19,6 +19,7 @@ import {
 import paths from "@/utils/paths";
 import {
   Button,
+  CoverageBadge,
   Field,
   inputClass,
   Notice,
@@ -204,12 +205,35 @@ export default function MeetingDetail() {
       title={meeting.title || "未命名会议"}
       description={`${formatDate(meeting.startTime)} · ${meeting.quarter || "未归档季度"}`}
       actions={
-        <Link
-          className="rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm"
-          to={paths.meetings.home()}
-        >
-          返回会议中心，选择范围后问答
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="primary"
+            disabled={!queryReady || busy}
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              try {
+                const conversation = await Meetings.createConversation(
+                  [Number(id)],
+                  []
+                );
+                navigate(paths.meetings.conversation(conversation.id));
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            只用本场会议开始问答
+          </Button>
+          <Link
+            className="rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm"
+            to={paths.meetings.home()}
+          >
+            返回会议中心选择范围
+          </Link>
+        </div>
       }
     >
       {error && <Notice tone="error">{error}</Notice>}
@@ -223,6 +247,12 @@ export default function MeetingDetail() {
           </div>
         }
       >
+        <div className="mb-3">
+          <div className="mb-1 text-xs text-theme-text-secondary">
+            导入覆盖范围
+          </div>
+          <CoverageBadge coverage={meeting.coverage} />
+        </div>
         {meeting.retrievalStatus === "WAITING_CONTENT" && (
           <Notice tone="warning">
             会议只有元数据，尚无可查询内容。请添加补充文件或文本；索引变为

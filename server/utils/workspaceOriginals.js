@@ -327,10 +327,18 @@ function createWorkspaceOriginals({
 
 async function writeJsonExclusive(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(value), {
-    flag: "wx",
-    mode: 0o600,
-  });
+  const temporaryPath = `${filePath}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(value), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    // Publish a complete file atomically without replacing an existing binding.
+    // A concurrent EEXIST reader can then safely inspect the winning record.
+    await fs.link(temporaryPath, filePath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true });
+  }
 }
 
 async function readJson(filePath) {

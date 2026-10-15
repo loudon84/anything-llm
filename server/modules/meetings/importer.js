@@ -15,6 +15,56 @@ function makeActiveKey(connectionId, externalId) {
   return `${Number(connectionId)}:${String(externalId)}`;
 }
 
+function capabilitySnapshot(value) {
+  const status = value && typeof value === "object" ? value.status : value;
+  const reason = value && typeof value === "object" ? value.reason : null;
+  return {
+    status: typeof status === "string" ? status : "unknown",
+    ...(typeof reason === "string" && reason
+      ? { reason: reason.slice(0, 500) }
+      : {}),
+  };
+}
+
+function importCoverage(content = {}, scope = {}) {
+  const capabilities = content.capabilities || {};
+  const hasRange = scope.from != null || scope.to != null;
+  const selectedIds = Array.isArray(scope.attachmentIds)
+    ? new Set(scope.attachmentIds.map(String))
+    : null;
+  const attachments = (content.attachments || []).map((item) => ({
+    externalFileId: String(item.externalFileId || "").slice(0, 255),
+    name: String(item.name || "").slice(0, 255),
+  }));
+  return {
+    transcript: {
+      ...capabilitySnapshot(capabilities.transcript),
+      selection: hasRange
+        ? {
+            mode: "selected",
+            from: Number(scope.from ?? 0),
+            to: Number(scope.to),
+          }
+        : { mode: "full" },
+    },
+    summary: {
+      ...capabilitySnapshot(capabilities.summary),
+      coverage: "whole_meeting",
+      included: Boolean(String(content.summary || "").trim()),
+    },
+    attachments: {
+      ...capabilitySnapshot(capabilities.attachments),
+      selection: selectedIds ? "selected" : "all",
+      selected: selectedIds
+        ? attachments.filter((item) => selectedIds.has(item.externalFileId))
+        : attachments,
+      excluded: selectedIds
+        ? attachments.filter((item) => !selectedIds.has(item.externalFileId))
+        : [],
+    },
+  };
+}
+
 function hasSupportedContent(content = {}) {
   if (
     String(content.summary || "").trim() ||
@@ -32,6 +82,61 @@ function hasSupportedContent(content = {}) {
 
 function clipContent(content = {}, scope = {}) {
   const hasRange = scope.from != null || scope.to != null;
+  const transcriptSegments = (content.segments || []).filter(
+    (segment) => segment.location?.type === "transcript"
+  );
+  const sourceSegments = (content.segments || []).filter(
+    (segment) => segment.location?.type !== "transcript"
+  );
+  if (String(content.transcript || "").trim() && !transcriptSegments.length) {
+    throw new MeetingError(
+      "Tencent transcript has no timestamps; its duration cannot be verified",
+      "TRANSCRIPT_TIMESTAMPS_REQUIRED"
+    );
+  }
+  const bounds = transcriptSegments.map((segment) => ({
+    start: Number(segment.location.startMs),
+    end: Number(segment.location.endMs),
+  }));
+  if (
+    bounds.some(
+      ({ start, end }) =>
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        start < 0 ||
+        end <= start
+    )
+  ) {
+    throw new MeetingError(
+      "Tencent transcript returned invalid time bounds",
+      "TRANSCRIPT_TIMESTAMPS_INVALID"
+    );
+  }
+  const segmentEnd = bounds.reduce(
+    (maximum, { end }) => Math.max(maximum, end),
+    0
+  );
+  const reportedDuration =
+    content.transcriptDurationMs == null
+      ? null
+      : Number(content.transcriptDurationMs);
+  if (
+    reportedDuration != null &&
+    (!Number.isFinite(reportedDuration) || reportedDuration < 0)
+  ) {
+    throw new MeetingError(
+      "Tencent returned invalid transcript duration metadata",
+      "TRANSCRIPT_TIMESTAMPS_INVALID"
+    );
+  }
+  const transcriptDuration = reportedDuration ?? segmentEnd;
+  if (String(content.transcript || "").trim() || transcriptSegments.length) {
+    if (!hasRange && transcriptDuration > LIMITS.transcriptDurationMs)
+      throw new MeetingError(
+        "Full transcript exceeds the three-hour import limit; select a shorter interval",
+        "TRANSCRIPT_SCOPE_LIMIT"
+      );
+  }
   if (!hasRange) return content;
   const from = Number(scope.from ?? 0);
   const to = Number(scope.to);
@@ -47,16 +152,16 @@ function clipContent(content = {}, scope = {}) {
       "TRANSCRIPT_SCOPE_LIMIT"
     );
   }
-  const transcriptSegments = (content.segments || []).filter(
-    (segment) => segment.location?.type === "transcript"
-  );
-  const sourceSegments = (content.segments || []).filter(
-    (segment) => segment.location?.type !== "transcript"
-  );
-  if (content.transcript && !transcriptSegments.length) {
+  if (reportedDuration == null && !bounds.length) {
     throw new MeetingError(
-      "Tencent transcript has no timestamps; a time selection cannot be applied",
+      "Tencent did not return transcript duration needed to validate this selection",
       "TRANSCRIPT_TIMESTAMPS_REQUIRED"
+    );
+  }
+  if (to > transcriptDuration || from >= transcriptDuration) {
+    throw new MeetingError(
+      "Transcript selection exceeds the transcript returned by Tencent",
+      "TRANSCRIPT_SCOPE_OUT_OF_RANGE"
     );
   }
   const selected = transcriptSegments.filter((segment) => {
@@ -113,6 +218,23 @@ function createImporter({
         409
       );
     }
+  }
+
+  async function setStage(job, stage) {
+    const updated = await prisma.meeting_jobs.updateMany({
+      where: {
+        id: job.id,
+        status: job.leaseOwner ? "PROCESSING" : "CREATED",
+        leaseOwner: job.leaseOwner ?? null,
+      },
+      data: { stage },
+    });
+    if (updated.count !== 1)
+      throw new MeetingError(
+        "Import lease expired before the job could continue",
+        "IMPORT_LEASE_LOST",
+        409
+      );
   }
 
   async function completeJob(db, job, data) {
@@ -349,6 +471,7 @@ function createImporter({
     const rollbackCleanups = [];
     try {
       await assertCurrentLease(prisma, job);
+      await setStage(job, "FETCHING");
       const connection = await (prisma.meeting_connections.findUnique
         ? prisma.meeting_connections.findUnique({
             where: { id: job.connectionId },
@@ -455,10 +578,30 @@ function createImporter({
           );
       }
       const selectedContent = { ...content, attachments };
+      const coverage = importCoverage(
+        { ...selectedContent, attachments: content.attachments || [] },
+        payload.scope || {}
+      );
       const hasContent = hasSupportedContent(selectedContent);
       const availableCapabilities = Object.values(
         selectedContent.capabilities || {}
       ).some((capability) => capability?.status === "supported");
+      const unknownCapabilities = [
+        "transcript",
+        "summary",
+        "attachments",
+      ].filter(
+        (name) =>
+          capabilitySnapshot(selectedContent.capabilities?.[name]).status ===
+          "unknown"
+      );
+      if (!hasContent && unknownCapabilities.length) {
+        throw new MeetingError(
+          `Tencent capabilities must be verified before metadata-only import: ${unknownCapabilities.join(", ")}`,
+          "TENCENT_CAPABILITY_UNVERIFIED",
+          409
+        );
+      }
       if (!hasContent && availableCapabilities) {
         throw new MeetingError(
           "Tencent reported content capability but returned no usable content",
@@ -467,6 +610,7 @@ function createImporter({
         );
       }
       if (!hasContent) {
+        await setStage(job, "PUBLISHING");
         const transaction = (callback) =>
           prisma.$transaction
             ? prisma.$transaction(callback)
@@ -484,7 +628,7 @@ function createImporter({
               title: metadata.title,
               startTime: metadata.startTime,
               endTime: metadata.endTime,
-              coverage: JSON.stringify(selectedContent.capabilities || {}),
+              coverage: JSON.stringify(coverage),
             },
             payload.userId
           );
@@ -519,7 +663,10 @@ function createImporter({
           500
         );
       }
-      const prepared = await sourceService.prepareImport(selectedContent);
+      await setStage(job, "PARSING_OCR");
+      const prepared = await sourceService.prepareImport(selectedContent, {
+        onStage: (stage) => setStage(job, stage),
+      });
       if (!prepared || (Array.isArray(prepared) && prepared.length === 0)) {
         throw new MeetingError(
           "Tencent content did not produce any located source material",
@@ -529,6 +676,7 @@ function createImporter({
       }
       const transaction = (callback) =>
         prisma.$transaction ? prisma.$transaction(callback) : callback(prisma);
+      await setStage(job, "PUBLISHING");
       const meeting = await transaction(async (tx) => {
         await assertCurrentLease(tx, job);
         const transactionalService = createMeetingService({
@@ -544,7 +692,7 @@ function createImporter({
             endTime: metadata.endTime,
             summary: selectedContent.summary || null,
             transcript: selectedContent.transcript || null,
-            coverage: JSON.stringify(selectedContent.capabilities || {}),
+            coverage: JSON.stringify(coverage),
           },
           payload.userId
         );

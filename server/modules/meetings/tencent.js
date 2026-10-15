@@ -4,6 +4,27 @@ const { MeetingError } = require("./errors");
 const API_ORIGIN = "https://api.meeting.qq.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_FILE_BYTES = 100_000_000;
+
+function capabilityState(capabilities, key) {
+  const value = capabilities?.[key];
+  const status = value && typeof value === "object" ? value.status : value;
+  if (
+    status === "unsupported" &&
+    (value?.verifiedBy == null || !value.verifiedAt)
+  )
+    return "unknown";
+  return ["supported", "unsupported", "absent"].includes(status)
+    ? status
+    : "unknown";
+}
+
+function capabilityReason(status, kind) {
+  if (status === "unsupported")
+    return `An administrator confirmed that Tencent ${kind} is unavailable for this tenant.`;
+  if (status === "unknown")
+    return `Tencent ${kind} capability has not been verified; an administrator must verify it before import.`;
+  return undefined;
+}
 const TRANSCRIPT_PAGE_SIZE = 100;
 
 function invalidResponse() {
@@ -142,7 +163,11 @@ function createTencentClient({
         let apiCode = null;
         try {
           const errorBody = await response.json();
-          apiCode = errorBody.error_code ?? errorBody.code ?? null;
+          apiCode =
+            errorBody.error_info?.error_code ??
+            errorBody.error_code ??
+            errorBody.code ??
+            null;
         } catch {
           /* keep upstream error details private */
         }
@@ -311,44 +336,47 @@ function createTencentClient({
       externalId,
       scope
     );
-    const timelineStart = files.length ? Number(files[0].record_start_time) : 0;
-    const transcriptCapability =
-      capabilities.transcript === "supported" ||
-      capabilities.transcript?.status === "supported";
-    const summaryCapability =
-      capabilities.summary === "supported" ||
-      capabilities.summary?.status === "supported";
-    const attachmentCapability =
-      capabilities.attachments === "supported" ||
-      capabilities.attachments?.status === "supported";
+    const timelineStart = files.length
+      ? Number(files[0].record_start_time || 0)
+      : 0;
+    const transcriptDurationMs = files.reduce((maximum, file) => {
+      const end = Number(file.record_end_time);
+      return Number.isFinite(end)
+        ? Math.max(maximum, end - timelineStart)
+        : maximum;
+    }, 0);
+    const transcriptStatus = capabilityState(capabilities, "transcript");
+    const summaryStatus = capabilityState(capabilities, "summary");
+    const attachmentStatus = capabilityState(capabilities, "attachments");
+    const transcriptCapability = transcriptStatus === "supported";
+    const summaryCapability = summaryStatus === "supported";
+    const attachmentCapability = attachmentStatus === "supported";
     const result = {
       summary: null,
       summarySegments: [],
       transcript: null,
+      transcriptDurationMs,
       segments: [],
       attachments: [],
       capabilities: {
-        transcript: transcriptCapability
-          ? { status: "supported" }
-          : {
-              status: "unsupported",
-              reason:
-                "Structured transcript retrieval is not enabled for this connection; add transcript text manually if needed.",
-            },
-        summary: summaryCapability
-          ? { status: "supported" }
-          : {
-              status: "unsupported",
-              reason:
-                "Summary retrieval is not enabled for this connection. Add minutes manually if needed.",
-            },
-        attachments: attachmentCapability
-          ? { status: "supported" }
-          : {
-              status: "unsupported",
-              reason:
-                "Recording artifact downloads are not enabled for this connection. Add files manually if needed.",
-            },
+        transcript: {
+          status: transcriptStatus,
+          ...(capabilityReason(transcriptStatus, "transcript")
+            ? { reason: capabilityReason(transcriptStatus, "transcript") }
+            : {}),
+        },
+        summary: {
+          status: summaryStatus,
+          ...(capabilityReason(summaryStatus, "summary")
+            ? { reason: capabilityReason(summaryStatus, "summary") }
+            : {}),
+        },
+        attachments: {
+          status: attachmentStatus,
+          ...(capabilityReason(attachmentStatus, "attachments")
+            ? { reason: capabilityReason(attachmentStatus, "attachments") }
+            : {}),
+        },
       },
     };
     if (!files.length) {
@@ -561,15 +589,10 @@ function createTencentClient({
   async function describeMeeting(externalId, range = {}) {
     const { matchingRecords, files, operatorId, operatorIdType } =
       await discoverRecord(externalId, range);
-    const transcriptEnabled =
-      capabilities.transcript === "supported" ||
-      capabilities.transcript?.status === "supported";
-    const summaryEnabled =
-      capabilities.summary === "supported" ||
-      capabilities.summary?.status === "supported";
-    const attachmentEnabled =
-      capabilities.attachments === "supported" ||
-      capabilities.attachments?.status === "supported";
+    const transcriptStatus = capabilityState(capabilities, "transcript");
+    const summaryStatus = capabilityState(capabilities, "summary");
+    const attachmentStatus = capabilityState(capabilities, "attachments");
+    const attachmentEnabled = attachmentStatus === "supported";
     const manifest = {
       attachments: [],
       transcriptDurationMs: files.reduce(
@@ -593,26 +616,30 @@ function createTencentClient({
         ),
       })),
       capabilities: {
-        transcript: transcriptEnabled
-          ? { status: files.length ? "supported" : "absent" }
-          : {
-              status: "unsupported",
-              reason:
-                "Structured transcript retrieval is not enabled for this connection.",
-            },
-        summary: summaryEnabled
-          ? { status: files.length ? "supported" : "absent" }
-          : {
-              status: "unsupported",
-              reason: "Summary retrieval is not enabled for this connection.",
-            },
-        attachments: attachmentEnabled
-          ? { status: files.length ? "supported" : "absent" }
-          : {
-              status: "unsupported",
-              reason:
-                "Recording artifact downloads are not enabled for this connection.",
-            },
+        transcript: files.length
+          ? {
+              status: transcriptStatus,
+              ...(capabilityReason(transcriptStatus, "transcript")
+                ? { reason: capabilityReason(transcriptStatus, "transcript") }
+                : {}),
+            }
+          : { status: "absent" },
+        summary: files.length
+          ? {
+              status: summaryStatus,
+              ...(capabilityReason(summaryStatus, "summary")
+                ? { reason: capabilityReason(summaryStatus, "summary") }
+                : {}),
+            }
+          : { status: "absent" },
+        attachments: files.length
+          ? {
+              status: attachmentStatus,
+              ...(capabilityReason(attachmentStatus, "attachments")
+                ? { reason: capabilityReason(attachmentStatus, "attachments") }
+                : {}),
+            }
+          : { status: "absent" },
       },
     };
     if (!matchingRecords.length) return manifest;

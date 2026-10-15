@@ -404,6 +404,20 @@ function createQAService({
     return { ...row, meetingIds, workspaceIds };
   }
 
+  async function listConversations(userId) {
+    const rows = await prisma.meeting_conversations.findMany({
+      where: { createdBy: userId ?? null },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      createdAt: row.createdAt,
+      meetingIds: parse(row.meetingIds, []),
+      workspaceIds: parse(row.workspaceIds, []),
+    }));
+  }
+
   async function getConversation(id, userId) {
     const row = await assertOwner(id, userId);
     const meetingIds = parse(row.meetingIds, []);
@@ -766,7 +780,13 @@ function createQAService({
     };
   }
 
-  return { createConversation, getConversation, ask, history };
+  return {
+    createConversation,
+    listConversations,
+    getConversation,
+    ask,
+    history,
+  };
 }
 
 module.exports = { createQAService };

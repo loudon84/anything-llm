@@ -286,6 +286,10 @@ function createIndexer({
           {
             id: chunk.id,
             meetingId: meeting.id,
+            meetingName: meeting.title || "",
+            meetingStartTime: meeting.startTime
+              ? new Date(meeting.startTime).toISOString()
+              : null,
             sourceId: source.id,
             sourceType: source.sourceType,
             name: source.name,

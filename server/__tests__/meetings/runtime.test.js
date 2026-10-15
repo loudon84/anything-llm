@@ -7,6 +7,57 @@ const { Chroma } = require("../../utils/vectorDbProviders/chroma");
 const { OpenAiLLM } = require("../../utils/AiProviders/openAi");
 
 describe("real Workspace provider projection adapter", () => {
+  test("treats a missing Lance namespace as a retrieval failure when the Workspace has documents", async () => {
+    const search = createWorkspaceSearchAdapter({
+      prisma: {
+        workspace_documents: {
+          findMany: async () => [{ docId: "persisted-document" }],
+        },
+        document_vectors: { findMany: async () => [] },
+      },
+      vectorDb: {
+        performSimilaritySearch: async () => ({
+          contextTexts: [],
+          sources: [],
+          message: "Invalid query - no documents found for workspace!",
+        }),
+      },
+      embedder: { embedTextInput: async () => [1, 0] },
+      lookupDocument: async () => null,
+    });
+    await expect(
+      search({
+        workspace: { id: 3, slug: "missing-index" },
+        userId: 9,
+        question: "question",
+      })
+    ).rejects.toMatchObject({ code: "WORKSPACE_RETRIEVAL_FAILED", status: 502 });
+  });
+
+  test("allows an empty Workspace or a valid search with no matches", async () => {
+    for (const result of [
+      {
+        contextTexts: [],
+        sources: [],
+        message: "Invalid query - no documents found for workspace!",
+      },
+      { contextTexts: [], sources: [], message: false },
+    ]) {
+      const search = createWorkspaceSearchAdapter({
+        prisma: {
+          workspace_documents: { findMany: async () => [] },
+          document_vectors: { findMany: async () => [] },
+        },
+        vectorDb: { performSimilaritySearch: async () => result },
+        embedder: { embedTextInput: async () => [1, 0] },
+        lookupDocument: async () => null,
+      });
+      await expect(
+        search({ workspace: { id: 3, slug: "empty" }, userId: 9, question: "q" })
+      ).resolves.toEqual([]);
+    }
+  });
+
   test("maps provider vector IDs to current document membership and emits distinct chunk evidence IDs", async () => {
     const document = {
       docId: "real-doc-7",
