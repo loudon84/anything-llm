@@ -8,11 +8,7 @@ const MAX_FILE_BYTES = 100_000_000;
 function capabilityState(capabilities, key) {
   const value = capabilities?.[key];
   const status = value && typeof value === "object" ? value.status : value;
-  if (
-    status === "unsupported" &&
-    (value?.verifiedBy == null || !value.verifiedAt)
-  )
-    return "unknown";
+  if (status === "unsupported" && !value?.verifiedAt) return "unknown";
   return ["supported", "unsupported", "absent"].includes(status)
     ? status
     : "unknown";

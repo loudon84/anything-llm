@@ -1031,6 +1031,27 @@ function createSourceService({
           "IMPORT_ATTACHMENT_INVALID",
           422
         );
+      const contentHash = hash(attachment.buffer);
+      const externalArtifact = {
+        externalFileId: attachment.externalFileId ?? null,
+        artifactType: attachment.artifactType ?? null,
+        name: String(attachment.name || "Tencent attachment").slice(0, 255),
+      };
+      const duplicate = prepared.find(
+        (source) =>
+          source.sourceType === "TENCENT_ORIGINAL" &&
+          source.contentHash === contentHash
+      );
+      if (duplicate) {
+        duplicate.provenance = {
+          ...duplicate.provenance,
+          externalArtifacts: [
+            ...(duplicate.provenance?.externalArtifacts || []),
+            externalArtifact,
+          ],
+        };
+        continue;
+      }
       await onStage?.("PARSING_OCR");
       const segments = await parser.parse({
         name: attachment.name,
@@ -1044,6 +1065,7 @@ function createSourceService({
         provenance: {
           externalFileId: attachment.externalFileId ?? null,
           artifactType: attachment.artifactType ?? null,
+          externalArtifacts: [externalArtifact],
         },
       });
     }

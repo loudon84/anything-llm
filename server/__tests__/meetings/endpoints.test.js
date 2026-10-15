@@ -212,6 +212,36 @@ describe("authenticated meeting endpoints", () => {
     });
   });
 
+  test("allows an authenticated single-user config confirmation without a user row", async () => {
+    SystemSettings.isMultiUserMode.mockResolvedValue(false);
+    const input = {
+      name: "Single-user connection",
+      capabilities: { transcript: "unsupported" },
+    };
+    const save = jest.fn(async (value, actorId) => ({
+      id: 1,
+      ...value,
+      actorId: actorId ?? null,
+    }));
+    const { routes } = setup(
+      { config: { getPublic: async () => null, save } },
+      {},
+      {
+        authenticate: validatedRequest,
+        requireAdmin: flexUserRoleValid([ROLES.admin]),
+      }
+    );
+    const route = routes.find(
+      (item) => item.method === "put" && item.path === "/meetings/config"
+    );
+
+    const response = await invokeMiddlewareChain(route, { body: input });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.value.config.actorId).toBeNull();
+    expect(save).toHaveBeenCalledWith(input, undefined);
+  });
+
   test("fixed routes register before numeric meeting routes", () => {
     const { routes } = setup();
     const fixed = routes.findIndex(

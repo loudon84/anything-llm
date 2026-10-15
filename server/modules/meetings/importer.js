@@ -130,6 +130,15 @@ function clipContent(content = {}, scope = {}) {
     );
   }
   const transcriptDuration = reportedDuration ?? segmentEnd;
+  if (
+    reportedDuration != null &&
+    bounds.some(({ end }) => end > reportedDuration)
+  ) {
+    throw new MeetingError(
+      "Tencent transcript segment exceeds the authoritative transcript duration",
+      "TRANSCRIPT_SCOPE_OUT_OF_RANGE"
+    );
+  }
   if (String(content.transcript || "").trim() || transcriptSegments.length) {
     if (!hasRange && transcriptDuration > LIMITS.transcriptDurationMs)
       throw new MeetingError(

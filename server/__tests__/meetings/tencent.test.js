@@ -303,6 +303,65 @@ describe("Tencent Meeting connector", () => {
     sentences: [{ words: [{ text }] }],
   });
 
+  test("single-user admin confirmation stays verified through the Tencent connector with a null actor id", async () => {
+    const rows = [];
+    const service = createMeetingConfig({
+      prisma: {
+        meeting_connections: {
+          findFirst: async () => rows[0] || null,
+          findUnique: async () => rows[0] || null,
+          create: async ({ data }) => {
+            rows[0] = { id: 1, ...data };
+            return rows[0];
+          },
+          update: async ({ data }) => {
+            rows[0] = { ...rows[0], ...data };
+            return rows[0];
+          },
+        },
+      },
+      encryption: { encrypt: (value) => value, decrypt: (value) => value },
+    });
+    const saved = await service.save(
+      {
+        name: "Single user",
+        secretId: "id",
+        secretKey: "key",
+        appId: "app",
+        userId: "u",
+        operatorId: "u",
+        capabilities: {
+          transcript: "unsupported",
+          summary: "unsupported",
+          attachments: "unsupported",
+        },
+      },
+      undefined
+    );
+    const privateConfig = await service.getPrivate(saved.id);
+    const client = createTencentClient({
+      config: privateConfig,
+      now: () => 1_700_000_000_000,
+      nonce: () => 1,
+      fetchImpl: async () => recordsResponse(),
+    });
+    const content = await client.getContent("m-1", {
+      meetingStartTime: 1_700_000_000_000,
+      meetingEndTime: 1_700_086_400_000,
+    });
+
+    expect(saved.capabilities.transcript).toMatchObject({
+      status: "unsupported",
+      verifiedBy: null,
+    });
+    expect(saved.capabilities.transcript.verifiedAt).toBeTruthy();
+    expect(content.capabilities).toMatchObject({
+      transcript: { status: "unsupported" },
+      summary: { status: "unsupported" },
+      attachments: { status: "unsupported" },
+    });
+  });
+
   test("legacy unsupported capability without admin verification remains unknown", async () => {
     const calls = [];
     const client = createTencentClient({
@@ -399,6 +458,32 @@ describe("Tencent Meeting connector", () => {
     expect(content.capabilities.transcript).toMatchObject({ status: "absent" });
     expect(content.transcript).toBeNull();
     expect(JSON.stringify(content)).not.toContain("private upstream detail");
+  });
+
+  test("keeps the official nested generation-in-progress error as a failure", async () => {
+    const client = createTencentClient({
+      config: connectorConfig({ transcript: "supported" }),
+      now: () => 1_700_000_000_000,
+      nonce: () => 1,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === "/v1/records") return recordsResponse();
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error_info: { error_code: 30003, message: "content generating" },
+          }),
+        };
+      },
+    });
+
+    await expect(
+      client.getContent("m-1", {
+        meetingStartTime: 1_700_000_000_000,
+        meetingEndTime: 1_700_086_400_000,
+      })
+    ).rejects.toMatchObject({ code: "TENCENT_API_FAILURE", apiCode: "30003" });
   });
 
   test.each(["10009", "50000"])(

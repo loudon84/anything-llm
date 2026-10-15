@@ -475,39 +475,18 @@ export default function MeetingsCenter() {
         ) : (
           <ul className="space-y-2">
             {jobs.map((job) => (
-              <li
+              <ImportJobRow
                 key={job.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-theme-bg-primary p-3 text-sm"
-              >
-                <div className="min-w-0">
-                  <div>
-                    {job.kind} ·{" "}
-                    {stageLabels[job.stage] || job.stage || "处理中"}
-                  </div>
-                  {job.error && (
-                    <div className="mt-1 break-words text-xs text-red-300">
-                      错误：{job.error}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Status value={job.status} />
-                  {job.status === "FAILED" && (
-                    <Button
-                      onClick={async () => {
-                        try {
-                          await Meetings.retryJob(job.id);
-                          await refreshJobs();
-                        } catch (e) {
-                          setError(e.message);
-                        }
-                      }}
-                    >
-                      重试
-                    </Button>
-                  )}
-                </div>
-              </li>
+                job={job}
+                onRetry={async () => {
+                  try {
+                    await Meetings.retryJob(job.id);
+                    await refreshJobs();
+                  } catch (e) {
+                    setError(e.message);
+                  }
+                }}
+              />
             ))}
           </ul>
         )}
@@ -769,5 +748,28 @@ export default function MeetingsCenter() {
         </div>
       )}
     </Page>
+  );
+}
+
+export function ImportJobRow({ job, onRetry }) {
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-theme-bg-primary p-3 text-sm">
+      <div className="min-w-0">
+        <div>
+          {job.kind} · {stageLabels[job.stage] || job.stage || "处理中"}
+        </div>
+        {job.error && (
+          <div className="mt-1 break-words text-xs text-red-300">
+            错误：{job.error}
+          </div>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <Status value={job.status} />
+        {job.status === "FAILED" && onRetry && (
+          <Button onClick={onRetry}>重试</Button>
+        )}
+      </div>
+    </li>
   );
 }

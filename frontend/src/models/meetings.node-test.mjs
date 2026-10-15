@@ -1,9 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import { StaticRouter } from "react-router-dom/server.js";
+
+const require = createRequire(
+  new URL("../../../server/package.json", import.meta.url)
+);
+const { JSDOM } = require("jsdom");
 import {
   getMeetingSelectionState,
   getAnswerStatusLabel,
@@ -308,6 +314,177 @@ test("coverage object renders as ordinary React text instead of an invalid objec
   }
 });
 
+test("failed import row renders its actual stage and error together", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { ImportJobRow } = await vite.ssrLoadModule(
+      "/src/pages/Meetings/index.jsx"
+    );
+    const html = renderToStaticMarkup(
+      React.createElement(ImportJobRow, {
+        job: {
+          id: 9,
+          kind: "IMPORT",
+          stage: "PARSING_OCR",
+          status: "FAILED",
+          error: "synthetic OCR deadline exceeded",
+        },
+        onRetry: () => {},
+      })
+    );
+
+    assert.match(html, /正在解析附件或执行 OCR/);
+    assert.match(html, /synthetic OCR deadline exceeded/);
+    assert.match(html, /重试/);
+  } finally {
+    await vite.close();
+  }
+});
+
+test("Detail keeps the meeting fixed and submits only explicitly selected Workspaces", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='root'></div></body></html>",
+    {
+      url: "http://localhost/meetings/23",
+    }
+  );
+  const originals = Object.fromEntries(
+    ["window", "document", "navigator", "IS_REACT_ACT_ENVIRONMENT"].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]
+    )
+  );
+  let root;
+  let meetingsModel;
+  let savedMethods;
+  try {
+    Object.defineProperty(globalThis, "window", {
+      value: dom.window,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, "document", {
+      value: dom.window.document,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      value: dom.window.navigator,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
+      value: true,
+      configurable: true,
+      writable: true,
+    });
+    const { createRoot } = await import("react-dom/client");
+    const { MemoryRouter, Route, Routes } = await import("react-router-dom");
+    meetingsModel = (await vite.ssrLoadModule("/src/models/meetings.js"))
+      .Meetings;
+    savedMethods = {
+      detail: meetingsModel.detail,
+      workspaces: meetingsModel.workspaces,
+      createConversation: meetingsModel.createConversation,
+    };
+    const createConversation = [];
+    meetingsModel.detail = async () => ({
+      meeting: {
+        id: 23,
+        title: "Fixed planning review",
+        startTime: "2026-10-14T01:00:00.000Z",
+        retrievalStatus: "AVAILABLE",
+        reviewStatus: "DRAFT",
+      },
+      sources: [],
+    });
+    meetingsModel.workspaces = async () => [
+      { id: 11, name: "Operations" },
+      { id: 12, name: "Finance" },
+    ];
+    meetingsModel.createConversation = async (meetingIds, workspaceIds) => {
+      createConversation.push({ meetingIds, workspaceIds });
+      return { id: 41 };
+    };
+    const { default: MeetingDetail } = await vite.ssrLoadModule(
+      "/src/pages/Meetings/Detail.jsx"
+    );
+    root = createRoot(document.getElementById("root"));
+    await React.act(async () => {
+      root.render(
+        React.createElement(
+          MemoryRouter,
+          {
+            initialEntries: ["/meetings/23"],
+            future: { v7_startTransition: true, v7_relativeSplatPath: true },
+          },
+          React.createElement(
+            Routes,
+            null,
+            React.createElement(Route, {
+              path: "/meetings/:id",
+              element: React.createElement(MeetingDetail),
+            }),
+            React.createElement(Route, {
+              path: "/meetings/conversations/:id",
+              element: React.createElement("p", null, "Created conversation"),
+            })
+          )
+        )
+      );
+    });
+
+    const workspaceFieldset = document.querySelector(
+      'fieldset[aria-label="选择用于问答的工作区"]'
+    );
+    assert.ok(workspaceFieldset);
+    assert.match(document.body.textContent, /Fixed planning review/);
+    const operations = document.querySelector(
+      'input[aria-label="加入工作区 Operations"]'
+    );
+    const finance = document.querySelector(
+      'input[aria-label="加入工作区 Finance"]'
+    );
+    assert.equal(operations.checked, false);
+    assert.equal(finance.checked, false);
+
+    await React.act(async () => operations.click());
+    const start = [...document.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("使用本场会议和所选工作区开始问答")
+    );
+    assert.ok(start);
+    await React.act(async () => start.click());
+
+    assert.deepEqual(createConversation, [
+      { meetingIds: [23], workspaceIds: [11] },
+    ]);
+  } finally {
+    if (root) {
+      await React.act(async () => root.unmount());
+    }
+    if (meetingsModel && savedMethods) {
+      meetingsModel.detail = savedMethods.detail;
+      meetingsModel.workspaces = savedMethods.workspaces;
+      meetingsModel.createConversation = savedMethods.createConversation;
+    }
+    for (const key of Object.keys(originals)) {
+      if (originals[key])
+        Object.defineProperty(globalThis, key, originals[key]);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+    await vite.close();
+  }
+});
+
 test("actual meeting citation renders object-shaped coverage with resolved meeting provenance", async () => {
   const vite = await createServer({
     configFile: "vite.config.js",
@@ -395,10 +572,11 @@ test("meeting answer history consumes the API array envelope and rejects malform
       });
 
     assert.deepEqual(await Meetings.answers(4), [answer]);
-    responseBody.conversations = [
-      { id: 4, meetingIds: [1], workspaceIds: [] },
-    ];
-    assert.deepEqual(await Meetings.conversations(), responseBody.conversations);
+    responseBody.conversations = [{ id: 4, meetingIds: [1], workspaceIds: [] }];
+    assert.deepEqual(
+      await Meetings.conversations(),
+      responseBody.conversations
+    );
 
     responseBody = {
       answers: {

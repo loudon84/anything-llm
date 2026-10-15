@@ -1,6 +1,8 @@
 const { createImporter, clipContent } = require("../../modules/meetings/importer");
 const { createJobRunner } = require("../../modules/meetings/jobs");
 const { createMeetingService } = require("../../modules/meetings/meetingService");
+const { createMeetingConfig } = require("../../modules/meetings/config");
+const { createTencentClient } = require("../../modules/meetings/tencent");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -174,6 +176,159 @@ describe("durable Tencent meeting imports", () => {
     expect(state.meetings).toHaveLength(0);
     expect(prepareImport).not.toHaveBeenCalled();
     expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED" });
+  });
+
+  test("worker rejects a segment beyond the authoritative duration even when the reported duration is short", async () => {
+    const { db, state } = fakePrisma();
+    const prepareImport = jest.fn(async () => [
+      { sourceType: "TRANSCRIPT", name: "transcript" },
+    ]);
+    const importer = importerWith({
+      db,
+      client: {
+        getContent: async () => ({
+          transcript: "late transcript segment",
+          segments: [
+            {
+              text: "four-hour segment",
+              location: {
+                type: "transcript",
+                startMs: 3 * 60 * 60 * 1000,
+                endMs: 4 * 60 * 60 * 1000,
+              },
+            },
+          ],
+          transcriptDurationMs: 60 * 60 * 1000,
+          attachments: [],
+          capabilities: { transcript: { status: "supported" } },
+        }),
+      },
+      sourceService: { prepareImport },
+    });
+    const job = await importer.queue(1, "m-1", {
+      startTime: "2026-04-01T00:00:00Z",
+      endTime: "2026-04-02T00:00:00Z",
+    }, 7);
+
+    await expect(importer.process(job)).rejects.toMatchObject({
+      code: "TRANSCRIPT_SCOPE_OUT_OF_RANGE",
+    });
+    expect(state.meetings).toHaveLength(0);
+    expect(prepareImport).not.toHaveBeenCalled();
+    expect(state.meeting_jobs[0]).toMatchObject({ status: "FAILED" });
+  });
+
+  test("single-user confirmed unsupported capabilities flow from saved config through Tencent import", async () => {
+    const { db, state } = fakePrisma();
+    const configService = createMeetingConfig({
+      prisma: db,
+      encryption: { encrypt: (value) => value, decrypt: (value) => value },
+    });
+    await configService.save(
+      {
+        id: 1,
+        name: "Single-user Tencent",
+        secretId: "synthetic-id",
+        secretKey: "synthetic-key",
+        appId: "synthetic-app",
+        userId: "synthetic-user",
+        operatorId: "synthetic-user",
+        capabilities: {
+          transcript: "unsupported",
+          summary: "unsupported",
+          attachments: "unsupported",
+        },
+      },
+      null
+    );
+    const calls = [];
+    const importer = createImporter({
+      prisma: db,
+      meetingService: {
+        createMetadata: async (data, userId) =>
+          db.meetings.create({
+            data: {
+              ...data,
+              activeKey: `${data.connectionId}:${data.externalId}`,
+              quarter: "2026-Q2",
+              reviewStatus: "DRAFT",
+              retrievalStatus: "WAITING_CONTENT",
+              generation: 0,
+              deletedAt: null,
+              createdBy: userId ?? null,
+            },
+          }),
+      },
+      configService,
+      clientFactory: ({ config }) =>
+        createTencentClient({
+          config,
+          now: () => 1_700_000_000_000,
+          nonce: () => 1,
+          fetchImpl: async (url) => {
+            const requestPath = new URL(url).pathname;
+            calls.push(requestPath);
+            if (requestPath.startsWith("/v1/history/meetings/"))
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  total_page: 1,
+                  meeting_info_list: [
+                    {
+                      meeting_id: "m-1",
+                      subject: "Review",
+                      start_time: 1_700_000_000,
+                      end_time: 1_700_000_010,
+                    },
+                  ],
+                }),
+              };
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                total_page: 1,
+                record_meetings: [
+                  {
+                    meeting_id: "m-1",
+                    record_start_time: 1_700_000_000_000,
+                    record_end_time: 1_700_000_010_000,
+                    record_files: [
+                      {
+                        record_file_id: "rf-1",
+                        record_start_time: 1_700_000_000_000,
+                        record_end_time: 1_700_000_010_000,
+                      },
+                    ],
+                  },
+                ],
+              }),
+            };
+          },
+        }),
+      sourceService: { prepareImport: async () => [], commitImport: async () => {} },
+    });
+    const job = await importer.queue(
+      1,
+      "m-1",
+      {
+        startTime: "2023-11-14T22:13:20Z",
+        endTime: "2023-11-15T22:13:20Z",
+      },
+      null
+    );
+
+    const meeting = await importer.process(job);
+
+    expect(state.meeting_connections[0].config).toContain('"verifiedBy":null');
+    expect(state.meeting_connections[0].config).toContain('"verifiedAt":');
+    expect(meeting).toMatchObject({ retrievalStatus: "WAITING_CONTENT" });
+    expect(meeting.createdBy).toBeNull();
+    expect(calls).toEqual([
+      "/v1/history/meetings/synthetic-user",
+      "/v1/records",
+    ]);
   });
 
   test("allows a selected silent interval within authoritative recording duration", () => {

@@ -38,6 +38,8 @@ export default function MeetingDetail() {
   const navigate = useNavigate();
   const [meeting, setMeeting] = useState(null);
   const [sources, setSources] = useState([]);
+  const [workspaces, setWorkspaces] = useState([]);
+  const [selectedWorkspaces, setSelectedWorkspaces] = useState(new Set());
   const [summary, setSummary] = useState("");
   const [transcript, setTranscript] = useState("");
   const contentDraft = useRef({ summary: "", transcript: "" });
@@ -82,6 +84,22 @@ export default function MeetingDetail() {
   useEffect(() => {
     refresh(true, { syncContent: true });
   }, [refresh]);
+  useEffect(() => {
+    setSelectedWorkspaces(new Set());
+  }, [id]);
+  useEffect(() => {
+    let active = true;
+    Meetings.workspaces()
+      .then((rows) => {
+        if (active) setWorkspaces(rows);
+      })
+      .catch(() => {
+        if (active) setWorkspaces([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     const active =
       meeting?.retrievalStatus === "INDEXING" ||
@@ -238,6 +256,69 @@ export default function MeetingDetail() {
     >
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice>{notice}</Notice>}
+      <Panel title="本场会议问答范围">
+        <p className="mb-3 text-sm text-theme-text-secondary">
+          本场会议始终包含在范围内。工作区默认不选；你可以明确选择可访问的工作区作为补充来源。
+        </p>
+        <fieldset className="space-y-2" aria-label="选择用于问答的工作区">
+          <legend className="mb-2 font-medium">可选工作区</legend>
+          {workspaces.length ? (
+            workspaces.map((workspace) => (
+              <label
+                key={workspace.id}
+                className="flex items-center gap-2 rounded-lg bg-theme-bg-primary p-2"
+              >
+                <input
+                  type="checkbox"
+                  aria-label={`加入工作区 ${workspace.name || workspace.slug}`}
+                  checked={selectedWorkspaces.has(Number(workspace.id))}
+                  onChange={(event) =>
+                    setSelectedWorkspaces((current) => {
+                      const next = new Set(current);
+                      if (event.target.checked) next.add(Number(workspace.id));
+                      else next.delete(Number(workspace.id));
+                      return next;
+                    })
+                  }
+                />
+                <span>{workspace.name || workspace.slug}</span>
+              </label>
+            ))
+          ) : (
+            <p className="text-sm text-theme-text-secondary">
+              当前没有可访问的工作区；本场会议仍可单独用于问答。
+            </p>
+          )}
+        </fieldset>
+        <Button
+          className="mt-3"
+          variant="primary"
+          disabled={!queryReady || busy}
+          onClick={async () => {
+            setBusy(true);
+            setError("");
+            try {
+              const available = new Set(
+                workspaces.map((workspace) => Number(workspace.id))
+              );
+              const workspaceIds = [...selectedWorkspaces].filter(
+                (workspaceId) => available.has(workspaceId)
+              );
+              const conversation = await Meetings.createConversation(
+                [Number(id)],
+                workspaceIds
+              );
+              navigate(paths.meetings.conversation(conversation.id));
+            } catch (e) {
+              setError(e.message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          使用本场会议和所选工作区开始问答
+        </Button>
+      </Panel>
       <Panel
         title="状态与审核"
         actions={
