@@ -49,6 +49,13 @@ const { memoryEndpoints } = require("./endpoints/memory");
 const { httpLogger } = require("./middleware/httpLogger");
 const app = express();
 const apiRouter = express.Router();
+const meetingGatewayContractConfirmed =
+  /^[a-f0-9]{64}$/i.test(process.env.MEETING_GATEWAY_CONTRACT_SHA256 || "") &&
+  Boolean(process.env.MEETING_GATEWAY_CONTRACT_REVISION);
+app.locals.meetingGateway = Object.freeze({
+  enabled: process.env.MEETING_GATEWAY_ENABLED === "true" && meetingGatewayContractConfirmed,
+  contractConfirmed: meetingGatewayContractConfirmed,
+});
 const FILE_LIMIT = "3GB";
 
 // Only log HTTP requests in development mode and if the ENABLE_HTTP_LOGGER environment variable is set to true
