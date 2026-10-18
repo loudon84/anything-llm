@@ -83,6 +83,8 @@ const Document = {
   addDocuments: async function (workspace, additions = [], userId = null) {
     const VectorDb = getVectorDbClass();
     if (additions.length === 0) return { failed: [], embedded: [] };
+    if (additions.some((location) => typeof location === "string" && location.replace(/\\/g, "/").split("/").includes("meeting-managed")))
+      throw new Error("MGW_MANAGED_DOCUMENT_REQUIRES_ADAPTER");
     const { fileData } = require("../utils/files");
     const { emitProgress } = require("../utils/EmbeddingWorkerManager");
     const embedded = [];
@@ -199,6 +201,58 @@ const Document = {
       userId
     );
     return { failedToEmbed, errors: Array.from(errors), embedded };
+  },
+
+  addManagedDocument: async function ({ workspace, location, docId, document }) {
+    if (!workspace?.id || !location || !docId || document?.id !== docId ||
+        !location.replace(/\\/g, "/").split("/").includes("meeting-managed") ||
+        typeof document.pageContent !== "string" || !document.managedProvenance)
+      throw new Error("MGW_MANAGED_DOCUMENT_INVALID");
+
+    const existing = await prisma.workspace_documents.findFirst({
+      where: { docId },
+    });
+    if (existing && (existing.workspaceId !== workspace.id || existing.docpath !== location))
+      throw new Error("MGW_IMPORT_CONFLICT");
+    if (!existing) {
+      const { pageContent: _pageContent, managedProvenance: _provenance, ...metadata } = document;
+      await prisma.workspace_documents.create({
+        data: {
+          docId,
+          filename: location.split(/[/\\]/).pop(),
+          docpath: location,
+          workspaceId: workspace.id,
+          metadata: JSON.stringify(metadata),
+        },
+      });
+    }
+    return { associated: true, docId };
+  },
+
+  getManagedDocument: async function ({ workspaceId, location, docId }) {
+    const document = await prisma.workspace_documents.findFirst({
+      where: { docId, workspaceId, docpath: location },
+    });
+    if (!document) return null;
+    const vectorCount = await prisma.document_vectors.count({ where: { docId } });
+    return { docId: document.docId, workspaceId: document.workspaceId, docpath: document.docpath, vectorCount };
+  },
+
+  getWorkspace: async function (workspaceId) {
+    const { Workspace } = require("./workspace");
+    return Workspace.get({ id: workspaceId });
+  },
+
+  removeManagedDocument: async function ({ workspace, location, docId }) {
+    const document = await prisma.workspace_documents.findFirst({
+      where: { docId, workspaceId: workspace?.id, docpath: location },
+    });
+    if (!document) return { removed: false };
+    await prisma.$transaction([
+      prisma.document_vectors.deleteMany({ where: { docId } }),
+      prisma.workspace_documents.delete({ where: { id: document.id } }),
+    ]);
+    return { removed: true, docId };
   },
 
   removeDocuments: async function (workspace, removals = [], userId = null) {

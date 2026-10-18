@@ -1,5 +1,6 @@
 const { EmbedChats } = require("../models/embedChats");
 const { EmbedConfig } = require("../models/embedConfig");
+const workspacePolicy = require("../utils/meetingGateway/workspacePolicy").createWorkspacePolicy();
 const { EventLogs } = require("../models/eventLogs");
 const { reqBody, userFromSession } = require("../utils/http");
 const { validEmbedConfigId } = require("../utils/middleware/embedMiddleware");
@@ -38,6 +39,12 @@ function embedManagementEndpoints(app) {
       try {
         const user = await userFromSession(request, response);
         const data = reqBody(request);
+        try {
+          await workspacePolicy.assertMutation({ workspaceId: data.workspace_id, actor: { kind: "API_KEY", userId: user?.id }, action: "embed.create" });
+        } catch (error) {
+          if (error.message?.startsWith("MGW_")) return response.status(403).json({ error: error.message });
+          throw error;
+        }
         const { embed, message: error } = await EmbedConfig.new(data, user?.id);
         await EventLogs.logEvent(
           "embed_created",

@@ -1,6 +1,7 @@
 const { validatedRequest } = require("../utils/middleware/validatedRequest");
 const { meetingBridge, readBridgeCookie } = require("../utils/middleware/meetingBridge");
 const { COOKIE_NAME } = require("../utils/meetingGateway/sessions");
+const workspacePolicy = require("../utils/meetingGateway/workspacePolicy").createWorkspacePolicy();
 
 function setBridgeCookie(response, cookie) {
   const expires = cookie.options.expires.toUTCString();
@@ -44,6 +45,18 @@ function meetingGatewayEndpoints(apiRouter, { sessions = null, enabled = false }
     await sessions.revokeUser(response.locals.user.id);
     clearBridgeCookie(response);
     return response.json({ binding_status: "AUTH_REQUIRED" });
+  });
+  apiRouter.post("/meeting-gateway/workspaces", [validatedRequest, meetingBridge({ sessions, mutation: true })], async (request, response) => {
+    if (!enabled) return response.status(503).json({ error: "MGW_UPSTREAM_CONTRACT_ERROR" });
+    const body = request.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => key !== "name") || typeof body.name !== "string" || !body.name.trim())
+      return response.status(422).json({ error: "MGW_INPUT_INVALID" });
+    try {
+      const workspace = await workspacePolicy.createRestricted({ userId: response.locals.user.id, name: body.name });
+      return response.status(201).json({ workspace: { id: workspace.id, name: workspace.name, slug: workspace.slug } });
+    } catch (error) {
+      return response.status(503).json({ error: error.message?.startsWith("MGW_") ? error.message : "MGW_UPSTREAM_UNAVAILABLE" });
+    }
   });
 }
 module.exports = { meetingGatewayEndpoints };

@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require("uuid");
 const { User } = require("./user");
 const { PromptHistory } = require("./promptHistory");
 const { SystemSettings } = require("./systemSettings");
+const workspacePolicy = require("../utils/meetingGateway/workspacePolicy").createWorkspacePolicy();
 
 function isNullOrNaN(value) {
   if (value === null) return true;
@@ -280,10 +281,14 @@ const Workspace = {
     if (!id) throw new Error("No workspace id provided for update");
 
     try {
-      const workspace = await prisma.workspaces.update({
-        where: { id },
-        data,
-      });
+      const policy = await workspacePolicy.getPolicy(id);
+      if (policy) {
+        const action = data.slug ? "slug" : "settings.update";
+        await workspacePolicy.assertMutation({ workspaceId: id, actor: { kind: "USER", userId: data.actorUserId }, action, expectedEpoch: data.expectedPolicyEpoch });
+        delete data.expectedPolicyEpoch;
+        delete data.actorUserId;
+      }
+      const workspace = await prisma.workspaces.update({ where: { id }, data });
       return { workspace, message: null };
     } catch (error) {
       console.error(error.message);
@@ -292,34 +297,25 @@ const Workspace = {
   },
 
   getWithUser: async function (user = null, clause = {}) {
-    if ([ROLES.admin, ROLES.manager].includes(user.role))
-      return this.get(clause);
-
     try {
+      const candidate = await prisma.workspaces.findFirst({ where: clause, select: { id: true } });
+      if (!candidate) return null;
+      const policy = await workspacePolicy.getPolicy(candidate.id);
+      if (policy) {
+        if (!require("../utils/meetingGateway/workspacePolicy").canReadRestricted(policy, { kind: "USER", userId: user?.id })) return null;
+        return this.get(clause);
+      }
+      if ([ROLES.admin, ROLES.manager].includes(user?.role)) return this.get(clause);
       const workspace = await prisma.workspaces.findFirst({
-        where: {
-          ...clause,
-          workspace_users: {
-            some: {
-              user_id: user?.id,
-            },
-          },
-        },
-        include: {
-          workspace_users: true,
-          documents: true,
-        },
+        where: { ...clause, workspace_users: { some: { user_id: user?.id } } },
+        include: { workspace_users: true, documents: true },
       });
-
       if (!workspace) return null;
-
       return {
         ...workspace,
         documents: await Document.forWorkspace(workspace.id),
         contextWindow: this._getContextWindow(workspace),
-        currentContextTokenCount: await this._getCurrentContextTokenCount(
-          workspace.id
-        ),
+        currentContextTokenCount: await this._getCurrentContextTokenCount(workspace.id),
       };
     } catch (error) {
       console.error(error.message);
@@ -412,29 +408,16 @@ const Workspace = {
     }
   },
 
-  whereWithUser: async function (
-    user,
-    clause = {},
-    limit = null,
-    orderBy = null
-  ) {
-    if ([ROLES.admin, ROLES.manager].includes(user.role))
-      return await this.where(clause, limit, orderBy);
-
+  whereWithUser: async function (user, clause = {}, limit = null, orderBy = null) {
     try {
-      const workspaces = await prisma.workspaces.findMany({
-        where: {
-          ...clause,
-          workspace_users: {
-            some: {
-              user_id: user.id,
-            },
-          },
-        },
-        ...(limit !== null ? { take: limit } : {}),
-        ...(orderBy !== null ? { orderBy } : {}),
-      });
-      return workspaces;
+      const workspaces = [ROLES.admin, ROLES.manager].includes(user?.role)
+        ? await this.where(clause, limit, orderBy)
+        : await prisma.workspaces.findMany({
+            where: { ...clause, workspace_users: { some: { user_id: user?.id } } },
+            ...(limit !== null ? { take: limit } : {}),
+            ...(orderBy !== null ? { orderBy } : {}),
+          });
+      return await workspacePolicy.filterVisible(workspaces, { kind: "USER", userId: user?.id, role: user?.role });
     } catch (error) {
       console.error(error.message);
       return [];
@@ -497,6 +480,7 @@ const Workspace = {
    */
   updateUsers: async function (workspaceId, userIds = []) {
     try {
+      if (await workspacePolicy.getPolicy(workspaceId)) return { success: false, error: "MGW_WORKSPACE_POLICY_DENIED" };
       await WorkspaceUser.delete({ workspace_id: Number(workspaceId) });
       await WorkspaceUser.createManyUsers(userIds, workspaceId);
       return { success: true, error: null };
