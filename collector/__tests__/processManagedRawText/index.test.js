@@ -90,3 +90,19 @@ describe("PLAN-MGW-008 managed raw text", () => {
     expect(retry.documents[0].location).not.toBe(result.documents[0].location);
   });
 });
+  test("A-REV-004-03 COMMITTED operation verification streams the managed document", async () => {
+    const result = await processManagedRawText(input(), { store });
+    const journal = await store.get("operation-a");
+    const documentPath = path.join(root, "documents", journal.location);
+    const read = jest.spyOn(fs, "readFileSync");
+    const stream = jest.spyOn(fs, "createReadStream");
+    try {
+      await expect(store.get("operation-a", journal.payloadHash)).resolves.toMatchObject({ state: "COMMITTED" });
+      expect(read).not.toHaveBeenCalledWith(documentPath, "utf8");
+      expect(stream).toHaveBeenCalledWith(documentPath);
+    } finally {
+      read.mockRestore();
+      stream.mockRestore();
+    }
+    expect(result.success).toBe(true);
+  });

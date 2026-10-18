@@ -55,6 +55,24 @@ function atomicJson(filePath, value) {
   }
 }
 
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.once("error", reject);
+    stream.once("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function fileMatchesSerialized(filePath, serialized) {
+  let stat;
+  try { stat = fs.lstatSync(filePath); } catch { return false; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== Buffer.byteLength(serialized, "utf8"))
+    return false;
+  return (await hashFile(filePath)) === sha256(serialized);
+}
+
 function createManagedStore({
   root = path.resolve(process.env.STORAGE_DIR || path.join(__dirname, "../../server/storage"), "meeting-managed"),
   documentsRoot = null,
@@ -80,10 +98,16 @@ function createManagedStore({
     return JSON.parse(fs.readFileSync(file, "utf8"));
   }
 
-  function verifyCommitted(journal) {
+  async function verifyCommitted(journal) {
     const expectedLocation = `meeting-managed/${journal.documentId}.json`;
     if (journal.location !== expectedLocation ||
-      journal.payloadHash !== sha256(canonicalJson(journal.payload)))
+      journal.payloadHash !== sha256(canonicalJson(journal.payload)) ||
+      journal.operationId !== journal.payload.operation_id ||
+      journal.ownerUserId !== journal.payload.owner_user_id ||
+      journal.importId !== journal.payload.import_id ||
+      journal.generation !== journal.payload.generation ||
+      journal.workspaceId !== journal.payload.workspace_id ||
+      !/^[a-f0-9]{64}$/i.test(journal.container_sha256 || ""))
       throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
 
     const target = path.resolve(resolvedDocumentsRoot, journal.location);
@@ -94,17 +118,9 @@ function createManagedStore({
     try { stat = fs.lstatSync(target); } catch { throw new Error("MGW_IMPORT_RECOVERY_REQUIRED"); }
     if (!stat.isFile() || stat.isSymbolicLink())
       throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
-
-    const bytes = fs.readFileSync(target, "utf8");
-    if (sha256(bytes) !== journal.container_sha256)
-      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
-    let document;
-    try { document = JSON.parse(bytes); } catch { throw new Error("MGW_IMPORT_RECOVERY_REQUIRED"); }
-    const provenance = document?.managedProvenance || {};
-    if (document.id !== journal.documentId || document.pageContent !== journal.payload.textContent ||
-      provenance.operation_id !== journal.operationId || provenance.import_id !== journal.payload.import_id ||
-      provenance.generation !== journal.payload.generation || provenance.owner_user_id !== journal.payload.owner_user_id ||
-      provenance.workspace_id !== journal.payload.workspace_id || provenance.payload_sha256 !== journal.payloadHash)
+    let targetHash;
+    try { targetHash = await hashFile(target); } catch { throw new Error("MGW_IMPORT_RECOVERY_REQUIRED"); }
+    if (targetHash !== journal.container_sha256)
       throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
     return journal;
   }
@@ -165,13 +181,17 @@ function createManagedStore({
     fs.mkdirSync(path.dirname(target), { recursive: true });
     const serialized = `${JSON.stringify(document)}\n`;
 
+    if (document?.id !== journal.documentId || document.pageContent !== journal.payload.textContent ||
+      document?.managedProvenance?.operation_id !== operationId ||
+      document?.managedProvenance?.import_id !== journal.payload.import_id ||
+      document?.managedProvenance?.generation !== journal.payload.generation ||
+      document?.managedProvenance?.owner_user_id !== journal.payload.owner_user_id ||
+      document?.managedProvenance?.workspace_id !== journal.payload.workspace_id ||
+      document?.managedProvenance?.payload_sha256 !== payloadHash)
+      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
+
     if (fs.existsSync(target)) {
-      const existingBytes = fs.readFileSync(target, "utf8");
-      const existing = JSON.parse(existingBytes);
-      if (existing?.managedProvenance?.operation_id !== operationId ||
-        existing?.managedProvenance?.payload_sha256 !== payloadHash ||
-        existing?.managedProvenance?.owner_user_id !== journal.ownerUserId ||
-        existingBytes !== serialized)
+      if (!(await fileMatchesSerialized(target, serialized)))
         throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
     } else {
       const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -179,9 +199,7 @@ function createManagedStore({
       try {
         try { fs.linkSync(temp, target); } catch (error) {
           if (error.code !== "EEXIST") throw error;
-          const existingBytes = fs.readFileSync(target, "utf8");
-          const existing = JSON.parse(existingBytes);
-          if (existing?.managedProvenance?.operation_id !== operationId || existing?.managedProvenance?.payload_sha256 !== payloadHash || existing?.managedProvenance?.owner_user_id !== journal.ownerUserId || existingBytes !== serialized)
+          if (!(await fileMatchesSerialized(target, serialized)))
             throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
         }
       } finally {
