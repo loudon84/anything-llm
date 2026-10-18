@@ -1,5 +1,6 @@
 const net = require("net");
 const { classifyFailure, createGatewayError } = require("./errors");
+const { createSafeGatewayLogger } = require("./redact");
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 30_000;
@@ -13,7 +14,7 @@ function isUnsafeHost(hostname) {
     return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
   }
-  if (ipVersion === 6) return host === "::1" || host === "::" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+  if (ipVersion === 6) return true;
   return false;
 }
 
@@ -28,6 +29,13 @@ function validateOrigin(origin) {
     throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
   }
   return parsed.origin;
+}
+
+function normalizeOriginAllowlist(originAllowlist) {
+  if (!Array.isArray(originAllowlist) || originAllowlist.length === 0) {
+    throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
+  }
+  return new Set(originAllowlist.map(validateOrigin));
 }
 
 function normalizeAllowlist(allowlist) {
@@ -51,15 +59,19 @@ function normalizeAllowlist(allowlist) {
   return normalized;
 }
 
-function createGatewayClient({ origin, allowlist, fetchImpl = global.fetch, clock = () => Date.now(), timeoutMs = DEFAULT_TIMEOUT_MS, enabled = false, contractEvidence, headersForSubject = () => ({}) } = {}) {
+function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = global.fetch, clock = () => Date.now(), timeoutMs = DEFAULT_TIMEOUT_MS, enabled = false, contractEvidence, headersForSubject = () => ({}), logger = console } = {}) {
+  const trustedOrigins = normalizeOriginAllowlist(originAllowlist);
   const configuredOrigin = origin ? validateOrigin(origin) : null;
+  if (!configuredOrigin || !trustedOrigins.has(configuredOrigin)) {
+    throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
+  }
   const allowedPaths = normalizeAllowlist(allowlist || []);
   if (typeof fetchImpl !== "function") throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
   const timeout = Math.min(Math.max(Number(timeoutMs) || DEFAULT_TIMEOUT_MS, 1), MAX_TIMEOUT_MS);
-  const transportAvailable = enabled === true && contractEvidence?.confirmed === true;
+  const safeLogger = createSafeGatewayLogger(logger);
 
   function assertEnabled() {
-    if (!enabled || !configuredOrigin) throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
+    if (!enabled) throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
   }
 
   function assertContract() {
@@ -69,6 +81,10 @@ function createGatewayClient({ origin, allowlist, fetchImpl = global.fetch, cloc
   async function requestForSubject({ bridge, path: requestPath, method = "GET", body, stage } = {}) {
     assertEnabled();
     if (typeof bridge !== "string" || bridge.length === 0 || typeof requestPath !== "string" || !allowedPaths.has(requestPath) || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+      throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
+    }
+    const requestStage = stage || (method === "GET" ? "REQUEST" : undefined);
+    if (method !== "GET" && !["QUERY", "IMPORT"].includes(requestStage)) {
       throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
     }
     assertContract();
@@ -88,19 +104,30 @@ function createGatewayClient({ origin, allowlist, fetchImpl = global.fetch, cloc
         ...(body === undefined ? {} : { body }),
       });
       if (response.status >= 300 && response.status < 400) {
-        throw createGatewayError(classifyFailure({ stage, reason: "REDIRECT_REJECTED", writeOutcome: method === "GET" ? "NONE" : "UNKNOWN" }));
+        throw createGatewayError(classifyFailure({ stage: requestStage, httpStatus: response.status, reason: "REDIRECT_REJECTED", writeOutcome: method === "GET" ? "NONE" : "UNKNOWN", responseReceived: true }));
       }
       if (!response.ok && response.status !== 202) {
-        throw createGatewayError(classifyFailure({ stage, httpStatus: response.status, writeOutcome: method === "GET" ? "NONE" : "UNKNOWN" }));
+        throw createGatewayError(classifyFailure({
+          stage: requestStage,
+          httpStatus: response.status,
+          responseReceived: true,
+          writeOutcome: method === "GET" ? "NONE" : "UNKNOWN",
+        }));
       }
       return { status: response.status, response, elapsedMs: Math.max(0, clock() - startedAt) };
     } catch (error) {
-      if (error.code) throw error;
-      throw createGatewayError(classifyFailure({
-        stage,
+      if (typeof error.code === "string" && error.code.startsWith("MGW_")) {
+        safeLogger.failure({ stage: requestStage, error });
+        throw error;
+      }
+      const classified = createGatewayError(classifyFailure({
+        stage: requestStage,
         reason: error.name === "AbortError" ? "TIMEOUT" : "NETWORK",
         writeOutcome: method === "GET" ? "NONE" : "UNKNOWN",
+        responseReceived: false,
       }), error);
+      safeLogger.failure({ stage: requestStage, error: classified });
+      throw classified;
     } finally {
       clearTimeout(timeoutId);
     }
@@ -118,7 +145,7 @@ function createGatewayClient({ origin, allowlist, fetchImpl = global.fetch, cloc
     throw createGatewayError(classifyFailure({ reason: "CONTRACT_UNAVAILABLE" }));
   }
 
-  return { accountLogin, exchange, requestForSubject, transportAvailable };
+  return { accountLogin, exchange, requestForSubject, transportAvailable: enabled === true && contractEvidence?.confirmed === true };
 }
 
-module.exports = { createGatewayClient, validateOrigin, normalizeAllowlist };
+module.exports = { createGatewayClient, validateOrigin, normalizeAllowlist, normalizeOriginAllowlist };

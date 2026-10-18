@@ -70,17 +70,23 @@ function createGatewayError(decision, cause) {
   return error;
 }
 
-function classifyFailure({ stage, httpStatus, reason, writeOutcome = "NONE" } = {}) {
-  if (writeOutcome === "UNKNOWN") {
-    return stage === "QUERY" ? FAILURE_DECISIONS.QUERY_RECOVERY : FAILURE_DECISIONS.IMPORT_RECOVERY;
-  }
+function classifyFailure({ stage, httpStatus, reason, writeOutcome = "NONE", responseReceived = false } = {}) {
+  // A received, definitive client/auth response describes the failed operation.
+  // It must not be replaced by a generic unknown-write recovery state.
   if (httpStatus === 401) return FAILURE_DECISIONS.AUTH;
   if (httpStatus === 429) return FAILURE_DECISIONS.RATE_LIMITED;
-  if (httpStatus === 403 || httpStatus === 404) return FAILURE_DECISIONS.CONTRACT;
+  if (httpStatus === 403 || httpStatus === 404 || httpStatus === 400) return FAILURE_DECISIONS.CONTRACT;
   if (httpStatus === 409 || httpStatus === 422) return FAILURE_DECISIONS.INPUT;
-  if (httpStatus === 400) return FAILURE_DECISIONS.CONTRACT;
+  if (httpStatus >= 400 && httpStatus < 500) return FAILURE_DECISIONS.CONTRACT;
+
+  // A write with no definitive result, including a transport loss or upstream 5xx,
+  // requires operation-journal recovery and must never be blindly replayed.
+  if (writeOutcome === "UNKNOWN" && (!responseReceived || httpStatus == null || httpStatus >= 300)) {
+    return stage === "QUERY" ? FAILURE_DECISIONS.QUERY_RECOVERY : FAILURE_DECISIONS.IMPORT_RECOVERY;
+  }
   if (reason === "CONFIG_INVALID") return FAILURE_DECISIONS.CONFIG;
   if (reason === "CONTRACT_UNAVAILABLE") return FAILURE_DECISIONS.CONTRACT_UNAVAILABLE;
+  if (responseReceived && httpStatus >= 500) return FAILURE_DECISIONS.UNAVAILABLE;
   return FAILURE_DECISIONS.UNAVAILABLE;
 }
 
