@@ -77,6 +77,7 @@ const meetingGatewayContractConfirmed =
 app.locals.meetingGateway = Object.freeze({
   enabled: process.env.MEETING_GATEWAY_ENABLED === "true" && meetingGatewayContractConfirmed,
   contractConfirmed: meetingGatewayContractConfirmed,
+  oauth: null,
 });
 const FILE_LIMIT = "3GB";
 
@@ -134,7 +135,12 @@ scheduledJobEndpoints(apiRouter);
 outlookAgentEndpoints(apiRouter);
 googleAgentSkillEndpoints(apiRouter);
 memoryEndpoints(apiRouter);
-meetingGatewayEndpoints(apiRouter, { sessions: meetingSessions, enabled: app.locals.meetingGateway.enabled });
+meetingGatewayEndpoints(apiRouter, {
+  sessions: meetingSessions,
+  oauth: app.locals.meetingGateway.oauth,
+  enabled: app.locals.meetingGateway.enabled,
+  contractConfirmed: app.locals.meetingGateway.contractConfirmed,
+});
 // Externally facing embedder endpoints
 embeddedEndpoints(apiRouter);
 

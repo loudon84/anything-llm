@@ -255,6 +255,7 @@ function apiWorkspaceEndpoints(app) {
         }
 
         const workspaceId = Number(workspace.id);
+        await Document.assertNoManagedDocuments({ workspaceId });
         await WorkspaceChats.delete({ workspaceId: workspaceId });
         await DocumentVectors.deleteForWorkspace(workspaceId);
         await Document.delete({ workspaceId: workspaceId });
@@ -518,6 +519,7 @@ function apiWorkspaceEndpoints(app) {
           return;
         }
 
+        Document.assertNoManagedPaths([...deletes, ...adds]);
         await Document.removeDocuments(currWorkspace, deletes);
         await Document.addDocuments(currWorkspace, adds);
         const updatedWorkspace = await Workspace.get({

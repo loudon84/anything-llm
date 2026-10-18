@@ -2,9 +2,14 @@ const mockPrisma = {
   embed_configs: {
     create: jest.fn(),
     update: jest.fn(),
+    findFirst: jest.fn(),
+  },
+  meeting_restricted_workspaces: {
+    findUnique: jest.fn(),
   },
 };
 jest.mock("../../utils/prisma", () => mockPrisma);
+jest.mock("uuid", () => ({ v4: () => "test-uuid" }), { virtual: true });
 
 const { EmbedConfig } = require("../../models/embedConfig");
 
@@ -24,6 +29,12 @@ describe("EmbedConfig", () => {
       id: 1,
       ...data,
     }));
+    mockPrisma.embed_configs.findFirst.mockImplementation(async () => ({ workspace_id: 1 }));
+    mockPrisma.meeting_restricted_workspaces.findUnique.mockImplementation(async ({ where }) =>
+      Number(where.workspace_id) === 2
+        ? { workspace_id: 2, owner_user_id: 1, policy_epoch: 1, state: "ACTIVE" }
+        : null
+    );
   });
 
   afterEach(() => {
@@ -143,6 +154,25 @@ describe("EmbedConfig", () => {
   });
 
   describe("update", () => {
+    it("blocks moving an existing public embed into a restricted workspace", async () => {
+      const result = await EmbedConfig.update(1, { workspace_id: 2 });
+      expect(result).toEqual({ success: false, error: "MGW_RESOURCE_NOT_ACCESSIBLE" });
+      expect(mockPrisma.embed_configs.update).not.toHaveBeenCalled();
+    });
+
+    it("blocks changing a public embed that already points to a restricted workspace", async () => {
+      mockPrisma.embed_configs.findFirst.mockResolvedValueOnce({ workspace_id: 2 });
+      const result = await EmbedConfig.update(1, { enabled: false });
+      expect(result).toEqual({ success: false, error: "MGW_RESOURCE_NOT_ACCESSIBLE" });
+      expect(mockPrisma.embed_configs.update).not.toHaveBeenCalled();
+    });
+
+    it("preserves updates between ordinary workspaces", async () => {
+      const result = await EmbedConfig.update(1, { workspace_id: 3 });
+      expect(result).toEqual({ success: true, error: null });
+      expect(stored(mockPrisma.embed_configs.update)).toEqual({ workspace_id: 3 });
+    });
+
     it("throws when no embed id is given", async () => {
       await expect(EmbedConfig.update(null, { enabled: false })).rejects.toThrow(
         "No embed id provided for update"

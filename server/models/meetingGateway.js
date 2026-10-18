@@ -240,6 +240,64 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
     });
   }
 
+  async function assertManagedDocumentFence(tx, input, allowedStates) {
+    const { generationId, fencingToken, workspaceId, policyEpoch, docId, location, signal } = input;
+    if (signal?.aborted) throw new Error("MGW_FENCED_STORE_OPERATION_ABORTED");
+    if (!Number.isInteger(fencingToken) || !Number.isInteger(workspaceId) || !Number.isInteger(policyEpoch) ||
+        typeof docId !== "string" || !docId || typeof location !== "string" || !location ||
+        typeof input.mutateAssociation !== "function")
+      throw new Error("MGW_FENCED_STORE_OPERATION_INVALID");
+    const generation = await getById(tx, "meeting_import_generations", generationId);
+    if (!generation) throw new Error("MGW_GENERATION_NOT_FOUND");
+    if (generation.fencing_token !== fencingToken ||
+        generation.policy_epoch !== policyEpoch || generation.vector_doc_id !== docId ||
+        generation.document_location !== location || !allowedStates.includes(generation.state))
+      throw new Error("MGW_STALE_FENCE");
+    const imported = await getById(tx, "meeting_imports", generation.import_id);
+    const policies = await tx.$queryRawUnsafe(
+      "SELECT * FROM meeting_restricted_workspaces WHERE workspace_id = ? LIMIT 1",
+      workspaceId
+    );
+    const policy = policies[0];
+    if (!imported || imported.workspace_id !== workspaceId || !policy ||
+        policy.owner_user_id !== imported.anything_user_id || policy.state !== "ACTIVE" ||
+        policy.policy_epoch !== policyEpoch)
+      throw new Error("MGW_WORKSPACE_NOT_PRIVATE");
+    const timestamp = now();
+    const updated = await tx.$executeRawUnsafe(
+      `UPDATE meeting_import_generations SET updated_at = ?
+       WHERE id = ? AND fencing_token = ? AND lease_deadline > ? AND policy_epoch = ?
+         AND vector_doc_id = ? AND document_location = ?
+         AND EXISTS (
+           SELECT 1 FROM meeting_imports i
+           JOIN meeting_restricted_workspaces p ON p.workspace_id = i.workspace_id
+           WHERE i.id = meeting_import_generations.import_id AND i.workspace_id = ?
+             AND p.owner_user_id = i.anything_user_id AND p.state = 'ACTIVE' AND p.policy_epoch = ?
+         )`,
+      timestamp, generationId, fencingToken, timestamp, policyEpoch, docId, location, workspaceId, policyEpoch
+    );
+    if (updated !== 1) throw new Error("MGW_STALE_FENCE");
+    if (signal.aborted) throw new Error("MGW_FENCED_STORE_OPERATION_ABORTED");
+  }
+
+  async function fencedManagedDocumentMutation(input, allowedStates) {
+    if (!input || typeof input.signal?.addEventListener !== "function" || input.signal.aborted)
+      throw new Error("MGW_FENCED_STORE_OPERATION_ABORTED");
+    return prisma.$transaction(async (tx) => {
+      await assertManagedDocumentFence(tx, input, allowedStates)
+      const result = await input.mutateAssociation(tx);
+      await assertManagedDocumentFence(tx, input, allowedStates)
+      return result;
+    });
+  }
+
+  async function addManagedDocumentFenced(input) {
+    return fencedManagedDocumentMutation(input, ["ATTACHING"]);
+  }
+
+  async function removeManagedDocumentFenced(input) {
+    return fencedManagedDocumentMutation(input, ["ATTACHING", "VERIFYING", "VERIFIED", "REVOKING", "PENDING_CLEANUP", "SUPERSEDED"]);
+  }
   async function markAccess(importId, state) {
     if (!ACCESS_STATES.includes(state)) throw new Error("MGW_INVALID_ACCESS_STATE");
     const updated = await prisma.$executeRawUnsafe(
@@ -338,7 +396,94 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
       await tx.$executeRawUnsafe("UPDATE meeting_restricted_workspaces SET state = 'FROZEN', updated_at = ? WHERE owner_user_id = ? AND state = 'ACTIVE'", revokedAt, userId);
     });
   }
-  return { acquireLease, claimGeneration, commitGeneration, createBridgeSession, findBridgeSessionByBinding, getBinding, markAccess, policyByWorkspace, reserveIdentity, revokeBinding, revokeBridgeSession, revokeBridgeSessionsForUser, saveBinding };
+  function oauthTransactionDto(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      transactionId: row.transaction_id,
+      ownerUserId: row.owner_user_id,
+      bridgeSessionId: row.bridge_session_id,
+      expiresAt: row.expires_at,
+      state: row.state,
+    };
+  }
+  async function findPendingOAuthForBridge(bridgeSessionId) {
+    if (typeof bridgeSessionId !== 'string' || !bridgeSessionId) return null;
+    const timestamp = now();
+    await prisma.$executeRawUnsafe(
+      "UPDATE meeting_oauth_transactions SET state = 'EXPIRED' WHERE bridge_session_id = ? AND state = 'PENDING' AND expires_at <= ?",
+      bridgeSessionId, timestamp
+    );
+    const rows = await prisma.$queryRawUnsafe(
+      "SELECT * FROM meeting_oauth_transactions WHERE bridge_session_id = ? AND state = 'PENDING' LIMIT 1",
+      bridgeSessionId
+    );
+    return oauthTransactionDto(rows[0]);
+  }
+  async function createOAuthTransaction(row) {
+    if (!row || typeof row.transactionId !== 'string' || !row.transactionId || !Number.isInteger(row.ownerUserId) ||
+        typeof row.bridgeSessionId !== 'string' || !(row.expiresAt instanceof Date) || row.state !== 'PENDING')
+      throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    const timestamp = now();
+    const id = randomUUID();
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        "UPDATE meeting_oauth_transactions SET state = 'EXPIRED' WHERE bridge_session_id = ? AND state = 'PENDING' AND expires_at <= ?",
+        row.bridgeSessionId, timestamp
+      );
+      const bridges = await tx.$queryRawUnsafe(
+        "SELECT anything_user_id, revoked_at, session_expiry, gateway_expiry FROM meeting_bridge_sessions WHERE id = ? LIMIT 1",
+        row.bridgeSessionId
+      );
+      const bridge = bridges[0];
+      const bridgeExpiry = bridge && (bridge.session_expiry || bridge.gateway_expiry);
+      if (!bridge || bridge.revoked_at || Number(bridge.anything_user_id) !== row.ownerUserId || !bridgeExpiry || new Date(bridgeExpiry) <= timestamp)
+        throw new Error('MGW_BUSINESS_AUTH_REQUIRED');
+      const pending = await tx.$queryRawUnsafe(
+        "SELECT id FROM meeting_oauth_transactions WHERE bridge_session_id = ? AND state = 'PENDING' LIMIT 1",
+        row.bridgeSessionId
+      );
+      if (pending.length) throw new Error('MGW_OAUTH_ALREADY_PENDING');
+      await tx.$executeRawUnsafe(
+        "INSERT INTO meeting_oauth_transactions (id, transaction_id, owner_user_id, bridge_session_id, expires_at, state, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)",
+        id, row.transactionId, row.ownerUserId, row.bridgeSessionId, row.expiresAt, timestamp
+      );
+      const rows = await tx.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
+      return oauthTransactionDto(rows[0]);
+    });
+  }
+  async function completeOAuthTransaction(id, transactionId, expiresAt) {
+    if (typeof id !== 'string' || typeof transactionId !== 'string' || !transactionId || !(expiresAt instanceof Date))
+      throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    try {
+      const updated = await prisma.$executeRawUnsafe(
+        "UPDATE meeting_oauth_transactions SET transaction_id = ?, expires_at = ? WHERE id = ? AND state = 'PENDING'",
+        transactionId, expiresAt, id
+      );
+      if (updated !== 1) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    } catch (_error) {
+      throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    }
+    const rows = await prisma.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
+    return oauthTransactionDto(rows[0]);
+  }  async function getOAuthTransactionForBridge(transactionId, bridgeSessionId, ownerUserId) {
+    const rows = await prisma.$queryRawUnsafe(
+      "SELECT * FROM meeting_oauth_transactions WHERE transaction_id = ? AND bridge_session_id = ? AND owner_user_id = ? LIMIT 1",
+      transactionId, bridgeSessionId, ownerUserId
+    );
+    return oauthTransactionDto(rows[0]);
+  }
+  async function updateOAuthTransactionState(id, state) {
+    if (!['CONFIRMED', 'EXPIRED', 'CANCELLED'].includes(state)) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    const updated = await prisma.$executeRawUnsafe(
+      "UPDATE meeting_oauth_transactions SET state = ? WHERE id = ? AND state = 'PENDING'",
+      state, id
+    );
+    if (updated !== 1) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    const rows = await prisma.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
+    return oauthTransactionDto(rows[0]);
+  }
+  return { acquireLease, addManagedDocumentFenced, claimGeneration, commitGeneration, createBridgeSession, completeOAuthTransaction, createOAuthTransaction, findBridgeSessionByBinding, findPendingOAuthForBridge, getBinding, getOAuthTransactionForBridge, managedDocumentFenceContract: "anythingllm-meeting-managed-fence-v1", markAccess, policyByWorkspace, removeManagedDocumentFenced, reserveIdentity, revokeBinding, revokeBridgeSession, revokeBridgeSessionsForUser, saveBinding, updateOAuthTransactionState };
 }
 
 module.exports = { createMeetingStore };
