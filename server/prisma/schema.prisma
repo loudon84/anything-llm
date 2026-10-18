@@ -87,6 +87,11 @@ model users {
   desktop_mobile_devices       desktop_mobile_devices[]
   workspace_parsed_files       workspace_parsed_files[]
   memories                     memories[]
+  meeting_gateway_bindings     meeting_gateway_bindings[]
+  meeting_bridge_sessions      meeting_bridge_sessions[]
+  meeting_query_runs           meeting_query_runs[]
+  meeting_imports              meeting_imports[]
+  meeting_workspace_owners     meeting_restricted_workspaces[]
 }
 
 model recovery_codes {
@@ -149,6 +154,8 @@ model workspaces {
   prompt_history               prompt_history[]
   workspace_parsed_files       workspace_parsed_files[]
   memories                     memories[]
+  meeting_restricted_workspace meeting_restricted_workspaces?
+  meeting_imports              meeting_imports[]
 }
 
 model workspace_threads {
@@ -485,4 +492,179 @@ model model_router_rules {
   @@unique([router_id, title])
   @@index([router_id])
   @@index([router_id, enabled, priority])
+}
+
+model meeting_gateway_bindings {
+  id                 String   @id @default(uuid())
+  anything_user_id   Int      @unique
+  gateway_org_id     String
+  gateway_member_id  String
+  gateway_user_id    String
+  identity_issuer    String   @default("account-login-v1")
+  status             String   @default("BOUND")
+  verified_at        DateTime
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+  user               users    @relation(fields: [anything_user_id], references: [id], onDelete: Cascade)
+
+  @@unique([anything_user_id, gateway_org_id])
+  @@unique([gateway_org_id, gateway_member_id])
+}
+
+model meeting_bridge_sessions {
+  id                   String    @id @default(uuid())
+  anything_user_id     Int
+  session_binding_hmac String    @unique
+  ciphertext           Bytes
+  nonce                Bytes
+  key_id               String
+  gateway_expiry       DateTime
+  created_at           DateTime  @default(now())
+  revoked_at           DateTime?
+  user                 users     @relation(fields: [anything_user_id], references: [id], onDelete: Cascade)
+  oauth_transactions   meeting_oauth_transactions[]
+
+  @@index([anything_user_id, revoked_at])
+}
+
+model meeting_query_runs {
+  id                 String    @id @default(uuid())
+  anything_user_id   Int
+  gateway_member_id  String
+  connection_ref     String
+  selection          String    @default("USER_WINDOW")
+  window_start       DateTime
+  window_end         DateTime
+  gateway_job_id     String?
+  status             String    @default("ACCEPTED")
+  last_reason        String?
+  last_error_code    String?
+  progress           String?
+  submitted_at       DateTime  @default(now())
+  finished_at        DateTime?
+  idempotency_key    String    @unique
+  user               users     @relation(fields: [anything_user_id], references: [id], onDelete: Cascade)
+
+  @@index([anything_user_id, submitted_at])
+}
+
+model meeting_imports {
+  id                       String                         @id @default(uuid())
+  anything_user_id         Int
+  gateway_org_id           String
+  gateway_member_id        String
+  connection_ref           String
+  gateway_meeting_id       String
+  gateway_recording_id     String
+  gateway_asset_id         String
+  content_type             String
+  source_version           String
+  content_sha256           String
+  formatter_version        String                         @default("v1")
+  workspace_slug           String
+  workspace_id             Int
+  identity_key             String                         @unique
+  active_generation        Int?
+  current_generation       Int                            @default(0)
+  document_location        String?                        @unique
+  last_applied_doc_sha256  String?
+  status                   String                         @default("PENDING")
+  access_state             String                         @default("UNVERIFIED")
+  attempt_count            Int                            @default(0)
+  created_at               DateTime                       @default(now())
+  updated_at               DateTime                       @updatedAt
+  verified_at              DateTime?
+  source_verified_at       DateTime?
+  last_error_code          String?
+  user                     users                          @relation(fields: [anything_user_id], references: [id], onDelete: Restrict)
+  workspace                workspaces                     @relation(fields: [workspace_id], references: [id], onDelete: Restrict)
+  attempts                 meeting_import_attempts[]
+  generations              meeting_import_generations[]
+
+  @@unique([anything_user_id, connection_ref, gateway_asset_id, content_type, source_version, workspace_id])
+  @@index([workspace_id, status, access_state])
+}
+
+model meeting_import_attempts {
+  id               String    @id @default(uuid())
+  import_id        String?
+  request_id       String
+  operation_id     String    @unique
+  stage            String
+  state            String    @default("PENDING")
+  attempt          Int       @default(0)
+  retry_after      DateTime?
+  evidence_ref     String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+  last_error_code  String?
+  meeting_import   meeting_imports? @relation(fields: [import_id], references: [id], onDelete: SetNull)
+
+  @@index([request_id])
+  @@index([import_id, created_at])
+}
+
+model meeting_import_audits {
+  id                       String   @id @default(uuid())
+  operation_id             String
+  owner_user_id            Int
+  stage                    String
+  status                   String
+  error_code               String?
+  trace_id                 String?
+  gateway_job_id_digest    String?
+  timestamp                DateTime @default(now())
+  details                  String?
+
+  @@index([owner_user_id, timestamp])
+  @@index([operation_id])
+}
+
+model meeting_restricted_workspaces {
+  workspace_id  Int       @id
+  owner_user_id Int
+  policy_epoch  Int       @default(1)
+  state         String    @default("ACTIVE")
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+  workspace     workspaces @relation(fields: [workspace_id], references: [id], onDelete: Restrict)
+  owner         users      @relation(fields: [owner_user_id], references: [id], onDelete: Restrict)
+
+  @@index([owner_user_id, state])
+}
+
+model meeting_oauth_transactions {
+  id                String                  @id @default(uuid())
+  transaction_id    String                  @unique
+  owner_user_id     Int
+  bridge_session_id String
+  expires_at        DateTime
+  state             String                  @default("PENDING")
+  created_at        DateTime                @default(now())
+  bridge_session    meeting_bridge_sessions @relation(fields: [bridge_session_id], references: [id], onDelete: Cascade)
+
+  @@index([bridge_session_id, state])
+  @@index([owner_user_id, expires_at])
+}
+
+model meeting_import_generations {
+  id                       String          @id @default(uuid())
+  import_id                String
+  generation               Int
+  operation_id             String          @unique
+  state                    String          @default("PENDING")
+  document_location        String?         @unique
+  vector_doc_id            String?         @unique
+  last_applied_doc_sha256  String?
+  container_sha256         String?
+  policy_epoch             Int
+  lease_owner              String?
+  lease_deadline           DateTime?
+  fencing_token            Int             @default(0)
+  created_at               DateTime        @default(now())
+  updated_at               DateTime        @updatedAt
+  meeting_import           meeting_imports @relation(fields: [import_id], references: [id], onDelete: Cascade)
+
+  @@unique([import_id, generation])
+  @@index([state, lease_deadline])
 }
