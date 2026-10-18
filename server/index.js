@@ -47,6 +47,28 @@ const {
 } = require("./endpoints/utils/googleAgentSkillEndpoints");
 const { memoryEndpoints } = require("./endpoints/memory");
 const { httpLogger } = require("./middleware/httpLogger");
+const { meetingGatewayEndpoints } = require("./endpoints/meetingGateway");
+const { createSessionModule } = require("./utils/meetingGateway/sessions");
+const { createMeetingStore } = require("./models/meetingGateway");
+const prisma = require("./utils/prisma");
+function parseMeetingKeyring() {
+  try {
+    const hmacHex = process.env.MEETING_GATEWAY_BRIDGE_HMAC_KEY || "";
+    const keyring = JSON.parse(process.env.MEETING_GATEWAY_BRIDGE_KEYRING_JSON || "{}");
+    if (!/^[a-f0-9]{64}$/i.test(hmacHex) || !keyring.activeKeyId || !keyring.keys || typeof keyring.keys !== "object") return null;
+    const keys = {};
+    for (const [keyId, value] of Object.entries(keyring.keys)) {
+      if (!/^[a-f0-9]{64}$/i.test(value)) return null;
+      keys[keyId] = Buffer.from(value, "hex");
+    }
+    return { activeKeyId: keyring.activeKeyId, keys, hmacKey: Buffer.from(hmacHex, "hex") };
+  } catch (_error) { return null; }
+}
+const meetingKeyring = parseMeetingKeyring();
+const meetingSessions = meetingKeyring ? createSessionModule({
+  store: createMeetingStore({ prisma }), gateway: null, keyring: meetingKeyring,
+  origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
+}) : null;
 const app = express();
 const apiRouter = express.Router();
 const meetingGatewayContractConfirmed =
@@ -112,6 +134,7 @@ scheduledJobEndpoints(apiRouter);
 outlookAgentEndpoints(apiRouter);
 googleAgentSkillEndpoints(apiRouter);
 memoryEndpoints(apiRouter);
+meetingGatewayEndpoints(apiRouter, { sessions: meetingSessions, enabled: app.locals.meetingGateway.enabled });
 // Externally facing embedder endpoints
 embeddedEndpoints(apiRouter);
 

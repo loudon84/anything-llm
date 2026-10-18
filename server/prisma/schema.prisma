@@ -512,17 +512,24 @@ model meeting_gateway_bindings {
 }
 
 model meeting_bridge_sessions {
-  id                   String    @id @default(uuid())
-  anything_user_id     Int
-  session_binding_hmac String    @unique
-  ciphertext           Bytes
-  nonce                Bytes
-  key_id               String
-  gateway_expiry       DateTime
-  created_at           DateTime  @default(now())
-  revoked_at           DateTime?
-  user                 users     @relation(fields: [anything_user_id], references: [id], onDelete: Cascade)
-  oauth_transactions   meeting_oauth_transactions[]
+  id                       String    @id @default(uuid())
+  anything_user_id         Int
+  session_binding_hmac     String    @unique
+  jwt_binding_hmac         String
+  csrf_hmac                String
+  credential_binding_hmac  String
+  ciphertext               Bytes
+  nonce                    Bytes
+  key_id                   String
+  ms_expiry                DateTime?
+  mt_expiry                DateTime?
+  jwt_expiry               DateTime?
+  session_expiry           DateTime?
+  gateway_expiry           DateTime
+  created_at               DateTime  @default(now())
+  revoked_at               DateTime?
+  user                     users     @relation(fields: [anything_user_id], references: [id], onDelete: Cascade)
+  oauth_transactions       meeting_oauth_transactions[]
 
   @@index([anything_user_id, revoked_at])
 }

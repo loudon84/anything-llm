@@ -260,7 +260,85 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
     return rows[0] || null;
   }
 
-  return { acquireLease, claimGeneration, commitGeneration, markAccess, policyByWorkspace, reserveIdentity };
+  async function createBridgeSession(row) {
+    const timestamp = now();
+    const id = row.id || randomUUID();
+    await prisma.$transaction(async (tx) => {
+      const binding = row.binding;
+      if (!binding) throw new Error('MGW_IDENTITY_INVALID');
+      const existingBinding = (await tx.$queryRawUnsafe("SELECT gateway_org_id, gateway_member_id, gateway_user_id, status FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1", binding.anything_user_id))[0];
+      if (existingBinding && existingBinding.status === "BOUND" && (existingBinding.gateway_org_id !== binding.gateway_org_id || existingBinding.gateway_member_id !== binding.gateway_member_id || existingBinding.gateway_user_id !== binding.gateway_user_id)) throw new Error("MGW_IDENTITY_BINDING_CONFLICT");
+      await tx.$executeRawUnsafe(
+        `INSERT INTO meeting_gateway_bindings (
+          id, anything_user_id, gateway_org_id, gateway_member_id, gateway_user_id,
+          identity_issuer, status, verified_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
+        ON CONFLICT(anything_user_id) DO UPDATE SET
+          gateway_org_id = excluded.gateway_org_id, gateway_member_id = excluded.gateway_member_id,
+          gateway_user_id = excluded.gateway_user_id, identity_issuer = excluded.identity_issuer,
+          status = 'BOUND', verified_at = excluded.verified_at, updated_at = excluded.updated_at`,
+        randomUUID(), binding.anything_user_id, binding.gateway_org_id, binding.gateway_member_id,
+        binding.gateway_user_id, binding.identity_issuer || 'account-login-v1', timestamp, timestamp, timestamp
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO meeting_bridge_sessions (
+          id, anything_user_id, session_binding_hmac, jwt_binding_hmac, csrf_hmac,
+          credential_binding_hmac, ciphertext, nonce, key_id, ms_expiry, mt_expiry,
+          jwt_expiry, session_expiry, gateway_expiry, created_at, revoked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        id, row.anything_user_id, row.session_binding_hmac, row.jwt_binding_hmac,
+        row.csrf_hmac, row.credential_binding_hmac, row.ciphertext, row.nonce,
+        row.key_id, row.ms_expiry, row.mt_expiry, row.jwt_expiry,
+        row.session_expiry, row.gateway_expiry, timestamp
+      );
+      if (row.oldBridgeBindingHmac) {
+        await tx.$executeRawUnsafe(
+          'UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND session_binding_hmac = ? AND revoked_at IS NULL',
+          timestamp, row.anything_user_id, row.oldBridgeBindingHmac
+        );
+      }
+    });
+    return findBridgeSessionByBinding(row.session_binding_hmac);
+  }
+  async function findBridgeSessionByBinding(binding) {
+    const rows = await prisma.$queryRawUnsafe('SELECT * FROM meeting_bridge_sessions WHERE session_binding_hmac = ? LIMIT 1', binding);
+    return rows[0] || null;
+  }
+  async function revokeBridgeSession(id, revokedAt = now()) {
+    await prisma.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', revokedAt, id);
+  }
+  async function revokeBridgeSessionsForUser(userId, revokedAt = now()) {
+    await prisma.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND revoked_at IS NULL', revokedAt, userId);
+  }
+  async function getBinding(userId) {
+    const rows = await prisma.$queryRawUnsafe('SELECT * FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1', userId);
+    return rows[0] || null;
+  }
+  async function saveBinding(binding) {
+    const timestamp = now();
+    const id = randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO meeting_gateway_bindings (
+        id, anything_user_id, gateway_org_id, gateway_member_id, gateway_user_id,
+        identity_issuer, status, verified_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
+      ON CONFLICT(anything_user_id) DO UPDATE SET
+        gateway_org_id = excluded.gateway_org_id, gateway_member_id = excluded.gateway_member_id,
+        gateway_user_id = excluded.gateway_user_id, identity_issuer = excluded.identity_issuer,
+        status = 'BOUND', verified_at = excluded.verified_at, updated_at = excluded.updated_at`,
+      id, binding.anything_user_id, binding.gateway_org_id, binding.gateway_member_id,
+      binding.gateway_user_id, binding.identity_issuer || 'account-login-v1', timestamp, timestamp, timestamp
+    );
+    return getBinding(binding.anything_user_id);
+  }
+  async function revokeBinding(userId, revokedAt = now()) {
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND revoked_at IS NULL', revokedAt, userId);
+      await tx.$executeRawUnsafe("UPDATE meeting_gateway_bindings SET status = 'REVOKED', updated_at = ? WHERE anything_user_id = ?", revokedAt, userId);
+      await tx.$executeRawUnsafe("UPDATE meeting_restricted_workspaces SET state = 'FROZEN', updated_at = ? WHERE owner_user_id = ? AND state = 'ACTIVE'", revokedAt, userId);
+    });
+  }
+  return { acquireLease, claimGeneration, commitGeneration, createBridgeSession, findBridgeSessionByBinding, getBinding, markAccess, policyByWorkspace, reserveIdentity, revokeBinding, revokeBridgeSession, revokeBridgeSessionsForUser, saveBinding };
 }
 
 module.exports = { createMeetingStore };
