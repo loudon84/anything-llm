@@ -14,6 +14,9 @@ const { processLink, getLinkText } = require("./processLink");
 const { wipeCollectorStorage } = require("./utils/files");
 const extensions = require("./extensions");
 const { processRawText } = require("./processRawText");
+const { processManagedRawText } = require("./processManagedRawText");
+const { createManagedStore } = require("./utils/managedDocumentStore");
+const managedDocumentStore = createManagedStore();
 const { convertAudioToWav } = require("./convertAudioToWav");
 const { verifyPayloadIntegrity } = require("./middleware/verifyIntegrity");
 const { httpLogger } = require("./middleware/httpLogger");
@@ -211,6 +214,25 @@ app.post(
     return;
   }
 );
+
+app.post("/process-managed-raw-text", [verifyPayloadIntegrity], async (request, response) => {
+  try {
+    const result = await processManagedRawText(reqBody(request), { store: managedDocumentStore });
+    response.status(200).json(result);
+  } catch (error) {
+    const status = error.message === "MGW_IMPORT_CONFLICT" ? 409 : error.message === "MGW_INPUT_INVALID" ? 422 : 500;
+    response.status(status).json({ success: false, code: error.message === "MGW_IMPORT_CONFLICT" ? error.message : status === 422 ? error.message : "MGW_COLLECTOR_WRITE_FAILED" });
+  }
+});
+
+app.get("/managed-raw-text/:operationId", (request, response) => {
+  const { CommunicationKey } = require("./utils/comKey");
+  const payload = JSON.stringify({ operationId: request.params.operationId, payloadHash: request.query.payloadHash });
+  if (!new CommunicationKey().verify(request.header("X-Integrity"), payload)) return response.status(400).json({ code: "MGW_INTEGRITY_INVALID" });
+  managedDocumentStore.get(request.params.operationId, request.query.payloadHash)
+    .then((operation) => operation ? response.status(200).json(operation) : response.sendStatus(404))
+    .catch((error) => response.status(error.message === "MGW_IMPORT_CONFLICT" ? 409 : 500).json({ code: error.message }));
+});
 
 extensions(app);
 

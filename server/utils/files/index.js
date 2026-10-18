@@ -27,7 +27,12 @@ const generatedImagesPath =
 
 // Should take in a folder that is a subfolder of documents
 // eg: youtube-subject/video-123.json
+function isManagedDocumentLocation(filePath = "") {
+  return typeof filePath === "string" && normalizePath(filePath).split("/").includes("meeting-managed");
+}
+
 async function fileData(filePath = null) {
+  if (isManagedDocumentLocation(filePath)) return null;
   if (!filePath) throw new Error("No docPath provided in request");
   // The raw filePath is what gets persisted as a document's `docpath` and later
   // resolved directly by background jobs, so it must stay inside the documents
@@ -47,7 +52,7 @@ function listFolders() {
   const folders = [];
 
   for (const file of fs.readdirSync(documentsPath)) {
-    if (path.extname(file) === ".md") continue;
+    if (file === "meeting-managed" || path.extname(file) === ".md") continue;
     const folderPath = path.resolve(documentsPath, file);
     if (!fs.lstatSync(folderPath).isDirectory()) continue;
 
@@ -87,7 +92,7 @@ async function viewLocalFiles() {
   };
 
   for (const file of fs.readdirSync(documentsPath)) {
-    if (path.extname(file) === ".md") continue;
+    if (file === "meeting-managed" || path.extname(file) === ".md") continue;
     const folderPath = path.resolve(documentsPath, file);
     const isFolder = fs.lstatSync(folderPath).isDirectory();
     if (isFolder) {
@@ -188,7 +193,7 @@ function normalizePagination({ offset, limit } = {}) {
  */
 async function getDocumentsByFolder(folderName = "", pagination = {}) {
   const { offset, limit } = normalizePagination(pagination);
-  if (!folderName) {
+  if (!folderName || isManagedDocumentLocation(folderName)) {
     return {
       folder: folderName,
       documents: [],
@@ -810,6 +815,7 @@ async function fileToPickerData({
     const rawData = fs.readFileSync(pathToFile, "utf8");
     try {
       metadata = JSON.parse(rawData);
+      if (metadata?.managedProvenance) return null;
       // Remove the pageContent field from the metadata - it is large and not needed for the picker
       delete metadata.pageContent;
     } catch (err) {
@@ -1003,6 +1009,7 @@ module.exports = {
   chatHistoryAttachments,
   GENERATED_IMAGE_FILENAME_PATTERN,
   moveProcessedDocsToFolder,
+  isManagedDocumentLocation,
   viewLocalFiles,
   listFolders,
   searchDocuments,

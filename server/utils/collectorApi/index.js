@@ -361,6 +361,44 @@ class CollectorApi {
         return { success: false, reason: e.message, documents: [] };
       });
   }
-}
+
+  async processManagedRawText(input = {}) {
+    const data = JSON.stringify(input);
+    return await fetch(`${this.endpoint}/process-managed-raw-text`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Integrity": this.comkey.sign(data),
+        "X-Payload-Signer": this.comkey.encrypt(new EncryptionManager().xPayload),
+      },
+      body: data,
+    }).then(async (res) => {
+      const result = await res.json();
+      if (!res.ok) {
+        const error = new Error(result.code || "MGW_COLLECTOR_WRITE_FAILED");
+        error.status = res.status;
+        throw error;
+      }
+      return result;
+    });
+  }
+
+  async getManagedRawTextOperation(operationId, payloadHash) {
+    const data = JSON.stringify({ operationId, payloadHash });
+    const query = new URLSearchParams({ payloadHash }).toString();
+    return await fetch(`${this.endpoint}/managed-raw-text/${encodeURIComponent(operationId)}?${query}`, {
+      method: "GET",
+      headers: { "X-Integrity": this.comkey.sign(data) },
+    }).then(async (res) => {
+      if (res.status === 404) return null;
+      const result = await res.json();
+      if (!res.ok) {
+        const error = new Error(result.code || "MGW_COLLECTOR_READ_FAILED");
+        error.status = res.status;
+        throw error;
+      }
+      return result;
+    });
+  }}
 
 module.exports.CollectorApi = CollectorApi;
