@@ -117,13 +117,21 @@ describe("meeting gateway SQLite state store", () => {
     expect(await prisma.$queryRawUnsafe("SELECT COUNT(*) AS count FROM meeting_imports")).toEqual([{ count: 1n }]);
   });
 
+  test("A-STATE-001-02 a fresh identity reservation can be retried idempotently", async () => {
+    const store = newStore();
+    const input = identity({ gateway_asset_id: "asset-c", identity_key: "identity-c" });
+    const first = await store.reserveIdentity(input);
+    const retry = await store.reserveIdentity(input);
+    expect(first.id).toBe(retry.id);
+  });
+
   test("A-STATE-001-02 another owner cannot claim an existing identity key", async () => {
     const store = newStore();
     await prisma.$executeRawUnsafe("INSERT INTO users (id) VALUES (2)");
     await expect(
       store.reserveIdentity(identity({ anything_user_id: 2 }))
     ).rejects.toThrow("MGW_IDENTITY_BINDING_CONFLICT");
-    expect(await prisma.$queryRawUnsafe("SELECT COUNT(*) AS count FROM meeting_imports")).toEqual([{ count: 1n }]);
+    expect(await prisma.$queryRawUnsafe("SELECT COUNT(*) AS count FROM meeting_imports")).toEqual([{ count: 2n }]);
   });
 
   async function ensurePolicy() {

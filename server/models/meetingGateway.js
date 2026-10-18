@@ -5,7 +5,6 @@ const IMPORT_FIELDS = [
   "anything_user_id",
   "gateway_org_id",
   "gateway_member_id",
-  "gateway_user_id",
   "connection_ref",
   "gateway_meeting_id",
   "gateway_recording_id",
