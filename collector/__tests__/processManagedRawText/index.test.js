@@ -70,6 +70,17 @@ describe("PLAN-MGW-008 managed raw text", () => {
     expect(recovered.operationState).toBe("COMMITTED");
   });
 
+
+  test("A-REV-004-02 COMMITTED operation reads fail closed when its document hash or provenance changes", async () => {
+    const result = await processManagedRawText(input(), { store });
+    const journal = await store.get("operation-a");
+    const documentPath = path.join(root, "documents", journal.location);
+    const document = JSON.parse(fs.readFileSync(documentPath, "utf8"));
+    document.managedProvenance.owner_user_id = 99;
+    fs.writeFileSync(documentPath, JSON.stringify(document));
+    await expect(store.get("operation-a", journal.payloadHash)).rejects.toThrow("MGW_IMPORT_RECOVERY_REQUIRED");
+    expect(result.success).toBe(true);
+  });
   test("A-IMPORT-001-02 ordinary raw text remains non-idempotent and uses its original folder", async () => {
     const { processRawText } = require("../../processRawText");
     const result = await processRawText("ordinary text", { title: "Ordinary.txt" });

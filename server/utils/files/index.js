@@ -28,7 +28,7 @@ const generatedImagesPath =
 // Should take in a folder that is a subfolder of documents
 // eg: youtube-subject/video-123.json
 function isManagedDocumentLocation(filePath = "") {
-  return typeof filePath === "string" && normalizePath(filePath).split("/").includes("meeting-managed");
+  return typeof filePath === "string" && filePath.replace(/\\/g, "/").split("/").includes("meeting-managed");
 }
 
 async function fileData(filePath = null) {
@@ -337,8 +337,9 @@ async function purgeVectorCache(filename = null) {
 // Search for a specific document by its unique name in the entire `documents`
 // folder via iteration of all folders and checking if the expected file exists.
 async function findDocumentInDocuments(documentName = null) {
-  if (!documentName) return null;
+  if (!documentName || isManagedDocumentLocation(documentName)) return null;
   for (const folder of fs.readdirSync(documentsPath)) {
+    if (folder === "meeting-managed") continue;
     const isFolder = fs
       .lstatSync(path.join(documentsPath, folder))
       .isDirectory();
@@ -496,12 +497,13 @@ async function getWatchedDocumentFilenames(filenames = []) {
  * @returns {Promise<Array<object & {docpath: string}>>}
  */
 async function getDocumentsByDocPaths(docpaths = []) {
-  if (!docpaths.length) return [];
+  const readableDocpaths = docpaths.filter((docpath) => !isManagedDocumentLocation(docpath));
+  if (!readableDocpaths.length) return [];
   const liveSyncAvailable = await DocumentSyncQueue.enabled();
   const results = [];
   const filenames = {};
 
-  for (const docpath of docpaths) {
+  for (const docpath of readableDocpaths) {
     const fullPath = path.resolve(documentsPath, normalizePath(docpath));
     if (!fs.existsSync(fullPath) || !isWithin(documentsPath, fullPath))
       continue;
@@ -806,6 +808,7 @@ async function fileToPickerData({
   liveSyncAvailable = false,
   cachefilename = null,
 }) {
+  if (isManagedDocumentLocation(cachefilename || path.relative(documentsPath, pathToFile))) return null;
   let metadata = {};
   const filename = path.basename(pathToFile);
   const fileStats = fs.statSync(pathToFile);
@@ -1014,4 +1017,5 @@ module.exports = {
   listFolders,
   searchDocuments,
   getDocumentsByDocPaths,
+  fileToPickerData,
 };

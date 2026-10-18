@@ -80,6 +80,34 @@ function createManagedStore({
     return JSON.parse(fs.readFileSync(file, "utf8"));
   }
 
+  function verifyCommitted(journal) {
+    const expectedLocation = `meeting-managed/${journal.documentId}.json`;
+    if (journal.location !== expectedLocation ||
+      journal.payloadHash !== sha256(canonicalJson(journal.payload)))
+      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
+
+    const target = path.resolve(resolvedDocumentsRoot, journal.location);
+    const relative = path.relative(managedDocsRoot, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative))
+      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
+    let stat;
+    try { stat = fs.lstatSync(target); } catch { throw new Error("MGW_IMPORT_RECOVERY_REQUIRED"); }
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
+
+    const bytes = fs.readFileSync(target, "utf8");
+    if (sha256(bytes) !== journal.container_sha256)
+      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
+    let document;
+    try { document = JSON.parse(bytes); } catch { throw new Error("MGW_IMPORT_RECOVERY_REQUIRED"); }
+    const provenance = document?.managedProvenance || {};
+    if (document.id !== journal.documentId || document.pageContent !== journal.payload.textContent ||
+      provenance.operation_id !== journal.operationId || provenance.import_id !== journal.payload.import_id ||
+      provenance.generation !== journal.payload.generation || provenance.owner_user_id !== journal.payload.owner_user_id ||
+      provenance.workspace_id !== journal.payload.workspace_id || provenance.payload_sha256 !== journal.payloadHash)
+      throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
+    return journal;
+  }
   async function prepare(input) {
     const { operationId, payloadHash, ownerUserId, importId, generation, workspaceId, metadata, textContent } = input || {};
     const file = journalPath(operationId);
@@ -95,7 +123,7 @@ function createManagedStore({
     if (journal) {
       if (journal.payloadHash !== computedHash || canonicalJson(journal.payload) !== canonicalJson(payload))
         throw new Error("MGW_IMPORT_CONFLICT");
-      return journal;
+      return journal.state === "COMMITTED" ? verifyCommitted(journal) : journal;
     }
 
     journal = {
@@ -122,7 +150,7 @@ function createManagedStore({
       const existing = getSync(operationId);
       if (!existing || existing.payloadHash !== computedHash || canonicalJson(existing.payload) !== canonicalJson(payload))
         throw new Error("MGW_IMPORT_CONFLICT");
-      return existing;
+      return existing.state === "COMMITTED" ? verifyCommitted(existing) : existing;
     }
   }
 
@@ -130,7 +158,7 @@ function createManagedStore({
     const file = journalPath(operationId);
     const journal = getSync(operationId);
     if (!journal || journal.payloadHash !== payloadHash) throw new Error("MGW_IMPORT_CONFLICT");
-    if (journal.state === "COMMITTED") return journal;
+    if (journal.state === "COMMITTED") return verifyCommitted(journal);
     const target = path.resolve(resolvedDocumentsRoot, journal.location);
     const relative = path.relative(managedDocsRoot, target);
     if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("MGW_DOCUMENT_PATH_INVALID");
@@ -152,8 +180,8 @@ function createManagedStore({
         try { fs.linkSync(temp, target); } catch (error) {
           if (error.code !== "EEXIST") throw error;
           const existingBytes = fs.readFileSync(target, "utf8");
-      const existing = JSON.parse(existingBytes);
-          if (existing?.managedProvenance?.operation_id !== operationId || existing?.managedProvenance?.payload_sha256 !== payloadHash || fs.readFileSync(target, "utf8") !== serialized)
+          const existing = JSON.parse(existingBytes);
+          if (existing?.managedProvenance?.operation_id !== operationId || existing?.managedProvenance?.payload_sha256 !== payloadHash || existing?.managedProvenance?.owner_user_id !== journal.ownerUserId || existingBytes !== serialized)
             throw new Error("MGW_IMPORT_RECOVERY_REQUIRED");
         }
       } finally {
@@ -162,6 +190,7 @@ function createManagedStore({
       await afterDocumentWrite(journal);
     }
 
+    fsyncDirectory(path.dirname(target));
     const committed = { ...journal, state: "COMMITTED", container_sha256: sha256(serialized), committedAt: journal.preparedAt };
     atomicJson(file, committed);
     await afterCommit(committed);
@@ -172,7 +201,7 @@ function createManagedStore({
     const journal = getSync(operationId);
     if (!journal) return null;
     if (payloadHash && journal.payloadHash !== payloadHash) throw new Error("MGW_IMPORT_CONFLICT");
-    return journal;
+    return journal.state === "COMMITTED" ? verifyCommitted(journal) : journal;
   }
 
   return { prepare, commit, get, documentsRoot, managedDocsRoot, canonicalJson, sha256 };

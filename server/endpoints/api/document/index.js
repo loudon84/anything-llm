@@ -941,6 +941,10 @@ function apiDocumentEndpoints(app) {
     */
     try {
       const { docName } = request.params;
+      if (isManagedDocumentLocation(docName)) {
+        response.sendStatus(404).end();
+        return;
+      }
       const document = await findDocumentInDocuments(docName);
       if (!document) {
         response.sendStatus(404).end();
