@@ -71,7 +71,7 @@ createWeComAuthService({ gateway, store, jwt, clock, cryptoConfig });
 // .complete({ browserProof, origin, csrf, callbackTicket })
 //   -> { state, user, localToken, expiresAt, remoteAccessMode } (local token only)
 // .getState({ localToken, browserProof })
-//   -> { authenticated, remoteAccessMode, reason, expiresAt, user }
+//   -> { authenticated, remoteAccessMode, reason, expiresAt, user, csrfToken }
 // .logout({ localToken, browserProof, csrf }) -> revoked local state
 
 createMeetingAuthAccess({ authService, meetingStore, workspaceAccess, clock });
@@ -95,9 +95,21 @@ resolveWeComView({ authenticated, remoteAccessMode, available, reason });
 evaluatePhaseGate({ phase, evidence }); // -> { status, reason, caseResults }
 ```
 
+## Consumer BFF DTO freeze for parallel UI
+
+This is a NEW local Consumer contract, not a statement about upstream Gateway routes.
+
+- Success: `{data,meta:{request_id,schema_version:"2.0"}}`; errors: `{error:{code,message_key,retryable,recovery_action},request_id}` with meaningfulHTTPstatus.
+- GET `/api/auth/wecom/config`: data `{enabled:boolean,available:boolean,reason:string|null}`; no secrets or raw providerconfig.
+- POST `/api/auth/wecom/start`: sameorigin+ratecontrol, optional existinglocalBearer; emptyJSONbody, successful data `{authorizationUrl:string,expiresAt:string}` plus serverpreloginCookie; no browsermember/userselection.
+- GET `/api/auth/wecom/state`: existinglocalBearer ifpresent + sameorigincookies; data `{authenticated:boolean,remoteAccessMode:"GATEWAY_ENABLED"|"LOCAL_ONLY"|null,reason:string|null,expiresAt:string|null,user:object|null,csrfToken:string|null}`. Unavailable/noexistinglocallogin is authenticatedfalse, not fabricatedsuccess.
+- POST `/api/auth/wecom/complete`: emptyJSONbody, servercookie-associatedticket only; `X-MGW-CSRF` header carries csrfToken fromstate. Success data `{state:"AUTHENTICATED",user:object,localToken:string,expiresAt:string,remoteAccessMode:"GATEWAY_ENABLED"}`. Failure/lossdata must never provide a Gatewaytoken or fake localtoken; frontendreloadsstate to learnwhether anexistinglocal session remainsvalid/LOCAL_ONLY.
+- POST `/api/auth/logout`: sameBearer/cookies/`X-MGW-CSRF`, revokeonlycurrentlocalcontext; globallegacylogoutbehavior preserved wherealreadyused.
+- Publicprofileusercontains safe `{id,username,role}` and optional`displayName`; follow existing localJWTstorage onlyaftercomplete success. Never readJWT/resultticketfromwindow.locationoruseupstreammemberaslocalID.
+
 ## Task ownership and order
 
-执行顺序T1→T2→T3→T4→T5→T6；每任务独立review，之后才进入依赖任务。实现worker不自行再派reviewer；主控统一分派Luna reviewer。任务报告/差异包/进度ledger放本plan独占的`.superpowers/sdd/2026-10-19-meeting-gateway-auth-local-search.plan/`。
+后端顺序T1→T2→T3→T4；T5可在T1审查后按下列冻结BFF DTO并行，只改frontend，待T3完成再验证真实集成；T6汇总全部结果。每任务独立review，之后才进入依赖任务。并行UI worker不自行commit，由主控在后端提交的安全检查点顺序提交UI以保留独立review范围。实现worker不自行再派reviewer；主控统一分派Luna reviewer。任务报告/差异包/进度ledger放本plan独占的`.superpowers/sdd/2026-10-19-meeting-gateway-auth-local-search.plan/`。
 
 ### Task 1: Gateway认证消费契约、profile校验与依赖门禁
 
@@ -140,7 +152,7 @@ await expect(client.fetchAuthenticatedProfile({ identitySession: sessionForA }))
 
 **Interfaces:** consumes validated profile fromT1; produces createWeComIdentityStore, opaque login transaction storage and local session registry. Does not consume browser user IDs or raw Gateway JSON.
 
-- [ ] **Step 1: Write failing isolated-DB tests:** verified first profile creates one user with password=null+role=default; repeat sync preserves ID; same-name different stable tuples remain separate; different Gateway instances don't collide; changed display profile refreshes; active=false/expired/subject mismatch creates no user/session; local suspension never reset; concurrent upserts yield one record. Null-password user cannot password-login.
+- [x] **Step 1: Write failing isolated-DB tests:** verified first profile creates one user with password=null+role=default; repeat sync preserves ID; same-name different stable tuples remain separate; different Gateway instances don't collide; changed display profile refreshes; active=false/expired/subject mismatch creates no user/session; local suspension never reset; concurrent upserts yield one record. Null-password user cannot password-login.
 
 ```js
 const first = await store.upsertGatewayUserProjection({ profile: profileA });
@@ -151,8 +163,8 @@ expect(first.user.role).toBe('default');
 expect(await prisma.users.count()).toBe(1);
 ```
 
-- [ ] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomIdentity.test.js server/__tests__/models/user.test.js`; confirm new tests red before implementation.
-- [ ] **Step 3: Add schema/migration and implement transaction.** Make `users.password` nullable; guard existing password-auth entry points against null rather than hashing a placeholder. Extend R1 `meeting_gateway_bindings` with nullable legacy `gateway_instance_id`, profile fields and stable triple unique constraint; do not create a competing identity binding table. Legacy instance=null rows retain data and are not automatically adopted. Existing R1 lookups must remain correctly scoped for legacy rows after any compound-unique change; never use an unqualified org/member lookup to select a different instance projection. Lazy store creation must not break unrelated module imports with mocked Prisma. Add `meeting_login_sessions` and short-lived `meeting_sso_transactions` with epoch, TTL, encrypted verifier/ticket storage, consumption CAS, remoteAccessMode and token/proof hashes. An internal deterministic login handle may use `mgw_`+SHA256(stable tuple) prefix; it must not be a user-match criterion. Persist displayName separately or as validated binding profile projection. No username/email merge and no automatic admin.
+- [x] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomIdentity.test.js server/__tests__/models/user.test.js`; confirm new tests red before implementation.
+- [x] **Step 3: Add schema/migration and implement transaction.** Make `users.password` nullable; guard existing password-auth entry points against null rather than hashing a placeholder. Extend R1 `meeting_gateway_bindings` with nullable legacy `gateway_instance_id`, profile fields and stable triple unique constraint; do not create a competing identity binding table. Legacy instance=null rows retain data and are not automatically adopted. Existing R1 lookups must remain correctly scoped for legacy rows after any compound-unique change; never use an unqualified org/member lookup to select a different instance projection. Lazy store creation must not break unrelated module imports with mocked Prisma. Add `meeting_login_sessions` and short-lived `meeting_sso_transactions` with epoch, TTL, encrypted verifier/ticket storage, consumption CAS, remoteAccessMode and token/proof hashes. An internal deterministic login handle may use `mgw_`+SHA256(stable tuple) prefix; it must not be a user-match criterion. Persist displayName separately or as validated binding profile projection. No username/email merge and no automatic admin.
 
 ```js
 // The transaction owns the unique stable tuple and its local integer user ID.
@@ -162,8 +174,8 @@ expect(await prisma.users.count()).toBe(1);
 // mode begins GATEWAY_ENABLED only after verified profile; failed sync publishes none.
 ```
 
-- [ ] **Step 4:** Validate schema using `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma`; apply migration tests only to temporary isolatedDB. Never run migrate/reset on existing app/storage DB during this task. Dependency node_modules can be a junction into E-drive; generate isolated test clients to a temporary directory if new schema integration tests need them, and do not overwrite another checkout's generated Prisma client merely to run fixture tests. Run relevant user/projection suites.
-- [ ] **Step 5:** Commit only Task2 changes as `feat: persist gateway user projections and local auth sessions`; include migration compatibility and failure evidence; review before T3.
+- [x] **Step 4:** Validate schema using `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma`; apply migration tests only to temporary isolatedDB. Never run migrate/reset on existing app/storage DB during this task. Dependency node_modules can be a junction into E-drive; generate isolated test clients to a temporary directory if new schema integration tests need them, and do not overwrite another checkout's generated Prisma client merely to run fixture tests. Run relevant user/projection suites.
+- [x] **Step 5:** Commit only Task2 changes as `feat: persist gateway user projections and local auth sessions`; include migration compatibility and failure evidence; review before T3.
 
 ### Task 3: 企业微信BFF、会话认证与LOCAL_ONLY状态转换
 
