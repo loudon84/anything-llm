@@ -227,10 +227,7 @@ export function createWeComAuthClient({
         (data.expiresAt !== null && !validIsoDate(data.expiresAt)) ||
         (data.csrfToken !== null && typeof data.csrfToken !== "string") ||
         (data.user !== null && !isSafePublicUser(data.user)) ||
-        (data.authenticated &&
-          (!data.user ||
-            (data.remoteAccessMode !== null &&
-              !SAFE_AUTH_MODES.has(data.remoteAccessMode))))
+        (data.authenticated && data.remoteAccessMode !== null && !data.user)
       ) {
         throw new Error("MGW_AUTH_UNAVAILABLE");
       }

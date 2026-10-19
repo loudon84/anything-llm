@@ -157,6 +157,54 @@ test("BFF accepts a valid legacy password session with null access mode", async 
   });
 });
 
+test("single-user legacy BFF state authenticates meeting access without an enterprise user", async () => {
+  const client = createWeComAuthClient({
+    fetchImpl: async () =>
+      response({
+        data: {
+          authenticated: true,
+          remoteAccessMode: null,
+          reason: null,
+          expiresAt: null,
+          user: null,
+          csrfToken: null,
+        },
+        meta: { request_id: "r-single-user", schema_version: "2.0" },
+      }),
+  });
+
+  const state = await client.getState();
+  assert.equal(state.authenticated, true);
+  assert.equal(state.remoteAccessMode, null);
+  assert.equal(state.user, null);
+  const view = resolveWeComView({
+    authenticated: state.authenticated,
+    remoteAccessMode: state.remoteAccessMode,
+    available: false,
+  });
+  assert.equal(view.canSearchLocal, true);
+  assert.equal(view.canFetchRemote, true);
+});
+
+test("authenticated Gateway state still requires a safe user", async () => {
+  const client = createWeComAuthClient({
+    fetchImpl: async () =>
+      response({
+        data: {
+          authenticated: true,
+          remoteAccessMode: "GATEWAY_ENABLED",
+          reason: null,
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          user: null,
+          csrfToken: "csrf",
+        },
+        meta: { request_id: "r-gateway-empty-user", schema_version: "2.0" },
+      }),
+  });
+
+  await assert.rejects(client.getState(), { message: "MGW_AUTH_UNAVAILABLE" });
+});
+
 test("logout can revoke a legacy password session using its BFF CSRF token", async () => {
   const calls = [];
   const client = createWeComAuthClient({
