@@ -43,6 +43,13 @@ describe("meeting gateway SQLite state store", () => {
     for (const statement of oauthSnapshotMigration.split(";").map((sql) => sql.trim()).filter(Boolean)) {
       await prisma.$executeRawUnsafe(statement);
     }
+    const oauthConfirmationGuardMigration = fs.readFileSync(
+      path.join(__dirname, "../../prisma/migrations/20261020000200_meeting_oauth_confirmation_guard/migration.sql"),
+      "utf8"
+    );
+    for (const statement of oauthConfirmationGuardMigration.split(";").map((sql) => sql.trim()).filter(Boolean)) {
+      await prisma.$executeRawUnsafe(statement);
+    }
     now = new Date("2026-10-18T00:00:00.000Z");
   });
 
@@ -135,6 +142,28 @@ describe("meeting gateway SQLite state store", () => {
     });
     expect(row.existingConnectionIds).toEqual(["prior-connection"]);
     expect((await store.findPendingOAuthForBridge("oauth-snapshot-bridge")).existingConnectionIds).toEqual(["prior-connection"]);
+  });
+
+  test("persists a compare-and-set confirmation guard and keeps recovery transactions blocking new starts", async () => {
+    await prisma.$executeRawUnsafe(
+      "INSERT INTO meeting_bridge_sessions (id, anything_user_id, session_binding_hmac, ciphertext, nonce, key_id, gateway_expiry, created_at) VALUES ('oauth-recovery-bridge', 1, 'hmac-recovery', ?, ?, 'test-key', ?, ?)",
+      Buffer.from("ciphertext"), Buffer.from("nonce"), new Date("2026-10-18T00:15:00.000Z"), now
+    );
+    const store = newStore();
+    const transaction = await store.createOAuthTransaction({
+      transactionId: "oauth-recovery-transaction", ownerUserId: 1, bridgeSessionId: "oauth-recovery-bridge",
+      expiresAt: new Date("2026-10-18T00:05:00.000Z"), state: "PENDING", existingConnectionIds: [],
+    });
+    expect(await store.claimOAuthConfirmation(transaction.id, "connection-returned")).toBe(true);
+    expect(await store.claimOAuthConfirmation(transaction.id, "connection-returned")).toBe(false);
+    await expect(store.createOAuthTransaction({
+      transactionId: "oauth-recovery-transaction-2", ownerUserId: 1, bridgeSessionId: "oauth-recovery-bridge",
+      expiresAt: new Date("2026-10-18T00:05:00.000Z"), state: "PENDING", existingConnectionIds: [],
+    })).rejects.toThrow("MGW_OAUTH_ALREADY_PENDING");
+    await expect(store.getOAuthTransactionForBridge("oauth-recovery-transaction", "oauth-recovery-bridge", 1)).resolves.toMatchObject({
+      state: "CONFIRMING", recoveryConnectionId: "connection-returned",
+    });
+    await expect(store.findPendingOAuthForBridge("oauth-recovery-bridge")).resolves.toMatchObject({ state: "CONFIRMING" });
   });
 
   test("A-STATE-001-01 concurrent duplicate identity reservations keep one row", async () => {

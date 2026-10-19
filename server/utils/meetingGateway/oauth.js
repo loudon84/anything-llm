@@ -4,8 +4,29 @@ const CONTRACT_ERROR = "MGW_UPSTREAM_CONTRACT_ERROR";
 const START_REJECTED = "MGW_OAUTH_START_REJECTED";
 const CONFIRM_DENIED = "MGW_OAUTH_CONFIRM_DENIED";
 
+function buildAuthorizationConfig(env = process.env) {
+  const applicationId = env.MEETING_GATEWAY_OAUTH_APPLICATION_ID ?? "";
+  const expectedApplicationId = env.MEETING_GATEWAY_OAUTH_EXPECTED_APPLICATION_ID || applicationId;
+  const callbackRef = env.MEETING_GATEWAY_OAUTH_CALLBACK_REF || "";
+  const publicBaseUrl = env.MEETING_GATEWAY_PUBLIC_BASE_URL || "";
+  const consumerOrigin = env.MEETING_GATEWAY_ALLOWED_ORIGIN || "";
+  const corpId = env.MEETING_GATEWAY_TENCENT_CORP_ID || "";
+  const sdkId = env.MEETING_GATEWAY_TENCENT_SDK_ID || "";
+  if (!callbackRef || !publicBaseUrl || !consumerOrigin || !corpId || !sdkId || !expectedApplicationId ||
+      (applicationId && expectedApplicationId !== applicationId)) return null;
+  return {
+    applicationId,
+    expectedApplicationId,
+    callbackRef,
+    corpId,
+    sdkId,
+    callbackUri: publicBaseUrl.replace(/\/$/, "") + "/callbacks/tencent/oauth/" + encodeURIComponent(callbackRef),
+    returnTo: consumerOrigin.replace(/\/$/, "") + "/api/meeting-gateway/oauth/return",
+  };
+}
+
 function validateAuthorizationConfig(config) {
-  if (!config || ![config.corpId, config.sdkId, config.callbackUri, config.callbackRef].every((v) => typeof v === "string" && v.trim()) || typeof config.applicationId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(config.callbackRef)) throw new Error(CONTRACT_ERROR);
+  if (!config || ![config.corpId, config.sdkId, config.callbackUri, config.callbackRef, config.expectedApplicationId].every((v) => typeof v === "string" && v.trim()) || typeof config.applicationId !== "string" || (config.applicationId && config.applicationId !== config.expectedApplicationId) || !/^[A-Za-z0-9_-]{1,128}$/.test(config.callbackRef) || !/^[A-Za-z0-9_-]{1,128}$/.test(config.expectedApplicationId)) throw new Error(CONTRACT_ERROR);
   let callback;
   let consumerReturn;
   try {
@@ -62,19 +83,20 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
   function unknownWriteOutcome(error) {
     return error?.writeOutcome === "UNKNOWN" || error?.outcome === "UNKNOWN" || error?.retryPolicy === "RECOVERY";
   }
-  function recoveryRequired() {
+  function recoveryRequired(state = "PENDING") {
     const error = new Error("MGW_OAUTH_RECOVERY_REQUIRED");
     error.status = 202;
     error.retryPolicy = "RECOVERY";
+    error.state = state;
     return error;
   }
   function assertAvailable() {
     validateAuthorizationConfig(authorizationConfig);
-    if (!enabled || !authorizationConfig || !authorizationConfig.returnTo || !authorizationConfig.applicationId) throw new Error(CONTRACT_ERROR);
+    if (!enabled || !authorizationConfig || !authorizationConfig.returnTo || !authorizationConfig.expectedApplicationId) throw new Error(CONTRACT_ERROR);
     if (!gateway || !store || typeof gateway.startAuthorization !== "function" ||
         typeof gateway.listConnections !== "function" || typeof gateway.confirmConnection !== "function" ||
         typeof store.getBinding !== "function" || typeof store.findPendingOAuthForBridge !== "function" || typeof store.createOAuthTransaction !== "function" ||
-        typeof store.getOAuthTransactionForBridge !== "function" || typeof store.updateOAuthTransactionState !== "function" || typeof store.completeOAuthTransaction !== "function") {
+        typeof store.getOAuthTransactionForBridge !== "function" || typeof store.updateOAuthTransactionState !== "function" || typeof store.completeOAuthTransaction !== "function" || typeof store.claimOAuthConfirmation !== "function") {
       throw new Error(CONTRACT_ERROR);
     }
   }
@@ -95,7 +117,7 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
     if (pending.ownerUserId !== ctx.ownerUserId) throw new Error(conflictCode);
     const expiresAt = new Date(pending.expiresAt).getTime();
     if (!Number.isFinite(expiresAt)) throw new Error(CONTRACT_ERROR);
-    if (expiresAt <= nowDate().getTime()) {
+    if (pending.state === "PENDING" && expiresAt <= nowDate().getTime()) {
       await store.updateOAuthTransactionState(pending.id, "EXPIRED");
       return null;
     }
@@ -105,7 +127,7 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
     assertAvailable(); ctx = await validateContext(ctx);
     const connections = await gateway.listConnections({ gatewayAccessToken: ctx.gatewayAccessToken });
     if (!Array.isArray(connections)) throw new Error(CONTRACT_ERROR);
-    return connections.filter((connection) => connection && connection.memberId === ctx.gatewayMemberId && connection.type === "THIRD_PARTY_OAUTH");
+    return connections.filter((connection) => connection && connection.memberId === ctx.gatewayMemberId && connection.applicationId === authorizationConfig.expectedApplicationId && connection.type === "THIRD_PARTY_OAUTH");
   }
   async function start(ctx) {
     assertAvailable(); ctx = await validateContext(ctx);
@@ -115,7 +137,7 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
       if (await pendingFor(ctx)) throw new Error("MGW_OAUTH_ALREADY_PENDING");
       const existing = await gateway.listConnections({ gatewayAccessToken: ctx.gatewayAccessToken });
       if (!Array.isArray(existing)) throw new Error(CONTRACT_ERROR);
-      const ownedOAuthConnections = existing.filter((item) => item?.memberId === ctx.gatewayMemberId && item?.type === "THIRD_PARTY_OAUTH");
+      const ownedOAuthConnections = existing.filter((item) => item?.memberId === ctx.gatewayMemberId && item?.applicationId === authorizationConfig.expectedApplicationId && item?.type === "THIRD_PARTY_OAUTH");
       if (ownedOAuthConnections.length > 500 || ownedOAuthConnections.some((item) => typeof item.connectionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(item.connectionId))) throw new Error(START_REJECTED);
       const existingConnectionIds = [...new Set(ownedOAuthConnections.map((item) => item.connectionId))];
       const reservation = await store.createOAuthTransaction({
@@ -156,33 +178,37 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
     const pending = await pendingFor(ctx, CONFIRM_DENIED);
     if (!pending) throw new Error(CONFIRM_DENIED);
     const transaction = await store.getOAuthTransactionForBridge(pending.transactionId, ctx.bridgeSessionId, ctx.ownerUserId);
-    if (!transaction || transaction.state !== "PENDING" || new Date(transaction.expiresAt).getTime() <= nowDate().getTime()) throw new Error(CONFIRM_DENIED);
+    if (!transaction || !["PENDING", "CONFIRMING"].includes(transaction.state) || (transaction.state === "PENDING" && new Date(transaction.expiresAt).getTime() <= nowDate().getTime())) throw new Error(CONFIRM_DENIED);
     if (confirmingByTransaction.has(transaction.id)) throw new Error("MGW_OAUTH_CONFIRM_IN_PROGRESS");
     confirmingByTransaction.add(transaction.id);
     try {
       const connections = await gateway.listConnections({ gatewayAccessToken: ctx.gatewayAccessToken });
       const connection = Array.isArray(connections) && connections.find((item) => item?.connectionId === connectionId);
-      if (!connection || transaction.existingConnectionIds?.includes(connectionId) || connection.memberId !== ctx.gatewayMemberId || connection.type !== "THIRD_PARTY_OAUTH" || connection.status === "CORP_MISMATCH") throw new Error(CONFIRM_DENIED);
-      if (connection.status === "PENDING_CONFIRMATION") {
+      if (!connection || transaction.existingConnectionIds?.includes(connectionId) || connection.memberId !== ctx.gatewayMemberId || connection.applicationId !== authorizationConfig.expectedApplicationId || connection.type !== "THIRD_PARTY_OAUTH" || connection.status === "CORP_MISMATCH") throw new Error(CONFIRM_DENIED);
+      if (transaction.state === "CONFIRMING" && transaction.recoveryConnectionId !== connectionId) throw new Error(CONFIRM_DENIED);
+      if (transaction.state === "CONFIRMING" && connection.status !== "ACTIVE") throw recoveryRequired("RECOVERY_REQUIRED");
+      if (transaction.state === "PENDING" && connection.status === "PENDING_CONFIRMATION") {
+        const claimed = await store.claimOAuthConfirmation(transaction.id, connectionId);
+        if (!claimed) throw recoveryRequired("RECOVERY_REQUIRED");
         try {
           await gateway.confirmConnection({ gatewayAccessToken: ctx.gatewayAccessToken }, connectionId);
         } catch (error) {
-          if (unknownWriteOutcome(error)) throw recoveryRequired();
-          throw error;
+          if (unknownWriteOutcome(error)) throw recoveryRequired("RECOVERY_REQUIRED");
+          throw recoveryRequired("RECOVERY_REQUIRED");
         }
-      } else if (connection.status !== "ACTIVE") {
+      } else if (transaction.state === "PENDING" && connection.status !== "ACTIVE") {
         throw new Error(CONFIRM_DENIED);
       }
       const current = await gateway.listConnections({ gatewayAccessToken: ctx.gatewayAccessToken });
       const verified = Array.isArray(current) && current.find((item) => item?.connectionId === connectionId);
-      if (!verified || verified.memberId !== ctx.gatewayMemberId || verified.type !== "THIRD_PARTY_OAUTH" || verified.status !== "ACTIVE") throw new Error(CONFIRM_DENIED);
+      if (!verified || verified.memberId !== ctx.gatewayMemberId || verified.applicationId !== authorizationConfig.expectedApplicationId || verified.type !== "THIRD_PARTY_OAUTH" || verified.status !== "ACTIVE") throw transaction.state === "CONFIRMING" ? recoveryRequired("RECOVERY_REQUIRED") : new Error(CONFIRM_DENIED);
       await store.updateOAuthTransactionState(transaction.id, "CONFIRMED");
       return verified;
     } finally {
       confirmingByTransaction.delete(transaction.id);
     }
   }
-  return { contractConfirmed: enabled === true && Boolean(authorizationConfig?.returnTo && authorizationConfig?.callbackUri && authorizationConfig?.corpId && authorizationConfig?.sdkId), listConnections, start, confirm };
+  return { contractConfirmed: enabled === true && Boolean(authorizationConfig?.returnTo && authorizationConfig?.callbackUri && authorizationConfig?.corpId && authorizationConfig?.sdkId && authorizationConfig?.expectedApplicationId), listConnections, start, confirm };
 }
 
-module.exports = { createOAuthModule, validateAuthorizationUrl };
+module.exports = { buildAuthorizationConfig, createOAuthModule, validateAuthorizationUrl };

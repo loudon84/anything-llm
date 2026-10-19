@@ -835,6 +835,7 @@ model meeting_oauth_transactions {
   state             String                  @default("PENDING")
   created_at        DateTime                @default(now())
   existing_connection_ids String             @default("[]")
+  recovery_connection_id String?
   bridge_session    meeting_bridge_sessions @relation(fields: [bridge_session_id], references: [id], onDelete: Cascade)
 
   @@index([bridge_session_id, state])

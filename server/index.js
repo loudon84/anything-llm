@@ -62,7 +62,7 @@ const {
   createWeComAuthRuntime,
 } = require("./utils/meetingGateway/wecomAuthRuntime");
 const { createMeetingStore } = require("./models/meetingGateway");
-const { createOAuthModule } = require("./utils/meetingGateway/oauth");
+const { buildAuthorizationConfig, createOAuthModule } = require("./utils/meetingGateway/oauth");
 const { createWeComIdentityStore } = require("./models/wecomIdentity");
 const meetingGatewayOrigin = process.env.MEETING_GATEWAY_ORIGIN || "";
 const meetingGatewayScopes = (process.env.MEETING_GATEWAY_SCOPES || "meeting.read meeting.query").split(/\s+/).filter(Boolean);
@@ -121,21 +121,7 @@ const meetingSessions = meetingKeyring
       origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
     })
   : null;
-const meetingGatewayOauthApplicationId = process.env.MEETING_GATEWAY_OAUTH_APPLICATION_ID ?? "";
-const meetingGatewayOauthCallbackRef = process.env.MEETING_GATEWAY_OAUTH_CALLBACK_REF || "";
-const meetingGatewayPublicBaseUrl = process.env.MEETING_GATEWAY_PUBLIC_BASE_URL || "";
-const meetingGatewayConsumerOrigin = process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || "";
-const meetingGatewayOauthConfig = meetingGatewayOauthCallbackRef && meetingGatewayPublicBaseUrl && meetingGatewayConsumerOrigin &&
-  process.env.MEETING_GATEWAY_TENCENT_CORP_ID && process.env.MEETING_GATEWAY_TENCENT_SDK_ID
-  ? {
-      applicationId: meetingGatewayOauthApplicationId,
-      callbackRef: meetingGatewayOauthCallbackRef,
-      corpId: process.env.MEETING_GATEWAY_TENCENT_CORP_ID,
-      sdkId: process.env.MEETING_GATEWAY_TENCENT_SDK_ID,
-      callbackUri: meetingGatewayPublicBaseUrl.replace(/\/$/, "") + "/callbacks/tencent/oauth/" + encodeURIComponent(meetingGatewayOauthCallbackRef),
-      returnTo: meetingGatewayConsumerOrigin.replace(/\/$/, "") + "/api/meeting-gateway/oauth/return",
-    }
-  : null;
+const meetingGatewayOauthConfig = buildAuthorizationConfig(process.env);
 const meetingGatewayOauth = meetingGatewayAuthClient && meetingSessions && meetingGatewayOauthConfig
   ? createOAuthModule({
       gateway: meetingGatewayAuthClient,

@@ -163,7 +163,7 @@ function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = nu
       code === "MGW_OAUTH_START_REJECTED" ? 422 :
       code === "MGW_OAUTH_ALREADY_PENDING" || code === "MGW_OAUTH_TRANSACTION_INVALID" || code === "MGW_OAUTH_CONFIRM_IN_PROGRESS" ? 409 :
       code === "MGW_OAUTH_RECOVERY_REQUIRED" ? 202 : 503;
-    return response.status(status).json(code === "MGW_OAUTH_RECOVERY_REQUIRED" ? { error: code, state: "PENDING" } : { error: code });
+    return response.status(status).json(code === "MGW_OAUTH_RECOVERY_REQUIRED" ? { error: code, state: error?.state || "PENDING" } : { error: code });
   };
   apiRouter.get("/meeting-gateway/connections", [validatedRequest, meetingBridge({ sessions })], async (request, response) => {
     if (!oauthReady) return oauthUnavailable(request, response);

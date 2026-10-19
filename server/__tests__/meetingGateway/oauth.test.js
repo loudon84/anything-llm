@@ -2,12 +2,12 @@ jest.mock("../../utils/middleware/validatedRequest", () => ({ validatedRequest: 
 jest.mock("../../utils/middleware/meetingBridge", () => ({ meetingBridge: () => jest.fn(), readBridgeCookie: () => null }));
 jest.mock("../../utils/meetingGateway/sessions", () => ({ COOKIE_NAME: "__Host-meeting_bridge" }));
 jest.mock("../../utils/meetingGateway/workspacePolicy", () => ({ createWorkspacePolicy: () => ({}) }));
-const { createOAuthModule, validateAuthorizationUrl } = require("../../utils/meetingGateway/oauth");
+const { buildAuthorizationConfig, createOAuthModule, validateAuthorizationUrl } = require("../../utils/meetingGateway/oauth");
 const { meetingGatewayEndpoints } = require("../../endpoints/meetingGateway");
 
 const AUTH_URL = "https://meeting.tencent.com/marketplace/authorize.html?corp_id=corp-a&sdk_id=sdk-a&redirect_uri=https%3A%2F%2Fgateway.example%2Fcallbacks%2Ftencent%2Foauth%2Fapp-a&state=secret-state";
 const AUTH_PATH = "/marketplace/authorize.html";
-const OAUTH_CONFIG = { corpId: "corp-a", sdkId: "sdk-a", callbackUri: "https://gateway.example/callbacks/tencent/oauth/app-a", applicationId: "app-a", callbackRef: "app-a", returnTo: "https://consumer.example/api/meeting-gateway/oauth/return" };
+const OAUTH_CONFIG = { corpId: "corp-a", sdkId: "sdk-a", callbackUri: "https://gateway.example/callbacks/tencent/oauth/app-a", applicationId: "app-a", expectedApplicationId: "app-a", callbackRef: "app-a", returnTo: "https://consumer.example/api/meeting-gateway/oauth/return" };
 
 function fixture() {
   const rows = [];
@@ -18,7 +18,7 @@ function fixture() {
   const store = {
     async getBinding() { return { status: "BOUND", gateway_member_id: "member-a" }; },
     async findPendingOAuthForBridge(bridgeSessionId) {
-      return rows.find((row) => row.bridgeSessionId === bridgeSessionId && row.state === "PENDING") || null;
+      return rows.find((row) => row.bridgeSessionId === bridgeSessionId && ["PENDING", "CONFIRMING"].includes(row.state)) || null;
     },
     async createOAuthTransaction(row) {
       if (rows.some((candidate) => candidate.bridgeSessionId === row.bridgeSessionId && candidate.state === "PENDING"))
@@ -37,15 +37,22 @@ function fixture() {
     },
     async updateOAuthTransactionState(id, state) {
       const row = rows.find((candidate) => candidate.id === id);
-      if (!row || row.state !== "PENDING") throw new Error("MGW_OAUTH_TRANSACTION_INVALID");
+      if (!row || !["PENDING", "CONFIRMING"].includes(row.state)) throw new Error("MGW_OAUTH_TRANSACTION_INVALID");
       row.state = state;
       return row;
+    },
+    async claimOAuthConfirmation(id, connectionId) {
+      const row = rows.find((candidate) => candidate.id === id);
+      if (!row || row.state !== "PENDING") return false;
+      row.state = "CONFIRMING";
+      row.recoveryConnectionId = connectionId;
+      return true;
     },
   };
   const gateway = {
     async startAuthorization() {
       calls.push("start");
-      currentConnections.push({ connectionId: "connection-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", status: connectionStatus });
+      currentConnections.push({ connectionId: "connection-a", memberId: "member-a", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: connectionStatus });
       return { authorizationUrl: AUTH_URL, transactionId: "gateway-transaction", expiresAt: "2026-10-18T00:05:00.000Z" };
     },
     async listConnections() {
@@ -92,21 +99,43 @@ describe("Meeting Gateway OAuth safety seams", () => {
     expect(validateAuthorizationUrl(envUrl, { allowedPaths: [AUTH_PATH], config: envConfig })).toBe(envUrl);
     expect(() => validateAuthorizationUrl(envUrl.replace("oauth%2Fsdk-a", `oauth%2F${appUuid}`), { allowedPaths: [AUTH_PATH], config: envConfig })).toThrow("MGW_OAUTH_START_REJECTED");
 
-    const explicitConfig = { ...OAUTH_CONFIG, applicationId: appUuid, callbackRef: appUuid, callbackUri: `https://gateway.example/callbacks/tencent/oauth/${appUuid}` };
+    const explicitConfig = { ...OAUTH_CONFIG, applicationId: appUuid, expectedApplicationId: appUuid, callbackRef: appUuid, callbackUri: `https://gateway.example/callbacks/tencent/oauth/${appUuid}` };
     const explicitUrl = AUTH_URL.replace("oauth%2Fapp-a", `oauth%2F${appUuid}`);
     expect(validateAuthorizationUrl(explicitUrl, { allowedPaths: [AUTH_PATH], config: explicitConfig })).toBe(explicitUrl);
     expect(() => validateAuthorizationUrl(envUrl, { allowedPaths: [AUTH_PATH], config: explicitConfig })).toThrow("MGW_OAUTH_START_REJECTED");
+  });
+  test("starts the actual ENV-owned runtime only when a trusted expected application UUID is pinned", async () => {
+    const env = {
+      MEETING_GATEWAY_OAUTH_APPLICATION_ID: "", MEETING_GATEWAY_OAUTH_EXPECTED_APPLICATION_ID: "env-app-uuid",
+      MEETING_GATEWAY_OAUTH_CALLBACK_REF: "sdk-a", MEETING_GATEWAY_PUBLIC_BASE_URL: "https://gateway.example",
+      MEETING_GATEWAY_ALLOWED_ORIGIN: "https://consumer.example", MEETING_GATEWAY_TENCENT_CORP_ID: "corp-a", MEETING_GATEWAY_TENCENT_SDK_ID: "sdk-a",
+    };
+    const config = buildAuthorizationConfig(env);
+    expect(config).toMatchObject({ applicationId: "", expectedApplicationId: "env-app-uuid", callbackRef: "sdk-a" });
+    const { oauth, calls, gateway, store } = fixture();
+    const envOauth = createOAuthModule({
+      gateway: { ...gateway, async startAuthorization(args) { calls.push(args.applicationId); return { authorizationUrl: AUTH_URL.replace("oauth%2Fapp-a", "oauth%2Fsdk-a"), transactionId: "gateway-transaction", expiresAt: "2026-10-18T00:05:00.000Z" }; } },
+      store, clock: () => new Date("2026-10-18T00:00:00.000Z"), enabled: true,
+      allowedAuthorizationPaths: [AUTH_PATH], authorizationConfig: config,
+    });
+    await expect(envOauth.start(ctx)).resolves.toMatchObject({ authorizationUrl: expect.stringContaining("oauth%2Fsdk-a") });
+    expect(calls).toContain("");
+    expect(buildAuthorizationConfig({ ...env, MEETING_GATEWAY_OAUTH_EXPECTED_APPLICATION_ID: "" })).toBeNull();
+    const explicitConfig = buildAuthorizationConfig({ ...env, MEETING_GATEWAY_OAUTH_APPLICATION_ID: "explicit-app", MEETING_GATEWAY_OAUTH_EXPECTED_APPLICATION_ID: "" });
+    expect(explicitConfig).toMatchObject({ applicationId: "explicit-app", expectedApplicationId: "explicit-app" });
+    expect(buildAuthorizationConfig({ ...env, MEETING_GATEWAY_OAUTH_APPLICATION_ID: "explicit-app", MEETING_GATEWAY_OAUTH_EXPECTED_APPLICATION_ID: "different-app" })).toBeNull();
   });
 
   test("lists only this member's third-party OAuth connections", async () => {
     const { oauth, gateway } = fixture();
     gateway.listConnections = async () => [
-      { connectionId: "mine", name: "Mine", memberId: "member-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
-      { connectionId: "other-member", name: "Other", memberId: "member-b", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
-      { connectionId: "password", name: "Password", memberId: "member-a", type: "PASSWORD", status: "ACTIVE" },
+      { connectionId: "mine", name: "Mine", memberId: "member-a", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
+      { connectionId: "other-member", name: "Other", memberId: "member-b", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
+      { connectionId: "other-app", name: "Other app", memberId: "member-a", applicationId: "app-b", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
+      { connectionId: "password", name: "Password", memberId: "member-a", applicationId: "app-a", type: "PASSWORD", status: "ACTIVE" },
     ];
     await expect(oauth.listConnections(ctx)).resolves.toEqual([
-      { connectionId: "mine", name: "Mine", memberId: "member-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
+      { connectionId: "mine", name: "Mine", memberId: "member-a", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" },
     ]);
   });  test("caps authorization expiry at the bridge deadline", async () => {
     const { oauth, gateway } = fixture();
@@ -162,13 +191,23 @@ describe("Meeting Gateway OAuth safety seams", () => {
     await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
     expect(calls).toEqual(["list", "start", "list"]);
   });
+  test("rejects a same-member OAuth connection owned by another Gateway application", async () => {
+    const { oauth, gateway } = fixture();
+    await oauth.start(ctx);
+    gateway.listConnections = async () => [{ connectionId: "connection-a", memberId: "member-a", applicationId: "app-b", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" }];
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
+  });
 
   test("keeps the pending reservation when confirmation POST outcome is unknown", async () => {
-    const { oauth, gateway, rows } = fixture();
+    const { oauth, gateway, rows, calls, store } = fixture();
     await oauth.start(ctx);
-    gateway.confirmConnection = async () => { throw Object.assign(new Error("MGW_UPSTREAM_UNAVAILABLE"), { writeOutcome: "UNKNOWN" }); };
-    await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_RECOVERY_REQUIRED");
-    expect(rows[0].state).toBe("PENDING");
+    gateway.confirmConnection = async () => { calls.push("confirm"); throw Object.assign(new Error("MGW_UPSTREAM_UNAVAILABLE"), { writeOutcome: "UNKNOWN" }); };
+    const restartedOAuth = createOAuthModule({ gateway, store, clock: () => new Date("2026-10-18T00:00:00.000Z"), allowedAuthorizationPaths: [AUTH_PATH], authorizationConfig: OAUTH_CONFIG, enabled: true });
+    await expect(restartedOAuth.confirm(ctx, "connection-a")).rejects.toMatchObject({ message: "MGW_OAUTH_RECOVERY_REQUIRED", status: 202, state: "RECOVERY_REQUIRED" });
+    expect(rows[0]).toMatchObject({ state: "CONFIRMING", recoveryConnectionId: "connection-a" });
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toMatchObject({ message: "MGW_OAUTH_RECOVERY_REQUIRED", status: 202, state: "RECOVERY_REQUIRED" });
+    expect(rows[0].state).toBe("CONFIRMING");
+    expect(calls.filter((call) => call === "confirm")).toHaveLength(1);
   });
   test("does not send duplicate confirmation POSTs while one is in flight", async () => {
     const { oauth, gateway, calls } = fixture();
@@ -188,7 +227,7 @@ describe("Meeting Gateway OAuth safety seams", () => {
     const confirmCallsBeforeRelease = calls.filter((call) => call === "confirm").length;
     gateway.listConnections = async () => {
       calls.push("list");
-      return [{ connectionId: "connection-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" }];
+      return [{ connectionId: "connection-a", memberId: "member-a", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: "ACTIVE" }];
     };
     releases.forEach((release) => release());
     const results = await Promise.all([first, second]);

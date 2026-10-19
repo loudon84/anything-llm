@@ -263,8 +263,8 @@ function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = g
     const data = await authorizationData({ token: gatewayAccessToken, path: "/api/v1/me/connections" });
     if (!Array.isArray(data.items)) throw contractError();
     return data.items.map((item) => {
-      if (!item || typeof item.id !== "string" || typeof item.name !== "string" || typeof item.kind !== "string" || typeof item.status !== "string" || typeof item.owner_member_id !== "string") throw contractError();
-      return { connectionId: item.id, name: item.name, memberId: item.owner_member_id, type: item.kind, status: item.status };
+      if (!item || typeof item.id !== "string" || typeof item.application_id !== "string" || typeof item.name !== "string" || typeof item.kind !== "string" || typeof item.status !== "string" || typeof item.owner_member_id !== "string") throw contractError();
+      return { connectionId: item.id, applicationId: item.application_id, name: item.name, memberId: item.owner_member_id, type: item.kind, status: item.status };
     });
   }
   async function confirmConnection({ gatewayAccessToken } = {}, connectionId) {

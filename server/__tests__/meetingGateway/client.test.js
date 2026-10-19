@@ -31,7 +31,7 @@ describe("Meeting Gateway client boundaries", () => {
     await expect(client.startAuthorization({ gatewayAccessToken: "mt_employee", applicationId: "app-a", returnTo: "https://consumer.example/return" }))
       .resolves.toEqual({ authorizationUrl: "https://meeting.tencent.com/marketplace/authorize.html", transactionId: "tx-a", expiresAt: "2026-10-20T00:05:00Z" });
     await expect(client.listConnections({ gatewayAccessToken: "mt_employee" })).resolves.toEqual([
-      { connectionId: "conn-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", name: "Tencent", status: "PENDING_CONFIRMATION" },
+      { connectionId: "conn-a", applicationId: "app-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", name: "Tencent", status: "PENDING_CONFIRMATION" },
     ]);
     await client.confirmConnection({ gatewayAccessToken: "mt_employee" }, "conn-a");
     expect(fetchImpl.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
