@@ -40,9 +40,7 @@ function evaluatePhaseGate({ phase, evidence } = {}) {
     })) };
   }
 
-  const trustAnchor = process.env.MGW_GATE_TRUSTED_EVIDENCE_SHA256;
   const actualDigest = evidenceDigest(evidence);
-  const anchored = /^[a-f0-9]{64}$/i.test(trustAnchor || '') && actualDigest === trustAnchor.toLowerCase();
   const rootIdentities = evidence.identities;
   const identityShapeValid = isRecord(rootIdentities)
     && ['source', 'config', 'build', 'spec'].every((key) => typeof rootIdentities[key] === 'string' && rootIdentities[key].length > 0)
@@ -67,6 +65,10 @@ function evaluatePhaseGate({ phase, evidence } = {}) {
         || a.profileMatchesSubject !== true || a.profileActive !== true
         || a.projectionPersisted !== true || a.localSessionIssued !== true) {
         status = 'BLOCKED'; reason = 'REAL_GATEWAY_AUTH_EVIDENCE_REQUIRED';
+      } else {
+        // No trusted evidence provenance verifier exists in this repository. Caller-supplied
+        // fields and hashes cannot prove that a real WeCom login/profile was observed.
+        status = 'BLOCKED'; reason = 'REAL_AUTH_PROVENANCE_TRUST_UNAVAILABLE';
       }
     }
     if (status === 'PASS' && caseId === 'PHASE-LOCAL-02') {
@@ -83,9 +85,6 @@ function evaluatePhaseGate({ phase, evidence } = {}) {
       if (!isRecord(item.assertions) || item.assertions.deferredImportDisposition !== 'DEFERRED_CURRENT_PHASE') {
         status = 'FAIL'; reason = 'DEFERRED_IMPORT_SCOPE_MISREPRESENTED';
       }
-    }
-    if (status === 'PASS' && !anchored) {
-      status = 'BLOCKED'; reason = 'TRUSTED_EVIDENCE_ANCHOR_MISSING_OR_MISMATCHED';
     }
     return { caseId, status, ...(reason ? { reason } : {}) };
   });

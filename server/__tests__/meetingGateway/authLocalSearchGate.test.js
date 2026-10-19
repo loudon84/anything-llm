@@ -83,7 +83,7 @@ describe('AUTH_LOCAL_SEARCH evidence gate', () => {
     }
   });
 
-  test('real phase evidence passes only when an independent trust anchor matches the full evidence package', () => {
+  test('caller-created JSON and its self-computed digest cannot establish real evidence provenance', () => {
     const prior = process.env.MGW_GATE_TRUSTED_EVIDENCE_SHA256;
     const evidence = makeEvidence();
     evidence.cases[0] = {
@@ -101,9 +101,11 @@ describe('AUTH_LOCAL_SEARCH evidence gate', () => {
     };
     process.env.MGW_GATE_TRUSTED_EVIDENCE_SHA256 = evidenceDigest(evidence);
     try {
-      expect(evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence }).status).toBe('PASS');
-      evidence.cases[0].assertions.profileActive = false;
-      expect(evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence }).status).not.toBe('PASS');
+      const result = evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence });
+      expect(result.caseResults.find((item) => item.caseId === 'PHASE-AUTH-01')).toMatchObject({
+        status: 'BLOCKED', reason: 'REAL_AUTH_PROVENANCE_TRUST_UNAVAILABLE',
+      });
+      expect(result.status).not.toBe('PASS');
     } finally {
       if (prior === undefined) delete process.env.MGW_GATE_TRUSTED_EVIDENCE_SHA256;
       else process.env.MGW_GATE_TRUSTED_EVIDENCE_SHA256 = prior;
