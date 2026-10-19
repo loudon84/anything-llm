@@ -111,7 +111,7 @@ evaluatePhaseGate({ phase, evidence }); // -> { status, reason, caseResults }
 
 **Interfaces:** consumes signed-off deployment contract or explicit absent contract; produces createWeComGatewayClient interface above. No production path fallback.
 
-- [ ] **Step 1: Write failing dependency/profile tests.**
+- [x] **Step 1: Write failing dependency/profile tests.**
 
 ```js
 expect(createWeComGatewayClient({ contract: null }).getAvailability())
@@ -123,17 +123,17 @@ await expect(client.fetchAuthenticatedProfile({ identitySession: sessionForA }))
 // malicious authorization origin, missing required field, unknown contract revision.
 ```
 
-- [ ] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomClient.test.js`; confirm failing behavior before implementation.
-- [ ] **Step 3: Implement bounded normalized adapter.** Contract must pin origin, immutable version/schema digest, start/redeem/profile operation methods+paths+authentication+response mapping and exact allowed authorization/callback URLs. Read only the deployment's public contract to establish these. Actual provider wire unavailable: implement validation/availability and test-injected port, leave live adapter unavailable; do not make up an existing endpoint. Production requests never use a browser-selected URL, never log token/profile raw bodies, never retry uncertain redeem, and never follow redirects to another origin. Reuse existing HTTP timeout/error conventions.
-- [ ] **Step 4:** Run the test above and existing `server/__tests__/meetingGateway/client.test.js`; document source-vs-live capability facts and fixture-vs-real evidence separately.
-- [ ] **Step 5:** Stage only Task1 files and commit `feat: add contract-gated gateway wecom consumer adapter`; report exact commands/counts and external blockers. Review before T2.
+- [x] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomClient.test.js`; confirm failing behavior before implementation.
+- [x] **Step 3: Implement bounded normalized adapter.** Contract must pin origin, immutable version/schema digest, start/redeem/profile operation methods+paths+authentication+response mapping and exact allowed authorization/callback URLs. Read only the deployment's public contract to establish these. Actual provider wire unavailable: implement validation/availability and test-injected port, leave live adapter unavailable; do not make up an existing endpoint. Production requests never use a browser-selected URL, never log token/profile raw bodies, never retry uncertain redeem, and never follow redirects to another origin. Reuse existing HTTP timeout/error conventions.
+- [x] **Step 4:** Run the test above and existing `server/__tests__/meetingGateway/client.test.js`; document source-vs-live capability facts and fixture-vs-real evidence separately.
+- [x] **Step 5:** Stage only Task1 files and commit `feat: add contract-gated gateway wecom consumer adapter`; report exact commands/counts and external blockers. Review before T2.
 
 ### Task 2: Passwordless用户投影、可撤销本地session与事务存储
 
 **Requirement/Acceptance:** IDENT-002、AUTH、REVOKE；PHASE-AUTH-01 first/repeat/invalid-user cases.
 
 **Files:**
-- Modify `server/prisma/schema.prisma`, `server/models/user.js`, existing password-login branch in `server/endpoints/system.js`.
+- Modify `server/prisma/schema.prisma`, `server/models/user.js`, existing password-login branch in `server/endpoints/system.js`; adapt `server/models/meetingGateway.js` only for legacy query compatibility when its old compound unique key changes.
 - Create migration `server/prisma/migrations/20261019000100_gateway_auth_local_search/migration.sql`.
 - Create `server/models/wecomIdentity.js`, `server/__tests__/meetingGateway/wecomIdentity.test.js`.
 - Extend `server/__tests__/models/user.test.js` with nullable-password rejection regression where appropriate.
@@ -152,7 +152,7 @@ expect(await prisma.users.count()).toBe(1);
 ```
 
 - [ ] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomIdentity.test.js server/__tests__/models/user.test.js`; confirm new tests red before implementation.
-- [ ] **Step 3: Add schema/migration and implement transaction.** Make `users.password` nullable; guard existing password-auth entry points against null rather than hashing a placeholder. Extend R1 `meeting_gateway_bindings` with nullable legacy `gateway_instance_id`, profile fields and stable triple unique constraint; do not create a competing identity binding table. Legacy instance=null rows retain data and are not automatically adopted. Add `meeting_login_sessions` and short-lived `meeting_sso_transactions` with epoch, TTL, encrypted verifier/ticket storage, consumption CAS, remoteAccessMode and token/proof hashes. An internal deterministic login handle may use `mgw_`+SHA256(stable tuple) prefix; it must not be a user-match criterion. Persist displayName separately or as validated binding profile projection. No username/email merge and no automatic admin.
+- [ ] **Step 3: Add schema/migration and implement transaction.** Make `users.password` nullable; guard existing password-auth entry points against null rather than hashing a placeholder. Extend R1 `meeting_gateway_bindings` with nullable legacy `gateway_instance_id`, profile fields and stable triple unique constraint; do not create a competing identity binding table. Legacy instance=null rows retain data and are not automatically adopted. Existing R1 lookups must remain correctly scoped for legacy rows after any compound-unique change; never use an unqualified org/member lookup to select a different instance projection. Lazy store creation must not break unrelated module imports with mocked Prisma. Add `meeting_login_sessions` and short-lived `meeting_sso_transactions` with epoch, TTL, encrypted verifier/ticket storage, consumption CAS, remoteAccessMode and token/proof hashes. An internal deterministic login handle may use `mgw_`+SHA256(stable tuple) prefix; it must not be a user-match criterion. Persist displayName separately or as validated binding profile projection. No username/email merge and no automatic admin.
 
 ```js
 // The transaction owns the unique stable tuple and its local integer user ID.
@@ -162,7 +162,7 @@ expect(await prisma.users.count()).toBe(1);
 // mode begins GATEWAY_ENABLED only after verified profile; failed sync publishes none.
 ```
 
-- [ ] **Step 4:** Validate schema using `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma`; apply migration tests only to temporary isolatedDB. Never run migrate/reset on existing app/storage DB during this task. Run relevant user/projection suites.
+- [ ] **Step 4:** Validate schema using `server/node_modules/.bin/prisma.cmd validate --schema server/prisma/schema.prisma`; apply migration tests only to temporary isolatedDB. Never run migrate/reset on existing app/storage DB during this task. Dependency node_modules can be a junction into E-drive; generate isolated test clients to a temporary directory if new schema integration tests need them, and do not overwrite another checkout's generated Prisma client merely to run fixture tests. Run relevant user/projection suites.
 - [ ] **Step 5:** Commit only Task2 changes as `feat: persist gateway user projections and local auth sessions`; include migration compatibility and failure evidence; review before T3.
 
 ### Task 3: 企业微信BFF、会话认证与LOCAL_ONLY状态转换
