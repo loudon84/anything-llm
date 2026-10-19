@@ -44,6 +44,18 @@ describe("username validation restrictions", () => {
     );
   });
 
+  it("rejects a passwordless projected user from password authentication", () => {
+    expect(User.passwordMatches("any-password", null)).toBe(false);
+    expect(User.passwordMatches("any-password", undefined)).toBe(false);
+  });
+
+  it("continues to verify existing password hashes", () => {
+    const bcrypt = require("bcryptjs");
+    const hash = bcrypt.hashSync("valid-password", 4);
+    expect(User.passwordMatches("valid-password", hash)).toBe(true);
+    expect(User.passwordMatches("wrong-password", hash)).toBe(false);
+  });
+
   it("should throw an error if the username is not a string", () => {
     expect(() => User.validations.username(123)).toThrow(failureMessages[2]);
     expect(() => User.validations.username(null)).not.toThrow();

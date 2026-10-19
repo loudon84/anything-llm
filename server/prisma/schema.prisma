@@ -61,7 +61,7 @@ model system_settings {
 model users {
   id                           Int                           @id @default(autoincrement())
   username                     String?                       @unique
-  password                     String
+  password                     String?
   pfpFilename                  String?
   role                         String                        @default("default")
   suspended                    Int                           @default(0)
@@ -88,6 +88,7 @@ model users {
   workspace_parsed_files       workspace_parsed_files[]
   memories                     memories[]
   meeting_gateway_bindings     meeting_gateway_bindings[]
+  meeting_login_sessions       meeting_login_sessions[]
   meeting_bridge_sessions      meeting_bridge_sessions[]
   meeting_query_runs           meeting_query_runs[]
   meeting_imports              meeting_imports[]
@@ -632,18 +633,68 @@ model meeting_answers {
 model meeting_gateway_bindings {
   id                 String   @id @default(uuid())
   anything_user_id   Int      @unique
+  gateway_instance_id String?
   gateway_org_id     String
   gateway_member_id  String
   gateway_user_id    String
   identity_issuer    String   @default("account-login-v1")
+  display_name       String?
+  gateway_active     Boolean?
+  credential_epoch   Int      @default(1)
   status             String   @default("BOUND")
   verified_at        DateTime
   created_at         DateTime @default(now())
   updated_at         DateTime @updatedAt
   user               users    @relation(fields: [anything_user_id], references: [id], onDelete: Cascade)
+  local_sessions     meeting_login_sessions[]
 
   @@unique([anything_user_id, gateway_org_id])
-  @@unique([gateway_org_id, gateway_member_id])
+  @@unique([gateway_instance_id, gateway_org_id, gateway_member_id])
+}
+
+model meeting_login_sessions {
+  id                   String    @id
+  user_id              Int
+  binding_id           String
+  credential_epoch     Int       @default(1)
+  token_hash           String?
+  browser_proof_hash   String?
+  identity_expires_at  DateTime
+  expires_at           DateTime
+  remote_access_mode   String    @default("GATEWAY_ENABLED")
+  local_only_reason    String?
+  auth_method          String
+  created_at           DateTime  @default(now())
+  revoked_at           DateTime?
+  user                 users     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  binding              meeting_gateway_bindings @relation(fields: [binding_id], references: [id], onDelete: Cascade)
+  sso_transactions     meeting_sso_transactions[]
+
+  @@index([user_id, revoked_at, expires_at])
+  @@index([binding_id, credential_epoch])
+}
+
+model meeting_sso_transactions {
+  id                         String    @id
+  transaction_id             String    @unique
+  local_session_id           String?
+  client_state_hash          String
+  browser_proof_hash         String
+  verifier_ciphertext        Bytes
+  verifier_nonce             Bytes
+  ticket_ciphertext          Bytes?
+  ticket_nonce               Bytes?
+  crypto_key_id              String
+  expires_at                 DateTime
+  state                      String    @default("PENDING")
+  remote_access_mode         String    @default("GATEWAY_ENABLED")
+  local_only_reason          String?
+  created_at                 DateTime  @default(now())
+  consumed_at                DateTime?
+  local_session              meeting_login_sessions? @relation(fields: [local_session_id], references: [id], onDelete: SetNull)
+
+  @@index([state, expires_at])
+  @@index([local_session_id])
 }
 
 model meeting_bridge_sessions {

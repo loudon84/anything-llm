@@ -324,14 +324,16 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
     await prisma.$transaction(async (tx) => {
       const binding = row.binding;
       if (!binding) throw new Error('MGW_IDENTITY_INVALID');
-      const existingBinding = (await tx.$queryRawUnsafe("SELECT gateway_org_id, gateway_member_id, gateway_user_id, status FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1", binding.anything_user_id))[0];
+      const existingBinding = (await tx.$queryRawUnsafe("SELECT gateway_instance_id, gateway_org_id, gateway_member_id, gateway_user_id, status FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1", binding.anything_user_id))[0];
+      if (existingBinding && existingBinding.gateway_instance_id !== null) throw new Error("MGW_IDENTITY_BINDING_CONFLICT");
       if (existingBinding && existingBinding.status === "BOUND" && (existingBinding.gateway_org_id !== binding.gateway_org_id || existingBinding.gateway_member_id !== binding.gateway_member_id || existingBinding.gateway_user_id !== binding.gateway_user_id)) throw new Error("MGW_IDENTITY_BINDING_CONFLICT");
       await tx.$executeRawUnsafe(
         `INSERT INTO meeting_gateway_bindings (
-          id, anything_user_id, gateway_org_id, gateway_member_id, gateway_user_id,
+          id, anything_user_id, gateway_instance_id, gateway_org_id, gateway_member_id, gateway_user_id,
           identity_issuer, status, verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
         ON CONFLICT(anything_user_id) DO UPDATE SET
+          gateway_instance_id = NULL,
           gateway_org_id = excluded.gateway_org_id, gateway_member_id = excluded.gateway_member_id,
           gateway_user_id = excluded.gateway_user_id, identity_issuer = excluded.identity_issuer,
           status = 'BOUND', verified_at = excluded.verified_at, updated_at = excluded.updated_at`,
@@ -369,18 +371,21 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
     await prisma.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND revoked_at IS NULL', revokedAt, userId);
   }
   async function getBinding(userId) {
-    const rows = await prisma.$queryRawUnsafe('SELECT * FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1', userId);
+    const rows = await prisma.$queryRawUnsafe('SELECT * FROM meeting_gateway_bindings WHERE anything_user_id = ? AND gateway_instance_id IS NULL LIMIT 1', userId);
     return rows[0] || null;
   }
   async function saveBinding(binding) {
     const timestamp = now();
     const id = randomUUID();
+    const current = (await prisma.$queryRawUnsafe('SELECT gateway_instance_id FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1', binding.anything_user_id))[0];
+    if (current && current.gateway_instance_id !== null) throw new Error('MGW_IDENTITY_BINDING_CONFLICT');
     await prisma.$executeRawUnsafe(
       `INSERT INTO meeting_gateway_bindings (
-        id, anything_user_id, gateway_org_id, gateway_member_id, gateway_user_id,
+        id, anything_user_id, gateway_instance_id, gateway_org_id, gateway_member_id, gateway_user_id,
         identity_issuer, status, verified_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
       ON CONFLICT(anything_user_id) DO UPDATE SET
+        gateway_instance_id = NULL,
         gateway_org_id = excluded.gateway_org_id, gateway_member_id = excluded.gateway_member_id,
         gateway_user_id = excluded.gateway_user_id, identity_issuer = excluded.identity_issuer,
         status = 'BOUND', verified_at = excluded.verified_at, updated_at = excluded.updated_at`,
@@ -392,7 +397,7 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
   async function revokeBinding(userId, revokedAt = now()) {
     return prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND revoked_at IS NULL', revokedAt, userId);
-      await tx.$executeRawUnsafe("UPDATE meeting_gateway_bindings SET status = 'REVOKED', updated_at = ? WHERE anything_user_id = ?", revokedAt, userId);
+      await tx.$executeRawUnsafe("UPDATE meeting_gateway_bindings SET status = 'REVOKED', updated_at = ? WHERE anything_user_id = ? AND gateway_instance_id IS NULL", revokedAt, userId);
       await tx.$executeRawUnsafe("UPDATE meeting_restricted_workspaces SET state = 'FROZEN', updated_at = ? WHERE owner_user_id = ? AND state = 'ACTIVE'", revokedAt, userId);
     });
   }

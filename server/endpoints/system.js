@@ -235,7 +235,7 @@ function systemEndpoints(app) {
           return;
         }
 
-        if (!bcrypt.compareSync(String(password), existingUser.password)) {
+        if (!User.passwordMatches(password, existingUser.password)) {
           await EventLogs.logEvent(
             "failed_login_invalid_password",
             {

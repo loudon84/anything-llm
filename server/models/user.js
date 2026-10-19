@@ -368,6 +368,12 @@ const User = {
     return { checkedOK: true, error: "No error." };
   },
 
+  passwordMatches: function (passwordInput, storedHash) {
+    if (typeof storedHash !== "string" || storedHash.length === 0) return false;
+    const bcrypt = require("bcryptjs");
+    return bcrypt.compareSync(String(passwordInput), storedHash);
+  },
+
   /**
    * Check if a user can send a chat based on their daily message limit.
    * This limit is system wide and not per workspace and only applies to
