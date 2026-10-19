@@ -137,6 +137,23 @@ describe("WeCom Gateway consumer contract", () => {
     expect(calls[0].headers.authorization).toBe("Bearer private-session-token");
   });
 
+  test("pins URL, auth mode, and header behavior after caller mutates the contract", async () => {
+    const suppliedContract = contract();
+    const request = jest.fn(async () => ({ status: 200, body: gatewayProfile() }));
+    const client = createWeComGatewayClient({ contract: suppliedContract, transport: { request }, clock: () => NOW });
+
+    suppliedContract.operations.profile.path = "//attacker.example/collect";
+    suppliedContract.operations.profile.authentication = "none";
+    suppliedContract.operations.profile.headers = { authorization: "Bearer attacker-canary" };
+
+    await expect(client.fetchAuthenticatedProfile({ identitySession: identitySession() }))
+      .resolves.toMatchObject({ gatewayInstanceId: "instance-A", orgId: "org-A", memberId: "member-A" });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][0].url).toBe(`${ORIGIN}/fixture/profile`);
+    expect(request.mock.calls[0][0].headers.authorization).toBe("Bearer private-session-token");
+    expect(JSON.stringify(request.mock.calls[0][0].headers)).not.toContain("attacker-canary");
+  });
+
   test.each([
     ["organization", { org_id: "org-B" }, {}],
     ["member", { member_id: "member-B" }, {}],

@@ -47,6 +47,12 @@ function contractDigest(contract) {
   return "sha256:" + crypto.createHash("sha256").update(canonicalJson(schema)).digest("hex");
 }
 
+function freezeSnapshot(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) freezeSnapshot(nested);
+  return Object.freeze(value);
+}
+
 function normalizeContract(contract) {
   if (!contract || typeof contract !== "object" || contract.status !== "SIGNED_OFF" || contract.contractVersion !== 1 ||
       !validOpaqueString(contract.revision) || /(?:latest|mutable)/i.test(contract.revision) ||
@@ -123,7 +129,30 @@ function normalizeContract(contract) {
   const sessionMapping = operations.identitySessionResponse;
   if (!["accessToken", "orgId", "memberId", "userId", "issuer", "identityExpiresAt"].every((field) => validOpaqueString(sessionMapping[field])) ||
       Object.keys(sessionMapping).some((field) => !["accessToken", "orgId", "memberId", "userId", "issuer", "identityExpiresAt"].includes(field))) return null;
-  return { ...contract, origin: trustedOrigin, allowedAuthorizationUrls, allowedCallbackUrls };
+  const copyOperation = (name) => ({
+    method: operations[name].method,
+    path: operations[name].path,
+    authentication: operations[name].authentication,
+    ...(operations[name].request ? { request: { ...operations[name].request } } : {}),
+    response: { ...operations[name].response },
+  });
+  return freezeSnapshot({
+    status: contract.status,
+    contractVersion: contract.contractVersion,
+    revision: contract.revision,
+    schemaDigest: contract.schemaDigest,
+    origin: trustedOrigin,
+    gatewayInstanceId: contract.gatewayInstanceId,
+    authorizationUrlParameters: { ...contract.authorizationUrlParameters },
+    allowedAuthorizationUrls,
+    allowedCallbackUrls,
+    operations: {
+      start: copyOperation("start"),
+      redeem: copyOperation("redeem"),
+      profile: copyOperation("profile"),
+      identitySessionResponse: { ...operations.identitySessionResponse },
+    },
+  });
 }
 
 function valueAtPath(object, path) {
