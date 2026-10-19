@@ -3,6 +3,7 @@ const express = require("express");
 const { createServer } = require("node:http");
 const { COOKIE_NAME, SESSION_COOKIE_NAME, createWeComAuthService } = require("../../utils/meetingGateway/wecomAuth");
 const { createWeComAuthEndpoints } = require("../../endpoints/wecomAuth");
+const { createWeComAuthRuntime } = require("../../utils/meetingGateway/wecomAuthRuntime");
 
 const ORIGIN = "https://copilot.superic.com:9999";
 const KEYRING = { activeKeyId: "k1", keys: { k1: Buffer.alloc(32, 7) }, hmacKey: Buffer.alloc(32, 8) };
@@ -77,6 +78,57 @@ function service(fx, overrides = {}) {
 }
 
 describe("WeCom BFF auth service", () => {
+  test("startup without bridge keyring keeps legacy auth but rejects Gateway sessions and login", async () => {
+    const fx = fixture({ available: true });
+    const runtime = createWeComAuthRuntime({
+      gateway: fx.gateway,
+      store: fx.store,
+      jwtSecret: "local-test-secret",
+      isPasswordlessSingleUser: async () => true,
+      getUser: async (id) => ({ id, username: "legacy", role: "default", suspended: false }),
+      origin: ORIGIN,
+    });
+    expect(runtime).toBeTruthy();
+    expect(runtime.getConfig()).toEqual({ enabled: false, available: false, reason: "DEPENDENCY_NOT_READY" });
+    expect(await runtime.getState()).toMatchObject({ authenticated: true, remoteAccessMode: null, user: null });
+    expect(await runtime.getRequestAuthState()).toMatchObject({ authenticated: true, kind: "LEGACY_SINGLE_USER", actor: null });
+
+    const oldPasswordToken = jwt.sign({ p: "legacy-encrypted-password" }, "local-test-secret", { expiresIn: "1h" });
+    expect(await runtime.getState({ localToken: oldPasswordToken })).toMatchObject({ authenticated: true, remoteAccessMode: null, user: null });
+    const oldMultiUserToken = jwt.sign({ id: 7, username: "legacy" }, "local-test-secret", { expiresIn: "1h" });
+    expect(await runtime.getState({ localToken: oldMultiUserToken })).toMatchObject({ authenticated: true, remoteAccessMode: null, user: { id: 7 } });
+
+    const protectedRuntime = createWeComAuthRuntime({ gateway: fx.gateway, store: fx.store, jwtSecret: "local-test-secret", origin: ORIGIN });
+    expect(await protectedRuntime.getState()).toMatchObject({ authenticated: false });
+    expect(await protectedRuntime.getRequestAuthState()).toMatchObject({ authenticated: false, kind: "UNAUTHENTICATED" });
+    const multiUserRuntime = createWeComAuthRuntime({ gateway: fx.gateway, store: fx.store, jwtSecret: "local-test-secret", isPasswordlessSingleUser: async () => false, origin: ORIGIN });
+    expect(await multiUserRuntime.getState()).toMatchObject({ authenticated: false });
+    expect(createWeComAuthRuntime({ gateway: fx.gateway, store: fx.store, jwtSecret: null })).toBeNull();
+
+    const gatewayToken = jwt.sign({ id: 1, session_id: "missing", credential_epoch: 0 }, "local-test-secret", { expiresIn: "1h" });
+    await expect(runtime.getState({ localToken: gatewayToken })).rejects.toMatchObject({ code: "MGW_BUSINESS_AUTH_REQUIRED" });
+    await expect(runtime.getValidatedSessionActor({ sessionId: "missing", userId: 1 })).rejects.toMatchObject({ code: "MGW_BUSINESS_AUTH_REQUIRED" });
+    await expect(runtime.start({ origin: ORIGIN })).rejects.toMatchObject({ code: "MGW_DEPENDENCY_NOT_READY" });
+    expect(fx.counts.start).toBe(0);
+
+    const app = express();
+    app.use(express.json());
+    createWeComAuthEndpoints(app, { auth: runtime });
+    const server = createServer(app);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const root = `http://127.0.0.1:${server.address().port}/auth/wecom`;
+      const stateResponse = await fetch(root + "/state");
+      expect(stateResponse.status).toBe(200);
+      expect((await stateResponse.json()).data).toMatchObject({ authenticated: true, remoteAccessMode: null, user: null });
+      const startResponse = await fetch(root + "/start", { method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: "{}" });
+      expect(startResponse.status).toBe(503);
+      expect((await startResponse.json()).error.code).toBe("MGW_DEPENDENCY_NOT_READY");
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   test("reports unavailable and creates no pretend authorization URL when contract is absent", async () => {
     const fx = fixture(); const auth = service(fx);
     expect(auth.getConfig()).toEqual({ enabled: false, available: false, reason: "DEPENDENCY_NOT_READY" });

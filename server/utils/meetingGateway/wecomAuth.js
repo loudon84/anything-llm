@@ -61,13 +61,15 @@ function createWeComAuthService({
     throw fail("MGW_AUTH_CONFIG_INVALID", 503);
   const activeKeyId = cryptoConfig?.activeKeyId;
   const keyring = cryptoConfig?.keys;
-  if (
-    !validOpaque(activeKeyId) ||
-    !Buffer.isBuffer(keyring?.[activeKeyId]) ||
-    keyring[activeKeyId].length !== 32 ||
-    Buffer.byteLength(cryptoConfig?.hmacKey || "") < 32
-  ) {
-    throw fail("MGW_AUTH_CONFIG_INVALID", 503);
+  const cryptoReady = Boolean(
+    validOpaque(activeKeyId) &&
+    Buffer.isBuffer(keyring?.[activeKeyId]) &&
+    keyring[activeKeyId].length === 32 &&
+    Buffer.isBuffer(cryptoConfig?.hmacKey) &&
+    cryptoConfig.hmacKey.length >= 32
+  );
+  function requireCrypto() {
+    if (!cryptoReady) throw fail("MGW_DEPENDENCY_NOT_READY", 503);
   }
   const now = () => {
     const value = clock();
@@ -76,16 +78,19 @@ function createWeComAuthService({
       throw fail("MGW_AUTH_CONFIG_INVALID", 503);
     return date;
   };
-  const mac = (purpose, value) =>
-    crypto
+  const mac = (purpose, value) => {
+    requireCrypto();
+    return crypto
       .createHmac("sha256", cryptoConfig.hmacKey)
       .update(`wecom:${purpose}:`)
       .update(value)
       .digest("hex");
+  };
   function assertOrigin(value) {
     if (!origin || value !== origin) throw fail("MGW_CSRF_REJECTED", 403);
   }
   function encrypt(value, aad, keyId = activeKeyId) {
+    requireCrypto();
     const nonce = crypto.randomBytes(12);
     if (!Buffer.isBuffer(keyring[keyId]) || keyring[keyId].length !== 32)
       throw fail("MGW_AUTH_CONFIG_INVALID", 503);
@@ -99,6 +104,7 @@ function createWeComAuthService({
     return { ciphertext, nonce };
   }
   function decrypt(ciphertext, nonce, aad, keyId) {
+    requireCrypto();
     const bytes = Buffer.from(ciphertext);
     if (
       bytes.length < 17 ||
@@ -139,6 +145,7 @@ function createWeComAuthService({
     browserProof = null,
   } = {}) {
     assertOrigin(requestOrigin);
+    requireCrypto();
     const availability = gateway.getAvailability();
     if (!availability?.available || availability.enabled !== true)
       throw fail("MGW_DEPENDENCY_NOT_READY", 503);
@@ -226,6 +233,7 @@ function createWeComAuthService({
   }
 
   async function callback({ cookie, clientState, resultTicket } = {}) {
+    requireCrypto();
     const { transactionId, proof } = parsePreloginCookie(cookie);
     if (!validOpaque(clientState) || !validOpaque(resultTicket))
       throw fail("MGW_AUTH_TRANSACTION_INVALID", 409);
@@ -254,6 +262,7 @@ function createWeComAuthService({
 
   async function complete({ origin: requestOrigin, cookie, csrf } = {}) {
     assertOrigin(requestOrigin);
+    requireCrypto();
     const { transactionId, proof } = parsePreloginCookie(cookie);
     const expectedCsrf = mac("csrf", transactionId + ":" + proof);
     if (!safeEqual(expectedCsrf, csrf)) throw fail("MGW_CSRF_REJECTED", 403);
@@ -382,6 +391,7 @@ function createWeComAuthService({
       return preloginState.csrfToken ? preloginState : unauthenticated();
     }
     if (!claims) return unauthenticated();
+    if (claims.session_id && !cryptoReady) throw fail(AUTH_REQUIRED);
     if (!claims.session_id) {
       if (claims.id) {
         const user = getUser ? await getUser(Number(claims.id)) : null;
@@ -479,6 +489,7 @@ function createWeComAuthService({
     origin: requestOrigin,
   } = {}) {
     assertOrigin(requestOrigin);
+    requireCrypto();
     let claims;
     try {
       claims = jwt.verify(localToken);
@@ -528,6 +539,7 @@ function createWeComAuthService({
     credentialEpoch,
     browserProof,
   } = {}) {
+    if (!cryptoReady) throw fail(AUTH_REQUIRED);
     if (!validOpaque(sessionId) || !Number.isInteger(Number(userId)))
       throw fail(AUTH_REQUIRED);
     const local = await store.getLocalSession({
@@ -607,12 +619,18 @@ function createWeComAuthService({
       enabled: false,
       reason: "DEPENDENCY_NOT_READY",
     };
+    const ready =
+      cryptoReady &&
+      availability.enabled === true &&
+      availability.available === true;
     return {
-      enabled: availability.enabled === true,
-      available: availability.available === true,
-      reason: availability.available
+      enabled: cryptoReady && availability.enabled === true,
+      available: ready,
+      reason: ready
         ? null
-        : availability.reason || "DEPENDENCY_NOT_READY",
+        : !cryptoReady
+          ? "DEPENDENCY_NOT_READY"
+          : availability.reason || "DEPENDENCY_NOT_READY",
     };
   }
   function validSessionRecord(row, userId, timestamp) {

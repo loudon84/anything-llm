@@ -56,7 +56,9 @@ const { createSessionModule } = require("./utils/meetingGateway/sessions");
 const {
   createWeComGatewayClient,
 } = require("./utils/meetingGateway/wecomClient");
-const { createWeComAuthService } = require("./utils/meetingGateway/wecomAuth");
+const {
+  createWeComAuthRuntime,
+} = require("./utils/meetingGateway/wecomAuthRuntime");
 const { createMeetingStore } = require("./models/meetingGateway");
 const { createWeComIdentityStore } = require("./models/wecomIdentity");
 const { SystemSettings } = require("./models/systemSettings");
@@ -104,33 +106,22 @@ const meetingWecomGateway = createWeComGatewayClient({
   contract: null,
   transport: null,
 });
-const meetingWecomAuth =
-  meetingKeyring && process.env.JWT_SECRET
-    ? createWeComAuthService({
-        gateway: meetingWecomGateway,
-        store: createWeComIdentityStore({ prisma }),
-        jwt: {
-          sign: (claims, expiresIn) =>
-            require("jsonwebtoken").sign(claims, process.env.JWT_SECRET, {
-              expiresIn,
-            }),
-          verify: (token) =>
-            require("jsonwebtoken").verify(token, process.env.JWT_SECRET),
-        },
-        getUser: (id) => User.get({ id }),
-        isPasswordlessSingleUser: async () =>
-          !process.env.AUTH_TOKEN && !(await SystemSettings.isMultiUserMode()),
-        origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || null,
-        callbackUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
-          ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN +
-            "/api/auth/wecom/callback"
-          : null,
-        resultUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
-          ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN + "/sso/wecom/result"
-          : null,
-        cryptoConfig: meetingKeyring,
-      })
-    : null;
+const meetingWecomAuth = createWeComAuthRuntime({
+  gateway: meetingWecomGateway,
+  store: createWeComIdentityStore({ prisma }),
+  jwtSecret: process.env.JWT_SECRET,
+  getUser: (id) => User.get({ id }),
+  isPasswordlessSingleUser: async () =>
+    !process.env.AUTH_TOKEN && !(await SystemSettings.isMultiUserMode()),
+  origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || null,
+  callbackUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
+    ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN + "/api/auth/wecom/callback"
+    : null,
+  resultUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
+    ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN + "/sso/wecom/result"
+    : null,
+  cryptoConfig: meetingKeyring,
+});
 const app = express();
 app.locals.meetingWecomAuth = meetingWecomAuth;
 const apiRouter = express.Router();
