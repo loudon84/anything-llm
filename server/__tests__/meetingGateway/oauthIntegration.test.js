@@ -34,6 +34,7 @@ test("Gateway start, connection-only return id and owner confirmation stay bound
     async getOAuthTransactionForBridge(transactionId, bridgeId, ownerId) { return rows.find((r) => r.transactionId === transactionId && r.bridgeSessionId === bridgeId && r.ownerUserId === ownerId) || null; },
     async updateOAuthTransactionState(id, state) { rows[0].state = state; return rows[0]; },
     async claimOAuthConfirmation(id, connectionId) { if (rows[0].state !== "PENDING") return false; rows[0].state = "CONFIRMING"; rows[0].recoveryConnectionId = connectionId; return true; },
+    async cancelOAuthConfirmation(id, connectionId) { if (rows[0].state !== "CONFIRMING" || rows[0].recoveryConnectionId !== connectionId) return false; rows[0].state = "CANCELLED"; return true; },
   };
   const config = {
     applicationId: "app-a", expectedApplicationId: "app-a", callbackRef: "app-a", corpId: "corp-a", sdkId: "sdk-a",

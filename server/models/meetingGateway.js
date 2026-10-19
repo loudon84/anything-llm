@@ -492,7 +492,14 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
       connectionId, id
     )) === 1;
   }
-  return { acquireLease, addManagedDocumentFenced, claimGeneration, claimOAuthConfirmation, commitGeneration, createBridgeSession, completeOAuthTransaction, createOAuthTransaction, findBridgeSessionByBinding, findPendingOAuthForBridge, getBinding, getOAuthTransactionForBridge, managedDocumentFenceContract: "anythingllm-meeting-managed-fence-v1", markAccess, policyByWorkspace, removeManagedDocumentFenced, reserveIdentity, revokeBinding, revokeBridgeSession, revokeBridgeSessionsForUser, saveBinding, updateOAuthTransactionState };
+  async function cancelOAuthConfirmation(id, connectionId) {
+    if (typeof id !== 'string' || typeof connectionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(connectionId)) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    return (await prisma.$executeRawUnsafe(
+      "UPDATE meeting_oauth_transactions SET state = 'CANCELLED' WHERE id = ? AND state = 'CONFIRMING' AND recovery_connection_id = ?",
+      id, connectionId
+    )) === 1;
+  }
+  return { acquireLease, addManagedDocumentFenced, cancelOAuthConfirmation, claimGeneration, claimOAuthConfirmation, commitGeneration, createBridgeSession, completeOAuthTransaction, createOAuthTransaction, findBridgeSessionByBinding, findPendingOAuthForBridge, getBinding, getOAuthTransactionForBridge, managedDocumentFenceContract: "anythingllm-meeting-managed-fence-v1", markAccess, policyByWorkspace, removeManagedDocumentFenced, reserveIdentity, revokeBinding, revokeBridgeSession, revokeBridgeSessionsForUser, saveBinding, updateOAuthTransactionState };
 }
 
 module.exports = { createMeetingStore };

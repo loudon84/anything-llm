@@ -96,7 +96,7 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
     if (!gateway || !store || typeof gateway.startAuthorization !== "function" ||
         typeof gateway.listConnections !== "function" || typeof gateway.confirmConnection !== "function" ||
         typeof store.getBinding !== "function" || typeof store.findPendingOAuthForBridge !== "function" || typeof store.createOAuthTransaction !== "function" ||
-        typeof store.getOAuthTransactionForBridge !== "function" || typeof store.updateOAuthTransactionState !== "function" || typeof store.completeOAuthTransaction !== "function" || typeof store.claimOAuthConfirmation !== "function") {
+        typeof store.getOAuthTransactionForBridge !== "function" || typeof store.updateOAuthTransactionState !== "function" || typeof store.completeOAuthTransaction !== "function" || typeof store.claimOAuthConfirmation !== "function" || typeof store.cancelOAuthConfirmation !== "function") {
       throw new Error(CONTRACT_ERROR);
     }
   }
@@ -194,6 +194,12 @@ function createOAuthModule({ gateway, store, clock = () => Date.now(), enabled =
           await gateway.confirmConnection({ gatewayAccessToken: ctx.gatewayAccessToken }, connectionId);
         } catch (error) {
           if (unknownWriteOutcome(error)) throw recoveryRequired("RECOVERY_REQUIRED");
+          if ([400, 401, 403, 404].includes(error?.status)) {
+            let cancelled = false;
+            try { cancelled = await store.cancelOAuthConfirmation(transaction.id, connectionId); } catch (_storeError) { /* retain the durable guard on store failure */ }
+            if (!cancelled) throw recoveryRequired("RECOVERY_REQUIRED");
+            throw error;
+          }
           throw recoveryRequired("RECOVERY_REQUIRED");
         }
       } else if (transaction.state === "PENDING" && connection.status !== "ACTIVE") {

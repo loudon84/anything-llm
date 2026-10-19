@@ -14,6 +14,7 @@ function fixture() {
   const calls = [];
   let connectionStatus = "PENDING_CONFIRMATION";
   let currentConnections = [];
+  let authorizationCount = 0;
   let clockNow = Date.parse("2026-10-18T00:00:00.000Z");
   const store = {
     async getBinding() { return { status: "BOUND", gateway_member_id: "member-a" }; },
@@ -23,7 +24,7 @@ function fixture() {
     async createOAuthTransaction(row) {
       if (rows.some((candidate) => candidate.bridgeSessionId === row.bridgeSessionId && candidate.state === "PENDING"))
         throw new Error("MGW_OAUTH_ALREADY_PENDING");
-      rows.push({ id: "local-id", ...row });
+      rows.push({ id: `local-id-${rows.length + 1}`, ...row });
       return rows[rows.length - 1];
     },
     async completeOAuthTransaction(id, transactionId, expiresAt) {
@@ -48,11 +49,18 @@ function fixture() {
       row.recoveryConnectionId = connectionId;
       return true;
     },
+    async cancelOAuthConfirmation(id, connectionId) {
+      const row = rows.find((candidate) => candidate.id === id);
+      if (!row || row.state !== "CONFIRMING" || row.recoveryConnectionId !== connectionId) return false;
+      row.state = "CANCELLED";
+      return true;
+    },
   };
   const gateway = {
     async startAuthorization() {
       calls.push("start");
-      currentConnections.push({ connectionId: "connection-a", memberId: "member-a", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: connectionStatus });
+      authorizationCount += 1;
+      currentConnections.push({ connectionId: `connection-${authorizationCount === 1 ? "a" : "b"}`, memberId: "member-a", applicationId: "app-a", type: "THIRD_PARTY_OAUTH", status: connectionStatus });
       return { authorizationUrl: AUTH_URL, transactionId: "gateway-transaction", expiresAt: "2026-10-18T00:05:00.000Z" };
     },
     async listConnections() {
@@ -207,6 +215,34 @@ describe("Meeting Gateway OAuth safety seams", () => {
     expect(rows[0]).toMatchObject({ state: "CONFIRMING", recoveryConnectionId: "connection-a" });
     await expect(oauth.confirm(ctx, "connection-a")).rejects.toMatchObject({ message: "MGW_OAUTH_RECOVERY_REQUIRED", status: 202, state: "RECOVERY_REQUIRED" });
     expect(rows[0].state).toBe("CONFIRMING");
+    expect(calls.filter((call) => call === "confirm")).toHaveLength(1);
+  });
+  test("definitive rejection releases the bridge for a new start and rejects the old callback without another POST", async () => {
+    const { oauth, gateway, rows, calls } = fixture();
+    await oauth.start(ctx);
+    gateway.confirmConnection = async () => {
+      calls.push("confirm");
+      throw Object.assign(new Error("MGW_UPSTREAM_CONTRACT_ERROR"), { status: 400 });
+    };
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toMatchObject({ message: "MGW_UPSTREAM_CONTRACT_ERROR", status: 400 });
+    expect(rows[0].state).toBe("CANCELLED");
+    await expect(oauth.start(ctx)).resolves.toMatchObject({ transactionId: "gateway-transaction" });
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
+    expect(rows[1].existingConnectionIds).toContain("connection-a");
+    expect(calls.filter((call) => call === "confirm")).toHaveLength(1);
+  });
+  test("keeps the confirmation guard when persisting a definitive rejection fails", async () => {
+    const { oauth, gateway, rows, calls, store } = fixture();
+    await oauth.start(ctx);
+    gateway.confirmConnection = async () => {
+      calls.push("confirm");
+      throw Object.assign(new Error("MGW_UPSTREAM_CONTRACT_ERROR"), { status: 400 });
+    };
+    store.cancelOAuthConfirmation = async () => { throw new Error("database unavailable"); };
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toMatchObject({ message: "MGW_OAUTH_RECOVERY_REQUIRED", state: "RECOVERY_REQUIRED" });
+    expect(rows[0]).toMatchObject({ state: "CONFIRMING", recoveryConnectionId: "connection-a" });
+    await expect(oauth.start(ctx)).rejects.toThrow("MGW_OAUTH_ALREADY_PENDING");
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toMatchObject({ message: "MGW_OAUTH_RECOVERY_REQUIRED", state: "RECOVERY_REQUIRED" });
     expect(calls.filter((call) => call === "confirm")).toHaveLength(1);
   });
   test("does not send duplicate confirmation POSTs while one is in flight", async () => {

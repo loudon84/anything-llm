@@ -164,6 +164,14 @@ describe("meeting gateway SQLite state store", () => {
       state: "CONFIRMING", recoveryConnectionId: "connection-returned",
     });
     await expect(store.findPendingOAuthForBridge("oauth-recovery-bridge")).resolves.toMatchObject({ state: "CONFIRMING" });
+    expect(await store.cancelOAuthConfirmation(transaction.id, "wrong-connection")).toBe(false);
+    expect(await store.cancelOAuthConfirmation(transaction.id, "connection-returned")).toBe(true);
+    expect(await store.cancelOAuthConfirmation(transaction.id, "connection-returned")).toBe(false);
+    await expect(store.findPendingOAuthForBridge("oauth-recovery-bridge")).resolves.toBeNull();
+    await expect(store.createOAuthTransaction({
+      transactionId: "oauth-recovery-transaction-3", ownerUserId: 1, bridgeSessionId: "oauth-recovery-bridge",
+      expiresAt: new Date("2026-10-18T00:05:00.000Z"), state: "PENDING", existingConnectionIds: [],
+    })).resolves.toMatchObject({ state: "PENDING" });
   });
 
   test("A-STATE-001-01 concurrent duplicate identity reservations keep one row", async () => {
