@@ -155,20 +155,66 @@ test("HTTP BFF success projects a stable local user and issues a registry-backed
   }
 });
 
-test("lost fixture redemption marks only the existing SQLite session LOCAL_ONLY and is never retried", async () => {
+test("HTTP uncertain redemption marks only its SQLite session LOCAL_ONLY and does not retry", async () => {
   const gateway = makeGateway({ redeemFails: true });
   const auth = makeAuth(gateway);
-  const projected = await store.upsertGatewayUserProjection({ profile });
-  const session = await store.createLocalSession({ userId: projected.user.id, bindingId: projected.binding.id, identityExpiresAt: profile.identityExpiresAt, authMethod: "wecom", browserProofHash: auth.hashBrowserProof("existing-proof") });
-  const started = await auth.start({ origin: ORIGIN, currentLocalSession: { id: session.id, userId: projected.user.id }, browserProof: "existing-proof" });
-  const callbackState = new URL(started.authorizationUrl).searchParams.get("state");
-  await auth.callback({ cookie: started.cookie.value, clientState: callbackState, resultTicket: "fixture-ticket-lost" });
-  await expect(auth.complete({ origin: ORIGIN, cookie: started.cookie.value, csrf: started.csrfToken })).rejects.toMatchObject({ code: "MGW_AUTH_REDEEM_OUTCOME_UNKNOWN" });
-  expect(await auth.getState({ localToken: jwt.sign({ id: projected.user.id, username: projected.user.username, role: "default", session_id: session.id, credential_epoch: session.credentialEpoch }, "1h"), browserProof: "existing-proof" })).toMatchObject({ authenticated: true, remoteAccessMode: "LOCAL_ONLY", reason: "AUTH_RESULT_LOST" });
-  expect(gateway.calls).toMatchObject({ redeem: 1, profile: 0 });
-  expect((await prisma.meeting_login_sessions.findUnique({ where: { id: session.id } })).remote_access_mode).toBe("LOCAL_ONLY");
+  const projectedA = await store.upsertGatewayUserProjection({ profile });
+  const sessionA = await store.createLocalSession({ userId: projectedA.user.id, bindingId: projectedA.binding.id, identityExpiresAt: profile.identityExpiresAt, authMethod: "wecom", browserProofHash: auth.hashBrowserProof("existing-proof-a") });
+  const projectedB = await store.upsertGatewayUserProjection({ profile: { ...profile, memberId: "fixture-member-b", userId: "fixture-user-b", displayName: "Unaffected Employee" } });
+  const sessionB = await store.createLocalSession({ userId: projectedB.user.id, bindingId: projectedB.binding.id, identityExpiresAt: profile.identityExpiresAt, authMethod: "wecom", browserProofHash: auth.hashBrowserProof("existing-proof-b") });
+  const tokenA = jwtLib.sign({ id: projectedA.user.id, username: projectedA.user.username, role: projectedA.user.role, session_id: sessionA.id, credential_epoch: sessionA.credentialEpoch }, SECRET, { expiresIn: "1h" });
+  const tokenB = jwtLib.sign({ id: projectedB.user.id, username: projectedB.user.username, role: projectedB.user.role, session_id: sessionB.id, credential_epoch: sessionB.credentialEpoch }, SECRET, { expiresIn: "1h" });
+  const sessionCookieA = `__Host-meeting_session=${sessionA.id}.existing-proof-a`;
+  const sessionCookieB = `__Host-meeting_session=${sessionB.id}.existing-proof-b`;
+  const app = express();
+  app.use(express.json());
+  createWeComAuthEndpoints(app, { auth });
+  const server = createServer(app);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const root = `http://127.0.0.1:${server.address().port}/auth/wecom`;
+  const previousJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = SECRET;
+  try {
+    const started = await getJson(`${root}/start`, { method: "POST", headers: { origin: ORIGIN, authorization: `Bearer ${tokenA}`, cookie: sessionCookieA, "content-type": "application/json" }, body: "{}" });
+    expect(started.response.status).toBe(200);
+    const loginCookie = firstCookie(started.response);
+    const preloginCookie = loginCookie;
+    const clientState = new URL(started.body.data.authorizationUrl).searchParams.get("state");
+    const callbackUrl = new URL(`${root}/callback`);
+    callbackUrl.searchParams.set("state", clientState);
+    callbackUrl.searchParams.set("resultTicket", "fixture-ticket-lost");
+    const callback = await fetch(callbackUrl, { headers: { cookie: preloginCookie }, redirect: "manual" });
+    expect(callback.status).toBe(303);
+    expect(callback.headers.get("location")).toBe(`${ORIGIN}/sso/wecom/result`);
+
+    const preloginState = await getJson(`${root}/state`, { headers: { authorization: `Bearer ${tokenA}`, cookie: `${preloginCookie}; ${sessionCookieA}` } });
+    expect(preloginState.response.status).toBe(200);
+    expect(preloginState.body.data).toMatchObject({ authenticated: true, remoteAccessMode: "GATEWAY_ENABLED" });
+    const wrongOrigin = await getJson(`${root}/complete`, { method: "POST", headers: { origin: "https://attacker.example", cookie: preloginCookie, "x-mgw-csrf": preloginState.body.data.csrfToken, "content-type": "application/json" }, body: "{}" });
+    expect(wrongOrigin.response.status).toBe(403);
+    expect(wrongOrigin.body.error.code).toBe("MGW_CSRF_REJECTED");
+    expect(gateway.calls.redeem).toBe(0);
+    const wrongCsrf = await getJson(`${root}/complete`, { method: "POST", headers: { origin: ORIGIN, cookie: preloginCookie, "x-mgw-csrf": "invalid", "content-type": "application/json" }, body: "{}" });
+    expect(wrongCsrf.response.status).toBe(403);
+    expect(wrongCsrf.body.error.code).toBe("MGW_CSRF_REJECTED");
+    expect(gateway.calls.redeem).toBe(0);
+
+    const complete = await getJson(`${root}/complete`, { method: "POST", headers: { origin: ORIGIN, cookie: preloginCookie, "x-mgw-csrf": preloginState.body.data.csrfToken, "content-type": "application/json" }, body: "{}" });
+    expect(complete.response.status).toBe(503);
+    expect(complete.body.error).toMatchObject({ code: "MGW_AUTH_REDEEM_OUTCOME_UNKNOWN", retryable: true, recovery_action: "reload_state" });
+    expect(complete.body).not.toHaveProperty("data");
+    expect(gateway.calls).toMatchObject({ redeem: 1, profile: 0 });
+
+    const stateA = await getJson(`${root}/state`, { headers: { authorization: `Bearer ${tokenA}`, cookie: sessionCookieA } });
+    const stateB = await getJson(`${root}/state`, { headers: { authorization: `Bearer ${tokenB}`, cookie: sessionCookieB } });
+    expect(stateA.body.data).toMatchObject({ authenticated: true, remoteAccessMode: "LOCAL_ONLY", reason: "AUTH_RESULT_LOST" });
+    expect(stateB.body.data).toMatchObject({ authenticated: true, remoteAccessMode: "GATEWAY_ENABLED", user: { id: projectedB.user.id } });
+    expect((await prisma.meeting_login_sessions.findUnique({ where: { id: sessionA.id } })).remote_access_mode).toBe("LOCAL_ONLY");
+    expect((await prisma.meeting_login_sessions.findUnique({ where: { id: sessionB.id } })).remote_access_mode).toBe("GATEWAY_ENABLED");
+    expect(gateway.calls.redeem).toBe(1);
+  } finally {
+    if (previousJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = previousJwtSecret;
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
-
-
-
-

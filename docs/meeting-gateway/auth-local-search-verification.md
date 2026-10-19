@@ -46,3 +46,17 @@
 启用前必须对目标环境应用已审阅 migration，并从更新后的 `server/prisma/schema.prisma` 执行 Prisma Client generate，再启用 Gateway local login。旧生成 client 将 SQL `NULL` password 反序列化为非 nullable 字段时会失败；不能先启用再补生成。生产迁移需由目标环境部署流程执行，本次没有触及生产库。
 
 当前不向 Gateway 发送 POST、登录尝试、兑换票据或凭据；不根据 origin 猜测认证契约；不存取或记录密钥；不声称完成真实扫码。任何兑换结果不确定时不重放一次性票据。`LOCAL_ONLY` 只属于通过服务端 registry 验证的当前 session；直到 Task 4 证明统一服务端门禁，页面状态本身不能作为访问控制证据。
+
+## Review round 1 follow-up — cross-session HTTP lost-response coverage
+
+The lost-response fixture now traverses the complete Express BFF boundary. It starts a rescan using the existing user's bearer and HttpOnly session proof, handles the callback over HTTP, then exercises `POST /complete` over HTTP. Foreign Origin and invalid `X-MGW-CSRF` each return 403 and make zero redemption calls. The valid request returns HTTP 503 with `MGW_AUTH_REDEEM_OUTCOME_UNKNOWN` / `reload_state`; the test then reads both session states through `/state` and inspects both SQLite rows. Only the triggering employee's row is `LOCAL_ONLY`; a separately projected employee's valid session stays `GATEWAY_ENABLED`. The fixture confirms exactly one redeem attempt and no profile fetch.
+
+The first run of this strengthened case failed because the test JWT used a private fixture key while the existing BFF start route decodes bearer claims through the configured application JWT secret. The test now temporarily aligns `process.env.JWT_SECRET` to its test-only key and restores the previous value in `finally`; no secret is printed or changed outside the test process. This was a test harness correction, not a product-code change.
+
+- RED: `corepack yarn test --runInBand --testTimeout=90000 server/__tests__/meetingGateway/authLocalSearchIntegration.test.js` — 1 suite / 2 tests, the new HTTP lost-response assertion failed: the target session remained `GATEWAY_ENABLED` because the fixture start request had not been associated with its existing registry session.
+- GREEN: same command after fixture key alignment — 1 suite / 2 tests passed.
+- Scope: only this integration test plus this verification document and report were edited; no product, Task 4, gate, plan, package, or ledger files were changed. No files were staged or committed.
+
+## Additional compatibility gap reported to controller
+
+A separate read-only cross-module check found the Task 3 single-user legacy state (`authenticated: true`, `remoteAccessMode: null`, `user: null`) is permitted by the frozen DTO and server, but the Task 5 client currently rejects authenticated state when `user` is null. Existing frontend compatibility tests cover a legacy multi-user state with a safe user only. This could reject single-user meeting bootstrap. The controller assigned this to the Task 5 worker; Task 6 does not change frontend behavior. Re-run the relevant frontend node test after that fix and record its reviewed result before final phase acceptance.
