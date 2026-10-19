@@ -9,7 +9,7 @@ export default function LocalOnlyNotice({
   return (
     <div
       role="status"
-      className="rounded-lg border border-amber-500/40 bg-amber-50 p-3 text-sm text-amber-950 dark:bg-amber-950/20 dark:text-amber-100"
+      className="rounded-lg border border-amber-500/40 bg-theme-bg-secondary p-3 text-sm text-theme-text-primary"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span>
