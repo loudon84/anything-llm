@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. All implementation, code search/reading and reviews must use GPT-6 Luna subagents as explicitly requested by the user.
 
+**2026-10-19 OAuth clarification:** 用户随后明确AnythingLLM内显示Gateway OAuth企业微信二维码并由后端保管Gateway API token。PRD已修订为2.0.3 §4.7；后续按 `2026-10-19-meeting-gateway-oauth-qr-token.plan.md` 执行。本文件的2.0.2 spec hash和已完成勾选仅记录之前Consumer基础实现，不证明新扫码/凭据链路已完成，也不再将新增专用WeCom API作为接入前提。
+
 **Implementation status (2026-10-19):** Consumer任务1–6已实施并完成逐项/整批审查；最终代码01823fe8，后端19 suites/214 tests通过。真实PHASE-AUTH-01与整体AUTH_LOCAL_SEARCH仍BLOCKED，缺获批WeCom契约/config、可信真实观察及provenance verifier接入；勾选完成不代表真实扫码验收通过。旧无上下文PARSE_SOURCE任务保持隔离，PENDING来源需后续受审恢复流程。
 
 **Goal:** 实现AnythingLLM消费Gateway企业微信扫码认证、拉取用户信息并同步本地投影；认证兑换结果丢失后只允许获本地授权的既有会议检索，暂停本阶段新导入开发与验收。

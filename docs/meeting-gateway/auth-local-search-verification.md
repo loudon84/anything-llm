@@ -1,5 +1,7 @@
 # AUTH_LOCAL_SEARCH 阶段验证记录
 
+> 历史验证说明（2026-10-19）：本记录对应PRD 2.0.2及Consumer基础实现，不代表随后2.0.3 §4.7要求的AnythingLLM内扫码展示和Gateway API token交付已经接通。当前需求与后续任务见 `../superpowers/plans/2026-10-19-meeting-gateway-oauth-qr-token.plan.md`。下文旧spec hash保留为当时运行证据身份；现行PRD已更新。
+
 **记录时间：** 2026-10-19（Asia/Shanghai）  
 **阶段：** `AUTH_LOCAL_SEARCH`（PRD §4.6），不代表完整 R2、旧验收集或导入能力完成。  
 **当前状态：** reviewed fixtures、默认单用户无 token 的 HTTP/BFF 与浏览器会议页兼容验证通过；`PHASE-LOCAL-02`、`PHASE-SCOPE-03` fixture 证据可记录 PASS，导入保持 deferred；真实 `PHASE-AUTH-01` 与整体 AUTH_LOCAL_SEARCH 仍为 `BLOCKED`。本文件不声称扫码、真实 Gateway 认证或生产联调已经完成。

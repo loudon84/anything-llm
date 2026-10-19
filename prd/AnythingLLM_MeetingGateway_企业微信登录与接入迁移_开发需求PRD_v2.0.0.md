@@ -2,7 +2,7 @@
 title: "AnythingLLM × Meeting Gateway：接入迁移、企业微信登录与持续权限工程开发 PRD"
 subtitle: "真实契约 → 运行装配 → 页面接通 → 导入与读取权限 → 迁移验收"
 prd_id: "PRD-ANYTHINGLLM-MEETING-GATEWAY-20261017"
-version: "2.0.2"
+version: "2.0.3"
 status: "REVIEW"
 template_version: "1.0"
 template_sha256: "b00234e6d103b2c102cbcc7b02fbcd961e71b0ce784ee736ead592c301e35eff"
@@ -20,15 +20,15 @@ production_verification_status: "NOT_EXECUTED"
 
 # AnythingLLM × Meeting Gateway 工程开发需求 PRD
 
-**版本：2.0.2 ｜ 日期：2026-10-19 ｜ 状态：REVIEW**
+**版本：2.0.3 ｜ 日期：2026-10-19 ｜ 状态：REVIEW**
 
-修订说明：2026-10-19 已记录DEC-R2-LOGIN-001及DEC-R2-PHASE-002/003/004：认证丢失仅本地检索、Gateway用户信息投影、本阶段暂缓导入交付、暂停导入验收。为保留已有附件引用，文件名暂沿用 v2.0.0；本文内容版本以元数据 2.0.2 为准。该决策已确认，但不等于整份 PRD、接口契约或生产发布已经批准。
+修订说明：2026-10-19 新增DEC-R2-OAUTH-QR-005：AnythingLLM内显示Gateway OAuth企业微信二维码，扫码后接收并由后端保管Gateway API token。已记录DEC-R2-LOGIN-001及DEC-R2-PHASE-002/003/004：认证丢失仅本地检索、Gateway用户信息投影、本阶段暂缓导入交付、暂停导入验收。为保留已有附件引用，文件名暂沿用 v2.0.0；本文内容版本以元数据 2.0.3 为准。该决策已确认，但不等于整份 PRD、接口契约或生产发布已经批准。
 
 R2总体设计仍分为 **D1 接入收口、D2 页面闭环、D3 身份与权限闭环**；当前阶段以§4.6的AUTH_LOCAL_SEARCH范围和独立验收门禁为准，导入交付及验收延后。工程推进主线为 **S1 真实接口与身份契约 → S2 运行装配 → S3 页面接通 → S4 导入与读取权限 → S5 迁移验收**。
 
 本文是开发需求与验收契约，不是代码实施记录，也不是生产联调通过证明。本文不提交产品代码、不生成 `.plan.md`、不修改任何线上配置。新增页面、接口、字段及参数均标明为目标设计；现有源码事实与目标行为分开陈述。
 
-Meeting Gateway 面向 AnythingLLM 的企业微信认证实际契约、Gateway用户信息读取契约及部署材料尚未提供完整运行证据。AnythingLLM 只消费 Gateway 的扫码认证能力；Gateway 内部采用直接企业微信接入或企业身份服务，均由 Gateway 负责，本 PRD 不新增独立身份服务建设任务。企业微信入口不能用腾讯会议 OAuth 页面或模拟扫码替代。
+Meeting Gateway已有OAuth授权入口与token兑换能力，AnythingLLM优先复用；后续核对现成扫码页、客户端/回调配置及用户信息来源，并取得实际扫码与API凭据调用证据。AnythingLLM 只消费 Gateway 的扫码认证能力；Gateway 内部采用直接企业微信接入或企业身份服务，均由 Gateway 负责，本 PRD 不新增独立身份服务建设任务。企业微信入口复用Gateway自身OAuth授权能力并在AnythingLLM显示其真实扫码界面；不能把仅完成腾讯会议连接授权的结果当作企业用户已认证，也不能模拟扫码。具体交互与token交付以§4.7为准。
 
 ---
 
@@ -78,7 +78,7 @@ Meeting Gateway 面向 AnythingLLM 的企业微信认证实际契约、Gateway�
 ```yaml
 title: AnythingLLM × Meeting Gateway 接入迁移与企业微信登录
 prd_id: PRD-ANYTHINGLLM-MEETING-GATEWAY-20261017
-version: 2.0.2
+version: 2.0.3
 status: REVIEW
 product: AnythingLLM Meeting Intelligence
 repository:
@@ -247,7 +247,7 @@ v1.1 使用的 Consumer 基线为 `1336d327…`，其“尚未存在”描述不
 
 **DEC-R2-LOGIN-001（2026-10-19，用户已确认）：AnythingLLM 只提供连接 Meeting Gateway、获得企业微信授权扫码登录验证的消费能力。**
 
-AnythingLLM 的身份交付范围为：登录入口、向 Gateway 发起认证、处理回跳、服务端兑换并校验认证结果、在Gateway认证后拉取用户信息并同步必要本地投影、建立/撤销本地登录态，以及取消/过期/失败/不可用结果展示。企业微信认证、企业成员真实性、准入与 canonical member/alias 管理由 Gateway 负责。AnythingLLM 不新增企业身份服务、企业微信 Secret、准入申请系统、身份绑定审批后台或双证明绑定页面；也不发起 Gateway alias 创建/修改。
+AnythingLLM 的身份交付范围为：登录入口、在AnythingLLM页面加载Gateway OAuth扫码界面、向Gateway发起认证、处理回跳、服务端兑换并确认认证结果、取得Gateway API token并加密保管用于本人接口调用、获取用户信息并同步必要本地投影、建立/撤销本地登录态，以及取消/过期/失败/不可用结果展示。企业微信认证、企业成员真实性、准入与 canonical member/alias 管理由 Gateway 负责。AnythingLLM 不新增企业身份服务、企业微信 Secret、准入申请系统、身份绑定审批后台或双证明绑定页面；也不发起 Gateway alias 创建/修改。
 
 DEC-R2-LOGIN-001确定身份职责；随后确认的DEC-R2-PHASE-002/003/004按§4.6调整丢失后的读取策略、用户来源和当前阶段范围。R2总体的会议能力设计保留，但导入功能及验收不作为本阶段完成条件。企业微信认证成功不等于腾讯会议资源授权成功；本地整数用户ID只是Gateway稳定主体的存储投影，不是另一套独立用户身份。
 
@@ -281,6 +281,25 @@ Gateway 内部认证实现属于外部依赖，不由本 PRD 要求 AnythingLLM 
 
 ---
 
+## 4.7 OAuth扫码展示与Gateway API凭据交付（2026-10-19，用户已明确）
+
+**DEC-R2-OAUTH-QR-005：AnythingLLM触发Meeting Gateway现有OAuth授权流程，在AnythingLLM页面加载并显示Gateway提供的企业微信二维码；用户扫码通过后，Gateway将经过身份验证的API调用token交付给AnythingLLM后端，用于后续接口存取。** 本节修订登录展示、OAuth接通方式和凭据交付，优先于旧文中将“另建专用企业微信扫码接口”作为前提、只做外跳而不显示扫码界面、或只取得本地登录token而不保留Gateway API凭据的理解。§4.6的Gateway用户投影、LOCAL_ONLY和导入延期继续有效。
+
+交互与职责：
+
+1. 用户在AnythingLLM点击企业微信登录；Consumer后端创建浏览器绑定的登录事务，按Gateway现有OAuth能力构造授权请求，使用既有client_id、注册redirect_uri、scope/resource及state；PKCE按该OAuth客户端的实际支持方式接入，不猜测字段。
+2. Gateway负责与企业微信交互、生成真实二维码及二维码有效期。AnythingLLM在自己的登录界面加载显示Gateway提供的授权页/扫码组件或二维码展示数据。具体采用允许嵌入的授权页还是现有二维码资源，按实际Gateway能力选择；不把仅跳走到外部页面作为本条交互已完成，不自行生成、截取或模拟企业微信二维码，不通过去除CSP/X-Frame保护或代理任意HTML来强行嵌入。
+3. 用户扫码、确认或取消均由Gateway处理。Gateway完成企业身份真实性验证后，按现有OAuth机制将结果回调Consumer；标准授权码模式下回调只携带code/state等短时结果，Consumer后端再兑换Gateway API token。若实际部署已有其他受保护的后端交付方式，复用其现有机制。用户所述“把token给AnythingLLM”指凭据最终由Consumer服务端取得，不要求把access_token放进URL、iframe消息或浏览器存储。
+4. Consumer验证登录事务、state、回调归属和一次性结果，通过受信Gateway token端点取得凭据并检查实际token类型、scope/resource和期限。若使用JWT claims作为身份断言，则校验其签名、issuer、audience和有效期，不能仅decode后信任；对仅用于调用Gateway的access_token可按opaque凭据保管，并通过Gateway已有认证用户信息/验证能力确认主体，不因token外形为JWT而强制新建JWKS或内省服务。收到回跳本身不代表成功。Iframe嵌入时同时设计顶层页面完成/同源结果通知与cookie关联，校验消息origin/source，不能因跨站cookie问题关闭Secure/HttpOnly/SameSite保护。
+5. Consumer使用已验证的Gateway API token获取或确认当前Gateway用户信息，事务性同步稳定主体的普通本地投影，并建立AnythingLLM本地会话。只在已核实签名、主体语义且包含全部必要字段时复用Gateway已有响应/claims；不因此强制新增独立profile服务。成员停用、身份冲突、权限不足与token获取失败不能冒称登录/接口授权成功。
+6. Gateway access_token及实际返回的refresh_token、issuer/audience、scope/resource、期限和版本绑定到对应本地用户/session，并以现有服务端加密bridge/token store保存。后续AnythingLLM调用Gateway接口时使用该用户的Gateway凭据；不把AnythingLLM local JWT或腾讯上游token当Gateway访问凭据，不退回共享服务账号。浏览器仅持有本地会话和非敏感扫码状态。
+7. 回调/兑换结果丢失、凭据状态无法确认时仍按§4.6进入当前session的LOCAL_ONLY，暂停Gateway/Tencent会议数据访问，不盲目兑换重试或自动恢复；已有有效本地会话可检索既有授权本地资料。显式重新扫码并取得当前有效Gateway凭据/用户信息后才恢复远端。
+
+配置核对限于实际OAuth对接所需内容：授权入口、二维码展示方式、已注册客户端/回调地址、支持的grant/PKCE、API audience/scope、token响应和用户信息来源、过期/撤销语义。优先复用现有端点、响应及配置，不要求AnythingLLM团队另建企业微信认证服务或独立“扫码契约平台”。部署尚未确认的字段逐项登记，不把源码旧版本或未发现专用WeCom路径推断为现有OAuth一定不可用。
+
+PHASE-AUTH-01追加Oracle：`qr_display_owner == ANYTHINGLLM && qr_issuer == GATEWAY && gateway_api_token_stored_server_side && gateway_api_calls_use_actor_token && gateway_tokens_in_browser == 0`。真实验收包含页面加载真实二维码、用户扫码、Gateway确认、Consumer收到并验证API凭据、重复用户复用投影、一次本人授权的Gateway只读接口调用及取消/过期/错误主体的负向结果；不执行本阶段延期的新会议导入。页面/协议接通与Evidence记录分别验证，不以fixture登录或自写JSON冒充真实扫码。
+
+---
 # 5. Terminology / Domain Model
 
 | 术语 | 唯一定义 |
