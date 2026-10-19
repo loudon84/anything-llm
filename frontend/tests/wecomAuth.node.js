@@ -105,6 +105,87 @@ test("local meeting access is unavailable until the BFF confirms an authenticate
   );
 });
 
+test("legacy password sessions keep existing meeting access when WeCom is unavailable", () => {
+  const view = resolveWeComView({
+    authenticated: true,
+    remoteAccessMode: null,
+    available: false,
+    reason: "DEPENDENCY_NOT_READY",
+  });
+  assert.equal(view.canSearchLocal, true);
+  assert.equal(view.canFetchRemote, true);
+  assert.equal(view.canStartWeCom, false);
+});
+
+test("unauthenticated and authenticated sessions with an invalid mode fail closed", () => {
+  assert.equal(
+    resolveWeComView({ authenticated: false, remoteAccessMode: null }).canSearchLocal,
+    false
+  );
+  assert.equal(
+    resolveWeComView({ authenticated: false, remoteAccessMode: null }).canFetchRemote,
+    false
+  );
+  assert.equal(
+    resolveWeComView({ authenticated: true, remoteAccessMode: "UNKNOWN" })
+      .canSearchLocal,
+    false
+  );
+});
+
+test("BFF accepts a valid legacy password session with null access mode", async () => {
+  const client = createWeComAuthClient({
+    fetchImpl: async () =>
+      response({
+        data: {
+          authenticated: true,
+          remoteAccessMode: null,
+          reason: null,
+          expiresAt: null,
+          user: { id: 4, username: "legacy", role: "default" },
+          csrfToken: "legacy-csrf",
+        },
+        meta: { request_id: "r-legacy", schema_version: "2.0" },
+      }),
+  });
+  assert.deepEqual(await client.getState(), {
+    authenticated: true,
+    remoteAccessMode: null,
+    reason: null,
+    expiresAt: null,
+    user: { id: 4, username: "legacy", role: "default" },
+  });
+});
+
+test("logout can revoke a legacy password session using its BFF CSRF token", async () => {
+  const calls = [];
+  const client = createWeComAuthClient({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith("/state"))
+        return response({
+          data: {
+            authenticated: true,
+            remoteAccessMode: null,
+            reason: null,
+            expiresAt: null,
+            user: { id: 4, username: "legacy", role: "default" },
+            csrfToken: "legacy-csrf",
+          },
+          meta: { request_id: "r-legacy", schema_version: "2.0" },
+        });
+      return response({
+        data: { revoked: true },
+        meta: { request_id: "r-logout", schema_version: "2.0" },
+      });
+    },
+  });
+
+  assert.equal(await client.logout(), true);
+  assert.equal(calls[1].url, "/api/auth/logout");
+  assert.equal(calls[1].options.headers["X-MGW-CSRF"], "legacy-csrf");
+});
+
 test("a lost completion response refreshes state without resubmitting the one-time ticket", async () => {
   const calls = [];
   let stateCalls = 0;

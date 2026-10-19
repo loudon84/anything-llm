@@ -80,7 +80,7 @@ export function isSafeAuthorizationUrl(value) {
  */
 export function resolveWeComView({
   authenticated = false,
-  remoteAccessMode = null,
+  remoteAccessMode,
   available = false,
   reason = null,
 } = {}) {
@@ -88,6 +88,9 @@ export function resolveWeComView({
   const localOnly = isAuthenticated && remoteAccessMode === "LOCAL_ONLY";
   const gatewayEnabled =
     isAuthenticated && remoteAccessMode === "GATEWAY_ENABLED";
+  // Null is the explicit legacy password/SimpleSSO mode. Keep its existing
+  // meeting affordances; only Gateway modes receive new Gateway semantics.
+  const legacySession = isAuthenticated && remoteAccessMode === null;
   const safeReason = SAFE_REASONS.has(reason) ? reason : null;
 
   let message = null;
@@ -107,8 +110,10 @@ export function resolveWeComView({
   }
 
   return {
-    canSearchLocal: isAuthenticated && SAFE_AUTH_MODES.has(remoteAccessMode),
-    canFetchRemote: gatewayEnabled,
+    canSearchLocal:
+      isAuthenticated &&
+      (SAFE_AUTH_MODES.has(remoteAccessMode) || legacySession),
+    canFetchRemote: gatewayEnabled || legacySession,
     canStartWeCom: available === true,
     message,
     nextAction,
@@ -223,7 +228,9 @@ export function createWeComAuthClient({
         (data.csrfToken !== null && typeof data.csrfToken !== "string") ||
         (data.user !== null && !isSafePublicUser(data.user)) ||
         (data.authenticated &&
-          (!data.user || !SAFE_AUTH_MODES.has(data.remoteAccessMode)))
+          (!data.user ||
+            (data.remoteAccessMode !== null &&
+              !SAFE_AUTH_MODES.has(data.remoteAccessMode))))
       ) {
         throw new Error("MGW_AUTH_UNAVAILABLE");
       }
