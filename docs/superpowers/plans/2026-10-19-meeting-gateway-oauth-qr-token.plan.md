@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development task-by-task. All code searches, implementation and reviews use GPT-6 Luna subagents. Steps use checkbox syntax.
 
+**Superseded by user protocol clarification (2026-10-19):** PRD 2.0.4 §4.8 and `2026-10-19-meeting-gateway-employee-oauth.plan.md` govern implementation. Use account-login→ms_→exchange→`/api/v1/oauth/authorizations`→browser Tencent page→connection_id return. Do not implement the authorization_code `/oauth/token` path below as a substitute for that supplied flow. Earlier spec/hash and this plan remain historical design context only.
+
 **Goal:** AnythingLLM发起现有Gateway OAuth，在自己的页面显示Gateway企业微信二维码；扫码成功后由后端取得、保管用户Gateway API token，并用于接口调用。
 
 **Architecture:** 复用现有authorization-code + PKCE、Consumer登录事务/回调、本地投影和bridge。扩展现有登录/结果组件显示受信Gateway扫码界面；Gateway验证企业身份，Consumer后端兑换code、确认主体并加密保管access/refresh token，浏览器只持本地会话。

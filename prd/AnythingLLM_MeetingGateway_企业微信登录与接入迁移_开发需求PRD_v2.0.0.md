@@ -2,7 +2,7 @@
 title: "AnythingLLM × Meeting Gateway：接入迁移、企业微信登录与持续权限工程开发 PRD"
 subtitle: "真实契约 → 运行装配 → 页面接通 → 导入与读取权限 → 迁移验收"
 prd_id: "PRD-ANYTHINGLLM-MEETING-GATEWAY-20261017"
-version: "2.0.3"
+version: "2.0.4"
 status: "REVIEW"
 template_version: "1.0"
 template_sha256: "b00234e6d103b2c102cbcc7b02fbcd961e71b0ce784ee736ead592c301e35eff"
@@ -20,9 +20,9 @@ production_verification_status: "NOT_EXECUTED"
 
 # AnythingLLM × Meeting Gateway 工程开发需求 PRD
 
-**版本：2.0.3 ｜ 日期：2026-10-19 ｜ 状态：REVIEW**
+**版本：2.0.4 ｜ 日期：2026-10-19 ｜ 状态：REVIEW**
 
-修订说明：2026-10-19 新增DEC-R2-OAUTH-QR-005：AnythingLLM内显示Gateway OAuth企业微信二维码，扫码后接收并由后端保管Gateway API token。已记录DEC-R2-LOGIN-001及DEC-R2-PHASE-002/003/004：认证丢失仅本地检索、Gateway用户信息投影、本阶段暂缓导入交付、暂停导入验收。为保留已有附件引用，文件名暂沿用 v2.0.0；本文内容版本以元数据 2.0.3 为准。该决策已确认，但不等于整份 PRD、接口契约或生产发布已经批准。
+修订说明：2026-10-19 用户进一步提供DEC-R2-EMPLOYEE-OAUTH-006实际调用链：account-login→ms_→exchange→业务access_token→腾讯会议授权URL→connection_id回跳；具体身份、凭据与展示语义以§4.8为准。此前新增DEC-R2-OAUTH-QR-005：AnythingLLM内显示Gateway OAuth企业微信二维码，扫码后接收并由后端保管Gateway API token。已记录DEC-R2-LOGIN-001及DEC-R2-PHASE-002/003/004：认证丢失仅本地检索、Gateway用户信息投影、本阶段暂缓导入交付、暂停导入验收。为保留已有附件引用，文件名暂沿用 v2.0.0；本文内容版本以元数据 2.0.4 为准。该决策已确认，但不等于整份 PRD、接口契约或生产发布已经批准。
 
 R2总体设计仍分为 **D1 接入收口、D2 页面闭环、D3 身份与权限闭环**；当前阶段以§4.6的AUTH_LOCAL_SEARCH范围和独立验收门禁为准，导入交付及验收延后。工程推进主线为 **S1 真实接口与身份契约 → S2 运行装配 → S3 页面接通 → S4 导入与读取权限 → S5 迁移验收**。
 
@@ -78,7 +78,7 @@ Meeting Gateway已有OAuth授权入口与token兑换能力，AnythingLLM优先�
 ```yaml
 title: AnythingLLM × Meeting Gateway 接入迁移与企业微信登录
 prd_id: PRD-ANYTHINGLLM-MEETING-GATEWAY-20261017
-version: 2.0.3
+version: 2.0.4
 status: REVIEW
 product: AnythingLLM Meeting Intelligence
 repository:
@@ -298,6 +298,23 @@ Gateway 内部认证实现属于外部依赖，不由本 PRD 要求 AnythingLLM 
 配置核对限于实际OAuth对接所需内容：授权入口、二维码展示方式、已注册客户端/回调地址、支持的grant/PKCE、API audience/scope、token响应和用户信息来源、过期/撤销语义。优先复用现有端点、响应及配置，不要求AnythingLLM团队另建企业微信认证服务或独立“扫码契约平台”。部署尚未确认的字段逐项登记，不把源码旧版本或未发现专用WeCom路径推断为现有OAuth一定不可用。
 
 PHASE-AUTH-01追加Oracle：`qr_display_owner == ANYTHINGLLM && qr_issuer == GATEWAY && gateway_api_token_stored_server_side && gateway_api_calls_use_actor_token && gateway_tokens_in_browser == 0`。真实验收包含页面加载真实二维码、用户扫码、Gateway确认、Consumer收到并验证API凭据、重复用户复用投影、一次本人授权的Gateway只读接口调用及取消/过期/错误主体的负向结果；不执行本阶段延期的新会议导入。页面/协议接通与Evidence记录分别验证，不以fixture登录或自写JSON冒充真实扫码。
+
+---
+## 4.8 员工会话交换与腾讯会议授权的实际调用链（用户提供）
+
+**DEC-R2-EMPLOYEE-OAUTH-006：按用户提供的现有Gateway员工授权链路接通，不再把获取静态二维码URL或新增WeCom接口作为Consumer实施前提。** 本节优先于§4.7中对具体grant/扫码来源/凭据交付的推测。§4.6的普通本地投影、LOCAL_ONLY及导入延期继续有效。
+
+1. 员工通过Gateway `POST /api/v1/auth/account-login` 登录。Gateway仅向Backend账号登录接口核验一次账号密码。AnythingLLM如提供该登录入口，只将凭据经同源BFF转发至Gateway，不自行验证Backend密码、不持久化或记录密码，不创建独立企业账号。
+2. Backend的 `access_token` 和 `refresh_token` 不落库、不返回内部系统或浏览器。Gateway另行签发 `ms_` 前缀的 `session_token`；Consumer以它关联当前员工，按Gateway已有身份响应或 `GET /api/v1/auth/session` 确认稳定用户信息并建立必要本地投影。不得将Backend JWT、浏览器userId或本地JWT替代ms_；不得将ms_送往浏览器。
+3. Consumer后端使用当前员工ms_、已注册的 `client_id` / `client_secret` 调用 `POST /api/v1/auth/exchange`。`subject_token` 必须是ms_；旧Backend JWT应401。请求所需scope/resource依据已注册客户端和Gateway的REST资源地址设置，返回的access_token绑定该员工的MEMBER主体和REST audience。
+4. `POST /api/v1/oauth/authorizations` 使用exchange取得的Gateway access_token作为Bearer。此处不使用ms_、本地JWT、Backend JWT、腾讯上游token或共享服务账号代替。Consumer后端在已有加密bridge/token store中保管本人ms_、业务access_token及实际返回的refresh资料/期限；不新增并行token库，不把业务凭据放URL、localStorage、iframe消息或浏览器DTO。
+5. 成功响应从业务envelope `data` 解包得到 `authorization_url`、`transaction_id`、`expires_at`。URL形如 `https://meeting.tencent.com/marketplace/authorize.html?corp_id=...&sdk_id=...&redirect_uri=...&state=...`。四个参数均按Gateway实际应用配置校验；允许的origin/path固定，不删除corp_id校验。ENV应用redirect_uri固定为 `{PUBLIC_BASE_URL}/callbacks/tencent/oauth/<应用ID>`；这是腾讯回调Gateway的地址，不是AnythingLLM return_to。
+6. Gateway管理一次性state，默认约300秒，Consumer尊重实际 `expires_at`，不能续期或重放。`authorization_url` 由员工浏览器打开/加载，Consumer服务端不得GET、代理、截图或抓取该URL来获取二维码。AnythingLLM显示授权入口/等待/过期/结果，浏览器承载方式遵守该页面实际嵌入政策；不得把未验证的内嵌能力或二维码图片API写成已存在。不能强行绕过CSP/X-Frame保护。
+7. 腾讯授权回调Gateway后，Gateway按预先允许的 `return_to` 回到AnythingLLM；回跳只带 `connection_id`，不带令牌。Consumer核对本地发起事务/员工会话后，使用后端本人Gateway token查询连接状态，确认连接归属和服务端授权结果；不得仅凭query中的connection_id设置ACTIVE或建立新登录。任意外部return_to、跨员工connection_id、无事务/过期回跳均不能取得本人业务权限。
+
+**身份与连接分离：** 该具体URL是腾讯会议授权页。员工身份由Gateway账号登录及ms_确认，exchange业务token用于Gateway API，腾讯连接状态由授权回调后Gateway查询确认。不能把腾讯会议扫码成功表述为新增企业微信身份认证证明；若未来Gateway提供真正企业微信免密登录，只替换员工身份入口，后续ms_/exchange/连接授权分层保持清楚。页面必须区分“员工已登录”“腾讯会议已授权”，不能用connection_id或授权页扫码本身替代登录凭证。
+
+**本阶段验收修订：** 可独立实现上述现有协议的Consumer适配、服务端凭据保管、浏览器授权和回跳确认，使用受控测试验证ms_前缀、MEMBER/audience、四参数URL、state期限、连接归属和无token回跳。真实员工登录/授权未执行则如实记未验证；不再等待用户提供固定二维码图片链接，不另起通用身份服务。本阶段仍不开发或验收新会议导入；失去可确认Gateway凭据时仍LOCAL_ONLY，只查询本地既有获权资料。
 
 ---
 # 5. Terminology / Domain Model
