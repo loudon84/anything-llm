@@ -355,11 +355,12 @@ function runtimePrismaFixture() {
   return { prisma, meeting, source, chunk, profileId };
 }
 
-function runtimeFixture(connector) {
+function runtimeFixture(connector, authService = null) {
   const { createMeetingRuntime } = require("../../modules/meetings/runtime");
   const { prisma } = runtimePrismaFixture();
   const runtime = createMeetingRuntime({
     prisma,
+    authService,
     encryption: { encrypt: (value) => value, decrypt: (value) => value },
     getEmbedder: () => ({
       model: "runtime-test",
@@ -385,20 +386,50 @@ describe("runtime provider-to-QA boundary", () => {
     ],
   });
 
+  test("worker revalidates a queued Gateway session before remote job handlers", async () => {
+    const authService = {
+      getValidatedSessionActor: jest.fn(async () => ({
+        authenticated: true,
+        kind: "GATEWAY_SESSION",
+        actor: { id: 11, userId: 11 },
+        session: { id: "s11", userId: 11, credentialEpoch: 3, expiresAt: "2099-01-01T00:00:00.000Z", remoteAccessMode: "LOCAL_ONLY" },
+      })),
+    };
+    const { runtime, prisma } = runtimeFixture({ getChatCompletion: async () => ({ textResponse: "" }) }, authService);
+    const job = { id: 91, kind: "IMPORT", payload: JSON.stringify({ authContext: { kind: "GATEWAY_SESSION", sessionId: "s11", userId: 11, credentialEpoch: 3 } }), status: "CREATED", attempts: 0 };
+    prisma.meeting_jobs = {
+      findMany: async () => job.status === "CREATED" ? [job] : [],
+      updateMany: async ({ where, data }) => {
+        if (where.id !== job.id || where.status !== job.status) return { count: 0 };
+        Object.assign(job, data);
+        return { count: 1 };
+      },
+      findUnique: async () => job,
+    };
+    prisma.$transaction = async (callback) => callback(prisma);
+
+    await expect(runtime.jobs.runOnce()).rejects.toMatchObject({ code: "MGW_REMOTE_ACCESS_REQUIRED", status: 403 });
+    expect(authService.getValidatedSessionActor).toHaveBeenCalledWith({ sessionId: "s11", userId: 11, credentialEpoch: 3 });
+    expect(job.status).toBe("FAILED");
+  });
+
   test("passes valid provider JSON through QA's grounded validator", async () => {
     const connector = {
       getChatCompletion: async () => ({ textResponse: validAnswer }),
     };
     const { runtime } = runtimeFixture(connector);
+    const legacyAuth = { authenticated: true, kind: "LEGACY_SINGLE_USER", actor: { id: 8 } };
     const conversation = await runtime.qa.createConversation(
       { meetingIds: [1] },
-      8
+      8,
+      legacyAuth
     );
 
     const answer = await runtime.qa.ask(
       conversation.id,
       { question: "When does the approved plan start?" },
-      8
+      8,
+      legacyAuth
     );
 
     expect(answer.status).toBe("ANSWERED");
@@ -423,15 +454,18 @@ describe("runtime provider-to-QA boundary", () => {
       handleStream: OpenAiLLM.prototype.handleStream,
     };
     const { runtime, prisma } = runtimeFixture(connector);
+    const legacyAuth = { authenticated: true, kind: "LEGACY_SINGLE_USER", actor: { id: 8 } };
     const conversation = await runtime.qa.createConversation(
       { meetingIds: [1] },
-      8
+      8,
+      legacyAuth
     );
 
     const answer = await runtime.qa.ask(
       conversation.id,
       { question: "When does the approved plan start?" },
-      8
+      8,
+      legacyAuth
     );
 
     expect(answer.status).toBe("FAILED_INCOMPLETE");

@@ -144,6 +144,7 @@ function createQAService({
   indexer,
   workspaceRetriever,
   llm,
+  meetingAuthAccess = null,
   audit = async () => {},
 } = {}) {
   if (
@@ -190,6 +191,13 @@ function createQAService({
       );
     }
     return requireAvailable ? assertQueryable(rows) : rows;
+  }
+
+  async function assertMeetingScope(meetingIds, authState, action) {
+    if (!authState) return;
+    if (!meetingAuthAccess?.assertLocalMeetingReadable)
+      throw new MeetingError("Meeting access could not be verified", "MGW_RESOURCE_NOT_ACCESSIBLE", 403);
+    await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds, action });
   }
 
   async function assertOwner(id, userId) {
@@ -366,13 +374,14 @@ function createQAService({
     };
   }
 
-  async function createConversation(scope = {}, userId) {
+  async function createConversation(scope = {}, userId, authState) {
     const meetingIds = normalizeIds(scope.meetingIds, "meeting", {
       max: LIMITS.selectedMeetings,
     });
     const workspaceIds = normalizeIds(scope.workspaceIds ?? [], "workspace", {
       min: 0,
     });
+    await assertMeetingScope(meetingIds, authState, "conversation.create");
     await currentMeetings(meetingIds);
     if (typeof workspaceRetriever.resolve !== "function")
       throw new MeetingError(
@@ -404,13 +413,25 @@ function createQAService({
     return { ...row, meetingIds, workspaceIds };
   }
 
-  async function listConversations(userId) {
+  async function listConversations(userId, authState) {
     const rows = await prisma.meeting_conversations.findMany({
       where: { createdBy: userId ?? null },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
-    return rows.map((row) => ({
+    const authorizedRows = authState?.kind === "GATEWAY_SESSION"
+      ? await Promise.all(rows.map(async (row) => {
+          const ids = parse(row.meetingIds, []);
+          try {
+            await assertMeetingScope(ids, authState, "conversation.list");
+            return row;
+          } catch (error) {
+            if (error?.code === "MGW_RESOURCE_NOT_ACCESSIBLE") return null;
+            throw error;
+          }
+        })).then((items) => items.filter(Boolean))
+      : rows;
+    return authorizedRows.map((row) => ({
       id: row.id,
       createdAt: row.createdAt,
       meetingIds: parse(row.meetingIds, []),
@@ -418,9 +439,10 @@ function createQAService({
     }));
   }
 
-  async function getConversation(id, userId) {
+  async function getConversation(id, userId, authState) {
     const row = await assertOwner(id, userId);
     const meetingIds = parse(row.meetingIds, []);
+    await assertMeetingScope(meetingIds, authState, "conversation.read");
     const workspaceIds = await assertWorkspaceScope(row, userId);
     const current = await snapshot(meetingIds);
     const answers = await prisma.meeting_answers.findMany({
@@ -443,9 +465,10 @@ function createQAService({
     };
   }
 
-  async function history(id, userId) {
+  async function history(id, userId, authState) {
     const conversation = await assertOwner(id, userId);
     const meetingIds = parse(conversation.meetingIds, []);
+    await assertMeetingScope(meetingIds, authState, "conversation.history");
     const workspaceIds = await assertWorkspaceScope(conversation, userId);
     const current = await snapshot(meetingIds);
     const answers = await prisma.meeting_answers.findMany({
@@ -470,9 +493,10 @@ function createQAService({
     };
   }
 
-  async function ask(id, input = {}, userId) {
+  async function ask(id, input = {}, userId, authState) {
     const conversation = await assertOwner(id, userId);
     const meetingIds = parse(conversation.meetingIds, []);
+    await assertMeetingScope(meetingIds, authState, "qa.ask");
     const workspaceIds = await assertWorkspaceScope(conversation, userId);
     const question = boundedText(
       input.question,

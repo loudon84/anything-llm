@@ -14,7 +14,7 @@ function isTransactionContention(error) {
   );
 }
 
-function createMeetingService({ prisma, audit = async () => {} } = {}) {
+function createMeetingService({ prisma, audit = async () => {}, meetingAuthAccess = null } = {}) {
   if (!prisma)
     throw new TypeError(
       "createMeetingService requires an injected Prisma client"
@@ -47,13 +47,22 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
   }
 
   return {
-    async list(filters = {}) {
-      return prisma.meetings.findMany({
+    async list(filters = {}, authState) {
+      const rows = await prisma.meetings.findMany({
         where: { ...filters, ...activeMeetingWhere },
       });
+      if (!authState) return rows;
+      if (!meetingAuthAccess?.filterLocalMeetings)
+        throw new MeetingError("Meeting access could not be verified", "MGW_RESOURCE_NOT_ACCESSIBLE", 403);
+      return meetingAuthAccess.filterLocalMeetings({ authState, meetings: rows, action: "meeting.list" });
     },
 
-    async get(id) {
+    async get(id, authState) {
+      if (authState) {
+        if (!meetingAuthAccess?.assertLocalMeetingReadable)
+          throw new MeetingError("Meeting access could not be verified", "MGW_RESOURCE_NOT_ACCESSIBLE", 403);
+        await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "meeting.detail" });
+      }
       return findMeeting(prisma, id);
     },
 
@@ -402,7 +411,7 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
       });
     },
 
-    async requestReindex(id, userId, profileId = "default") {
+    async requestReindex(id, userId, profileId = "default", authContext = null) {
       return transaction(async (db) => {
         const meeting = await findMeeting(db, id);
         const pending = await db.meeting_jobs.findMany({
@@ -442,6 +451,7 @@ function createMeetingService({ prisma, audit = async () => {} } = {}) {
               generation,
               profileId: String(profileId),
               manual: true,
+              ...(authContext ? { authContext } : {}),
             }),
             status: "CREATED",
             attempts: 0,

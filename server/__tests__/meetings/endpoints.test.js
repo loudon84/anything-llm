@@ -90,11 +90,12 @@ async function invoke(
     query = {},
     user = { id: 8, role: "default" },
     file,
+    authState = { authenticated: true, kind: "LEGACY_MULTI_USER", actor: { id: user?.id || 8, userId: user?.id || 8 }, session: null, remoteAccessMode: null },
   } = {}
 ) {
   const request = { params, body, query, file, header: () => null };
   const response = {
-    locals: { user, multiUserMode: true },
+    locals: { user, multiUserMode: true, meetingAuthState: authState },
     statusCode: 200,
     status(code) {
       this.statusCode = code;
@@ -168,6 +169,66 @@ async function invokeMiddlewareChain(route, options = {}) {
 }
 
 describe("authenticated meeting endpoints", () => {
+  test("blocks LOCAL_ONLY remote listing before calling the remote adapter", async () => {
+    const remoteList = jest.fn(async () => [{ id: "remote" }]);
+    const { routes } = setup({ remote: { list: remoteList } });
+    const route = routes.find((item) => item.method === "get" && item.path === "/meetings/remote");
+
+    const response = await invoke(route, {
+      authState: {
+        authenticated: true,
+        kind: "GATEWAY_SESSION",
+        actor: { id: 11, userId: 11 },
+        session: { id: "s11", userId: 11, credentialEpoch: 3, expiresAt: "2099-01-01T00:00:00.000Z", remoteAccessMode: "LOCAL_ONLY" },
+        remoteAccessMode: "LOCAL_ONLY",
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(remoteList).not.toHaveBeenCalled();
+  });
+
+  test("denies a cross-user meeting before detail and source endpoints touch stored data", async () => {
+    const sourceRead = jest.fn(async () => ({ id: 2, segments: [] }));
+    const meetingGet = jest.fn(async () => ({ id: 1 }));
+    const meeting = { id: 1, createdBy: 22, workspaceId: null };
+    const { routes, prisma } = setup(
+      {
+        meetings: { list: async () => [meeting], get: meetingGet },
+        sources: { getSource: sourceRead, getArchivedSource: sourceRead },
+      },
+      { meetings: { findMany: async ({ where }) => [meeting].filter((row) => where.id.in.includes(row.id)) } }
+    );
+    const state = {
+      authenticated: true,
+      kind: "GATEWAY_SESSION",
+      actor: { id: 11, userId: 11 },
+      session: { id: "s11", userId: 11, credentialEpoch: 3, expiresAt: "2099-01-01T00:00:00.000Z", remoteAccessMode: "LOCAL_ONLY" },
+      remoteAccessMode: "LOCAL_ONLY",
+    };
+    const cases = [
+      ["get", "/meetings", { query: {} }],
+      ["get", "/meetings/:id", { params: { id: "1" } }],
+      ["get", "/meetings/:id/sources/:sourceId", { params: { id: "1", sourceId: "2" } }],
+      ["get", "/meetings/:id/sources/:sourceId/segments", { params: { id: "1", sourceId: "2" } }],
+      ["get", "/meetings/:id/sources/:sourceId/file", { params: { id: "1", sourceId: "2" } }],
+    ];
+
+    for (const [method, path, args] of cases) {
+      const route = routes.find((item) => item.method === method && item.path === path);
+      const response = await invoke(route, { ...args, authState: state });
+      if (path === "/meetings") {
+        expect(response.statusCode).toBe(200);
+        expect(response.value.meetings).toEqual([]);
+      } else {
+        expect(response.statusCode).toBe(403);
+        expect(response.value.code).toBe("MGW_RESOURCE_NOT_ACCESSIBLE");
+      }
+    }
+    expect(meetingGet).not.toHaveBeenCalled();
+    expect(sourceRead).not.toHaveBeenCalled();
+  });
+
   test("wraps the actual authentication denial in the stable JSON envelope", async () => {
     SystemSettings.isMultiUserMode.mockResolvedValue(true);
     const { routes } = setup({}, {}, { authenticate: validatedRequest });
@@ -227,7 +288,11 @@ describe("authenticated meeting endpoints", () => {
       { config: { getPublic: async () => null, save } },
       {},
       {
-        authenticate: validatedRequest,
+        authenticate: (_req, res, next) => {
+          res.locals.meetingAuthState = { authenticated: true, kind: "LEGACY_SINGLE_USER", actor: null, session: null, remoteAccessMode: null };
+          res.locals.multiUserMode = false;
+          next();
+        },
         requireAdmin: flexUserRoleValid([ROLES.admin]),
       }
     );
@@ -322,7 +387,7 @@ describe("authenticated meeting endpoints", () => {
       ),
       { user: { id: 19, role: "default" } }
     );
-    expect(runtime.qa.listConversations).toHaveBeenCalledWith(19);
+    expect(runtime.qa.listConversations).toHaveBeenCalledWith(19, expect.objectContaining({ kind: "LEGACY_MULTI_USER" }));
     expect(response.value).toEqual({ conversations });
   });
 
@@ -471,6 +536,7 @@ describe("authenticated meeting endpoints", () => {
       response.locals = {
         user: { id: 8, role: "default" },
         multiUserMode: true,
+        meetingAuthState: { authenticated: true, kind: "LEGACY_MULTI_USER", actor: { id: 8, userId: 8 }, session: null, remoteAccessMode: null },
       };
       response.status = (code) => {
         response.statusCode = code;
@@ -536,6 +602,7 @@ describe("authenticated meeting endpoints", () => {
       response.locals = {
         user: { id: 8, role: "default" },
         multiUserMode: true,
+        meetingAuthState: { authenticated: true, kind: "LEGACY_MULTI_USER", actor: { id: 8, userId: 8 }, session: null, remoteAccessMode: null },
       };
       response.status = (code) => {
         response.statusCode = code;

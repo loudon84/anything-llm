@@ -283,7 +283,7 @@ function createImporter({
     );
   }
 
-  async function queue(connectionId, externalId, scope = {}, userId) {
+  async function queue(connectionId, externalId, scope = {}, userId, authContext = null) {
     const normalizedConnectionId = Number(connectionId);
     const normalizedExternalId =
       typeof externalId === "string" ? externalId.trim() : "";
@@ -375,6 +375,7 @@ function createImporter({
     const payload = {
       scope: selectedScope,
       userId: userId ?? null,
+      ...(authContext ? { authContext } : {}),
       meeting: {
         ...metadata,
         startTime: startTime.toISOString(),

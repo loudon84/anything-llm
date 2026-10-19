@@ -5,6 +5,7 @@ const { LIMITS } = require("./constants");
 function createJobRunner({
   prisma,
   handlers = {},
+  authorizeJob = async () => {},
   pollMs = 2000,
   leaseMs = 30_000,
   runnerId = crypto.randomUUID(),
@@ -125,6 +126,7 @@ function createJobRunner({
           "JOB_HANDLER_MISSING",
           500
         );
+      await authorizeJob(job);
       await handler(job);
       await prisma.meeting_jobs.updateMany({
         where: { id: job.id, status: "PROCESSING", leaseOwner: job.leaseOwner },

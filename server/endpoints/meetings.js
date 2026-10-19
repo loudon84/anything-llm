@@ -9,6 +9,7 @@ const {
 } = require("../utils/middleware/multiUserProtected");
 const { SystemSettings } = require("../models/systemSettings");
 const { MeetingError } = require("../modules/meetings/errors");
+const { createMeetingAuthAccess } = require("../utils/meetingGateway/meetingAuthAccess");
 
 const MAX_UPLOAD_BYTES = 100_000_000;
 const SAFE_ID = /^\d+$/;
@@ -119,6 +120,7 @@ function createMeetingsEndpoints(
     ),
     originals = null,
     workspaceAccess = null,
+    meetingAuthAccess = null,
   } = {}
 ) {
   if (!router || !runtime || !prisma)
@@ -127,6 +129,16 @@ function createMeetingsEndpoints(
     );
   const workspaceOriginalResolver =
     originals || runtime.getWorkspaceOriginals?.() || null;
+  const admission = meetingAuthAccess || createMeetingAuthAccess({
+    meetingStore: {
+      findMeetings: async (ids) => prisma.meetings.findMany({ where: { id: { in: ids } } }),
+    },
+    workspaceAccess: async ({ workspaceId, userId, actor }) => {
+      const lookup = workspaceAccess || runtime.lookupWorkspace;
+      if (typeof lookup !== "function") return false;
+      return Boolean(await lookup({ id: workspaceId, userId, user: actor }));
+    },
+  });
   fs.mkdirSync(uploadRoot, { recursive: true });
   const upload = multer({
     storage: multer.diskStorage({
@@ -177,7 +189,8 @@ function createMeetingsEndpoints(
         let tempPath = req.file?.path;
         try {
           const user = await userFromSession(req, res);
-          const result = await handler(req, res, user);
+          const authState = admission.getRequestState({ request: req, response: res });
+          const result = await handler(req, res, user, authState);
           if (result === STREAMED) return;
           if (result && result.status) res.status(result.status);
           res.json(result?.body ?? result ?? {});
@@ -205,6 +218,8 @@ function createMeetingsEndpoints(
     return safe;
   };
   const query = (req) => req.query || {};
+  const assertMeetingRead = (authState, meetingId, action) =>
+    admission.assertLocalMeetingReadable({ authState, meetingIds: [meetingId], action });
   const isAdminUser = async (req, res, user) =>
     !(res.locals?.multiUserMode ?? (await SystemSettings.isMultiUserMode())) ||
     user?.role === ROLES.admin;
@@ -292,52 +307,66 @@ function createMeetingsEndpoints(
   route("put", "/config", admin, async (_req, _res, user) => ({
     config: await runtime.config.save(reqBody(_req), user?.id),
   }));
-  route("get", "/remote", noRole, async (req) => ({
-    meetings: await runtime.remote.list({
-      connectionId: query(req).connectionId,
-      startTime: query(req).startTime,
-      endTime: query(req).endTime,
-      cursor: query(req).cursor,
-    }),
+  route("get", "/remote", noRole, async (req, _res, _user, authState) => {
+    admission.assertRemoteAllowed({ authState, action: "remote.list" });
+    return {
+      meetings: await runtime.remote.list({
+        connectionId: query(req).connectionId,
+        startTime: query(req).startTime,
+        endTime: query(req).endTime,
+        cursor: query(req).cursor,
+        authState,
+      }),
+    };
+  });
+  route("get", "/remote/:externalId/manifest", noRole, async (req, _res, _user, authState) => {
+    admission.assertRemoteAllowed({ authState, action: "remote.manifest" });
+    return {
+      manifest: await runtime.remote.manifest(req.params.externalId, {
+        connectionId: query(req).connectionId,
+        startTime: query(req).startTime,
+        endTime: query(req).endTime,
+        authState,
+      }),
+    };
+  });
+  route("post", "/import", noRole, async (req, _res, user, authState) => {
+    admission.assertRemoteAllowed({ authState, action: "import" });
+    return {
+      status: 202,
+      body: { job: await runtime.queueImport(reqBody(req), user?.id, authState) },
+    };
+  });
+  route("get", "/jobs", noRole, async (req, _res, _user, authState) => ({
+    jobs: await runtime.listJobs(query(req), authState),
   }));
-  route("get", "/remote/:externalId/manifest", noRole, async (req) => ({
-    manifest: await runtime.remote.manifest(req.params.externalId, {
-      connectionId: query(req).connectionId,
-      startTime: query(req).startTime,
-      endTime: query(req).endTime,
-    }),
+  route("post", "/jobs/:id/retry", noRole, async (req, _res, _user, authState) => {
+    admission.assertRemoteAllowed({ authState, action: "retry" });
+    return { job: await runtime.retryJob(numericId(req.params.id, "Job ID"), authState) };
+  });
+  route("post", "/conversations", noRole, async (req, _res, user, authState) => ({
+    conversation: await runtime.qa.createConversation(reqBody(req), user?.id, authState),
   }));
-  route("post", "/import", noRole, async (req, _res, user) => ({
-    status: 202,
-    body: { job: await runtime.queueImport(reqBody(req), user?.id) },
+  route("get", "/conversations", noRole, async (_req, _res, user, authState) => ({
+    conversations: await runtime.qa.listConversations(user?.id, authState),
   }));
-  route("get", "/jobs", noRole, async (req) => ({
-    jobs: await runtime.listJobs(query(req)),
-  }));
-  route("post", "/jobs/:id/retry", noRole, async (req) => ({
-    job: await runtime.jobs.retry(numericId(req.params.id, "Job ID")),
-  }));
-  route("post", "/conversations", noRole, async (req, _res, user) => ({
-    conversation: await runtime.qa.createConversation(reqBody(req), user?.id),
-  }));
-  route("get", "/conversations", noRole, async (_req, _res, user) => ({
-    conversations: await runtime.qa.listConversations(user?.id),
-  }));
-  route("get", "/conversations/:id", noRole, async (req, _res, user) => ({
+  route("get", "/conversations/:id", noRole, async (req, _res, user, authState) => ({
     conversation: await runtime.qa.getConversation(
       numericId(req.params.id, "Conversation ID"),
       user?.id
+      ,authState
     ),
   }));
   route(
     "post",
     "/conversations/:id/questions",
     noRole,
-    async (req, _res, user) => ({
+    async (req, _res, user, authState) => ({
       answer: await runtime.qa.ask(
         numericId(req.params.id, "Conversation ID"),
         reqBody(req),
         user?.id
+        ,authState
       ),
     })
   );
@@ -345,10 +374,11 @@ function createMeetingsEndpoints(
     "get",
     "/conversations/:id/answers",
     noRole,
-    async (req, _res, user) => {
+    async (req, _res, user, authState) => {
       const history = await runtime.qa.history(
         numericId(req.params.id, "Conversation ID"),
         user?.id
+        ,authState
       );
       return {
         conversation: history.conversation,
@@ -414,52 +444,72 @@ function createMeetingsEndpoints(
     }
   );
 
-  route("get", "", noRole, async (req) => ({
-    meetings: await runtime.meetings.list(runtime.meetingFilters(query(req))),
+  route("get", "", noRole, async (req, _res, _user, authState) => ({
+    meetings: await admission.filterLocalMeetings({
+      authState,
+      meetings: await runtime.meetings.list(runtime.meetingFilters(query(req)), authState),
+      action: "meeting.list",
+    }),
   }));
-  route("get", "/:id", noRole, async (req) => {
-    const meeting = await runtime.meetings.get(
-      numericId(req.params.id, "Meeting ID")
-    );
+  route("get", "/:id", noRole, async (req, _res, _user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingRead(authState, id, "meeting.read");
+    const meeting = await runtime.meetings.get(id, authState);
     const sources = await prisma.meeting_sources.findMany({
       where: { meetingId: meeting.id, deletedAt: null },
       orderBy: { id: "asc" },
     });
     return { meeting, sources: sources.map(publicSource) };
   });
-  route("patch", "/:id/content", noRole, async (req, _res, user) => ({
+  route("patch", "/:id/content", noRole, async (req, _res, user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.revise");
+    return ({
     meeting: await runtime.meetings.revise(
       numericId(req.params.id, "Meeting ID"),
       reqBody(req),
       user?.id
     ),
-  }));
-  route("post", "/:id/approve", noRole, async (req, _res, user) => ({
+    });
+  });
+  route("post", "/:id/approve", noRole, async (req, _res, user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.approve");
+    return ({
     meeting: await runtime.meetings.approve(
       numericId(req.params.id, "Meeting ID"),
       user?.id
     ),
-  }));
-  route("post", "/:id/reindex", noRole, async (req, _res, user) => ({
+    });
+  });
+  route("post", "/:id/reindex", noRole, async (req, _res, user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.reindex");
+    return ({
     status: 202,
     body: {
       job: await runtime.requestReindex(
         numericId(req.params.id, "Meeting ID"),
-        user?.id
+        user?.id,
+        authState
       ),
     },
-  }));
-  route("delete", "/:id", noRole, async (req, _res, user) => ({
+    });
+  });
+  route("delete", "/:id", noRole, async (req, _res, user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.delete");
+    return ({
     meeting: await runtime.meetings.softDelete(
       numericId(req.params.id, "Meeting ID"),
       user?.id
     ),
-  }));
+    });
+  });
   route(
     "post",
     "/:id/sources/file",
     noRole,
-    async (req, _res, user) => {
+    async (req, _res, user, authState) => {
+      const id = numericId(req.params.id, "Meeting ID");
+      await assertMeetingRead(authState, id, "source.upload");
+      admission.assertRemoteAllowed({ authState, action: "source.parse" });
       if (!req.file)
         throw new MeetingError(
           "A file is required",
@@ -473,55 +523,78 @@ function createMeetingsEndpoints(
           413
         );
       const source = await runtime.upload(
-        numericId(req.params.id, "Meeting ID"),
+        id,
         { name: req.file.originalname, tempPath: req.file.path },
-        user?.id
+        user?.id,
+        authState
       );
       return { status: 202, body: { source } };
     },
     [uploadMiddleware]
   );
-  route("post", "/:id/sources/text", noRole, async (req, _res, user) => ({
+  route("post", "/:id/sources/text", noRole, async (req, _res, user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingRead(authState, id, "source.add");
+    admission.assertRemoteAllowed({ authState, action: "source.parse" });
+    return ({
     source: await runtime.sources.addText(
-      numericId(req.params.id, "Meeting ID"),
+      id,
       reqBody(req),
-      user?.id
+      user?.id,
+      authState
     ),
-  }));
+    });
+  });
   route(
     "delete",
     "/:id/sources/:sourceId",
     noRole,
-    async (req, _res, user) => ({
+    async (req, _res, user, authState) => {
+      admission.assertRemoteAllowed({ authState, action: "source.reindex" });
+      await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "source.delete");
+      return ({
       source: await runtime.sources.remove(
         numericId(req.params.id, "Meeting ID"),
         numericId(req.params.sourceId, "Source ID"),
-        user?.id
+        user?.id,
+        authState
       ),
-    })
+      })
+    }
   );
   route(
     "post",
     "/:id/sources/:sourceId/retry",
     noRole,
-    async (req, _res, user) => ({
+    async (req, _res, user, authState) => {
+      admission.assertRemoteAllowed({ authState, action: "source.retry" });
+      await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "source.retry");
+      return ({
       job: await runtime.sources.retry(
         numericId(req.params.id, "Meeting ID"),
         numericId(req.params.sourceId, "Source ID"),
-        user?.id
+        user?.id,
+        authState
       ),
-    })
+      })
+    }
   );
-  route("get", "/:id/sources/:sourceId", noRole, async (req) => ({
+  route("get", "/:id/sources/:sourceId", noRole, async (req, _res, _user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "source.read");
+    return ({
     source: await runtime.sources.getSource(
       numericId(req.params.id, "Meeting ID"),
-      numericId(req.params.sourceId, "Source ID")
+      numericId(req.params.sourceId, "Source ID"),
+      authState
     ),
-  }));
-  route("get", "/:id/sources/:sourceId/segments", noRole, async (req) => {
+    });
+  });
+  route("get", "/:id/sources/:sourceId/segments", noRole, async (req, _res, _user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "source.segments");
     const source = await runtime.sources.getArchivedSource(
       numericId(req.params.id, "Meeting ID"),
-      numericId(req.params.sourceId, "Source ID")
+      numericId(req.params.sourceId, "Source ID"),
+      authState
     );
     let segments = source.segments;
     if (typeof segments === "string") {
@@ -533,10 +606,12 @@ function createMeetingsEndpoints(
     }
     return { source: publicSource(source), segments: segments || [] };
   });
-  route("get", "/:id/sources/:sourceId/file", noRole, async (req, res) => {
+  route("get", "/:id/sources/:sourceId/file", noRole, async (req, res, _user, authState) => {
+    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "source.file");
     const source = await runtime.sources.getArchivedSource(
       numericId(req.params.id, "Meeting ID"),
-      numericId(req.params.sourceId, "Source ID")
+      numericId(req.params.sourceId, "Source ID"),
+      authState
     );
     if (!source?.filePath)
       throw new MeetingError(

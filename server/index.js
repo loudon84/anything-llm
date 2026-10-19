@@ -131,7 +131,7 @@ const meetingWecomAuth =
 const app = express();
 app.locals.meetingWecomAuth = meetingWecomAuth;
 const apiRouter = express.Router();
-const meetingRuntime = createMeetingRuntime();
+const meetingRuntime = createMeetingRuntime({ authService: meetingWecomAuth });
 const meetingGatewayContractConfirmed =
   /^[a-f0-9]{64}$/i.test(process.env.MEETING_GATEWAY_CONTRACT_SHA256 || "") &&
   Boolean(process.env.MEETING_GATEWAY_CONTRACT_REVISION);

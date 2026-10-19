@@ -164,7 +164,7 @@ function createSourceService({
       );
   }
 
-  async function createParseJob(tx, meeting, source) {
+  async function createParseJob(tx, meeting, source, authContext = null) {
     const generation = Number(meeting.generation || 0);
     const activeKey = `PARSE_SOURCE:${source.id}:${source.contentHash}:${generation}`;
     const existing = await tx.meeting_jobs.findFirst({
@@ -183,6 +183,7 @@ function createSourceService({
           sourceId: source.id,
           sourceRevision: source.contentHash,
           generation,
+          ...(authContext ? { authContext } : {}),
         }),
         status: "CREATED",
         stage: null,
@@ -192,7 +193,7 @@ function createSourceService({
     });
   }
 
-  async function queueReindexForSourceSet(tx, meeting, sources) {
+  async function queueReindexForSourceSet(tx, meeting, sources, authContext = null) {
     const signature = hash(
       JSON.stringify(
         sources
@@ -221,6 +222,7 @@ function createSourceService({
         payload: JSON.stringify({
           generation: meeting.generation,
           sourceSetRevision: signature,
+          ...(authContext ? { authContext } : {}),
         }),
         status: "CREATED",
         attempts: 0,
@@ -236,6 +238,7 @@ function createSourceService({
     filePathInput,
     text,
     userId,
+    authContext,
   }) {
     const initialMeeting = await ensureSupplementAllowed(prisma, meetingId);
     const raw = buffer || (text == null ? null : Buffer.from(text, "utf8"));
@@ -373,7 +376,7 @@ function createSourceService({
             createdBy: userId ?? null,
           },
         });
-        await createParseJob(tx, current, source);
+        await createParseJob(tx, current, source, authContext);
         if (current.reviewStatus === "APPROVED")
           await tx.meetings.update({
             where: { id: current.id },
@@ -412,7 +415,7 @@ function createSourceService({
     }
   }
 
-  async function upload(meetingId, file, userId) {
+  async function upload(meetingId, file, userId, authContext) {
     if (
       !file ||
       typeof file.name !== "string" ||
@@ -430,6 +433,7 @@ function createSourceService({
         buffer: file.buffer,
         filePathInput: file.tempPath,
         userId,
+          authContext,
       });
     } catch (error) {
       if (file.tempPath) await cleanupTrustedTemp(file.tempPath);
@@ -437,7 +441,7 @@ function createSourceService({
     }
   }
 
-  async function addText(meetingId, { name, text }, userId) {
+  async function addText(meetingId, { name, text }, userId, authContext) {
     if (typeof text !== "string" || !text.trim())
       throw new MeetingError("Supplemental text is required", "SOURCE_EMPTY");
     return persistSupplement({
@@ -446,6 +450,7 @@ function createSourceService({
       sourceType: "SUPPLEMENT_TEXT",
       text: text.trim(),
       userId,
+      authContext,
     });
   }
 
@@ -486,7 +491,7 @@ function createSourceService({
     };
   }
 
-  async function remove(meetingId, sourceId, userId) {
+  async function remove(meetingId, sourceId, userId, authContext) {
     const result = await transaction(async (tx) => {
       const meeting = await currentMeeting(tx, meetingId);
       const source = await tx.meeting_sources.findFirst({
@@ -549,7 +554,7 @@ function createSourceService({
           externalId: meeting.externalId,
           quarter: meeting.quarter,
           activeKey: `REINDEX:${meeting.id}:${generation}`,
-          payload: JSON.stringify({ generation }),
+          payload: JSON.stringify({ generation, ...(authContext ? { authContext } : {}) }),
           status: "CREATED",
           attempts: 0,
         },
@@ -574,7 +579,7 @@ function createSourceService({
     return result.source;
   }
 
-  async function retry(sourceId, userId) {
+  async function retry(sourceId, userId, authContext) {
     return transaction(async (tx) => {
       const source = await tx.meeting_sources.findUnique({
         where: { id: Number(sourceId) },
@@ -590,7 +595,7 @@ function createSourceService({
         where: { id: source.id },
         data: { parseStatus: "PENDING", error: null },
       });
-      await createParseJob(tx, meeting, pending);
+      await createParseJob(tx, meeting, pending, authContext);
       await recordAudit(
         {
           action: "MEETING_SOURCE_RETRY_QUEUED",
@@ -636,7 +641,7 @@ function createSourceService({
       source.contentHash !== parseJson(job.payload, {}).sourceRevision
     )
       return { stale: true };
-    await createParseJob(tx, meeting, source);
+    await createParseJob(tx, meeting, source, parseJson(job.payload, {}).authContext || null);
     return { stale: true, requeued: true };
   }
 
@@ -803,7 +808,7 @@ function createSourceService({
           const activeSources = await tx.meeting_sources.findMany({
             where: { meetingId: currentMeeting.id, deletedAt: null },
           });
-          await queueReindexForSourceSet(tx, currentMeeting, activeSources);
+          await queueReindexForSourceSet(tx, currentMeeting, activeSources, payload.authContext || null);
         }
         await recordAudit(
           {
@@ -876,7 +881,7 @@ function createSourceService({
             const activeSources = await tx.meeting_sources.findMany({
               where: { meetingId: currentMeeting.id, deletedAt: null },
             });
-            await queueReindexForSourceSet(tx, currentMeeting, activeSources);
+            await queueReindexForSourceSet(tx, currentMeeting, activeSources, payload.authContext || null);
           }
           await tx.meetings.update({
             where: { id: currentMeeting.id },

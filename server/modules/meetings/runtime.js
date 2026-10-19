@@ -4,6 +4,7 @@ const { EventEmitter } = require("events");
 const { createMeetingConfig } = require("./config");
 const { createMeetingService } = require("./meetingService");
 const { createSourceService } = require("./sources");
+const { createMeetingAuthAccess } = require("../../utils/meetingGateway/meetingAuthAccess");
 const { createImporter } = require("./importer");
 const { createIndexer } = require("./indexer");
 const { createJobRunner } = require("./jobs");
@@ -270,6 +271,7 @@ function createMeetingRuntime({
   fetchImpl = globalThis.fetch,
   audit = null,
   runnerOptions = {},
+  authService = null,
 } = {}) {
   const { SystemSettings } = require("../../models/systemSettings");
   const auditWrite =
@@ -291,7 +293,6 @@ function createMeetingRuntime({
       });
     });
   const config = createMeetingConfig({ prisma, encryption, audit: auditWrite });
-  const meetings = createMeetingService({ prisma, audit: auditWrite });
   const getOriginals = () =>
     workspaceOriginals ||
     require("../../utils/workspaceOriginals").getWorkspaceOriginals();
@@ -311,6 +312,37 @@ function createMeetingRuntime({
     });
     return membership ? workspace : null;
   };
+  const meetingAuthAccess = createMeetingAuthAccess({
+    meetingStore: {
+      findMeetings: (ids) => prisma.meetings.findMany({ where: { id: { in: ids } } }),
+    },
+    workspaceAccess: async ({ workspaceId, userId }) => Boolean(await lookupWorkspace({ id: workspaceId, userId })),
+  });
+  const meetings = createMeetingService({ prisma, audit: auditWrite, meetingAuthAccess });
+  const jobAuthContext = (authState) => meetingAuthAccess.getJobAuthContext(authState);
+  async function authorizeJob(job) {
+    let payload;
+    try { payload = JSON.parse(job.payload || "{}"); } catch { payload = {}; }
+    const context = payload.authContext;
+    if (!context || !["GATEWAY_SESSION", "LEGACY_MULTI_USER", "LEGACY_SINGLE_USER"].includes(context.kind))
+      throw new MeetingError("Meeting job has no trusted initiator", "MGW_BUSINESS_AUTH_REQUIRED", 403);
+    if (context.kind === "GATEWAY_SESSION") {
+      if (!authService?.getValidatedSessionActor)
+        throw new MeetingError("Meeting session registry is unavailable", "MGW_BUSINESS_AUTH_REQUIRED", 401);
+      const trusted = await authService.getValidatedSessionActor({
+        sessionId: context.sessionId,
+        userId: context.userId,
+        credentialEpoch: context.credentialEpoch,
+      });
+      meetingAuthAccess.assertRemoteAllowed({ authState: trusted, action: `job.${job.kind}` });
+      const meeting = job.meetingId == null ? null : await prisma.meetings.findUnique({ where: { id: Number(job.meetingId) } });
+      if (meeting && Number(meeting.createdBy) !== Number(trusted.actor.userId))
+        throw new MeetingError("Meeting job is unavailable to this user", "MGW_RESOURCE_NOT_ACCESSIBLE", 403);
+      return;
+    }
+    if (context.kind === "LEGACY_MULTI_USER" && (!Number.isSafeInteger(Number(context.userId)) || Number(context.userId) <= 0))
+      throw new MeetingError("Meeting job has no trusted initiator", "MGW_BUSINESS_AUTH_REQUIRED", 403);
+  }
 
   async function operation(connectionId = null) {
     const settings =
@@ -385,6 +417,7 @@ function createMeetingRuntime({
     prisma,
     ...runnerOptions,
     audit: auditWrite,
+    authorizeJob,
     handlers: {
       IMPORT: async (job) =>
         (await makeImporter(job.connectionId)).process(job),
@@ -407,17 +440,20 @@ function createMeetingRuntime({
     },
   });
 
-  async function queueImport(input, userId) {
+  async function queueImport(input, userId, authState) {
+    meetingAuthAccess.assertRemoteAllowed({ authState, action: "import" });
     const importer = await makeImporter(input.connectionId);
     return importer.queue(
       input.connectionId,
       input.externalId,
       input.scope || {},
-      userId
+      userId,
+      jobAuthContext(authState)
     );
   }
   const remote = {
-    async client(connectionId) {
+    async client(connectionId, authState) {
+      meetingAuthAccess.assertRemoteAllowed({ authState, action: "remote.client" });
       const privateConfig = await config.getPrivate(connectionId);
       if (!privateConfig)
         throw new MeetingError(
@@ -427,26 +463,28 @@ function createMeetingRuntime({
         );
       return makeClient({ config: privateConfig });
     },
-    async list({ connectionId, ...scope } = {}) {
+    async list({ connectionId, authState, ...scope } = {}) {
+      meetingAuthAccess.assertRemoteAllowed({ authState, action: "remote.list" });
       if (!connectionId)
         throw new MeetingError(
           "A connection ID is required",
           "INVALID_CONNECTION_ID"
         );
-      const client = await this.client(connectionId);
+      const client = await this.client(connectionId, authState);
       return client.listMeetings({
         startTime: scope.startTime,
         endTime: scope.endTime,
         cursor: scope.cursor,
       });
     },
-    async manifest(externalId, { connectionId, ...scope } = {}) {
+    async manifest(externalId, { connectionId, authState, ...scope } = {}) {
+      meetingAuthAccess.assertRemoteAllowed({ authState, action: "remote.manifest" });
       if (!connectionId)
         throw new MeetingError(
           "A connection ID is required",
           "INVALID_CONNECTION_ID"
         );
-      const client = await this.client(connectionId);
+      const client = await this.client(connectionId, authState);
       return client.describeMeeting(String(externalId), {
         startTime: scope.startTime,
         endTime: scope.endTime,
@@ -593,6 +631,7 @@ function createMeetingRuntime({
       indexer: op.indexer,
       workspaceRetriever: retriever,
       llm,
+      meetingAuthAccess,
       audit: auditWrite,
     });
   }
@@ -602,9 +641,11 @@ function createMeetingRuntime({
       get:
         (_target, property) =>
         async (...args) => {
+          const authState = args[args.length - 1]?.kind ? args.pop() : null;
+          meetingAuthAccess.getRequestState({ response: { locals: { meetingAuthState: authState } } });
           const userId = args[args.length - 1];
           const service = await makeQA(userId);
-          return service[property](...args);
+          return service[property](...args, authState);
         },
     }
   );
@@ -617,14 +658,21 @@ function createMeetingRuntime({
     qa,
     lookupWorkspace,
     getWorkspaceOriginals: getOriginals,
-    async listJobs(filters = {}) {
+    async listJobs(filters = {}, authState) {
       const where = {};
       if (filters.status) where.status = String(filters.status);
       if (filters.kind) where.kind = String(filters.kind);
-      return prisma.meeting_jobs.findMany({
+      const rows = await prisma.meeting_jobs.findMany({
         where,
         orderBy: { createdAt: "desc" },
         take: 100,
+      });
+      if (authState?.kind !== "GATEWAY_SESSION") return rows;
+      return rows.filter((job) => {
+        try {
+          const context = JSON.parse(job.payload || "{}").authContext;
+          return context?.kind === "GATEWAY_SESSION" && Number(context.userId) === Number(authState.actor.userId);
+        } catch { return false; }
       });
     },
     meetingFilters(filters = {}) {
@@ -637,21 +685,38 @@ function createMeetingRuntime({
         };
       return where;
     },
-    async requestReindex(id, userId) {
+    async requestReindex(id, userId, authState) {
+      meetingAuthAccess.assertRemoteAllowed({ authState, action: "reindex" });
+      await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "meeting.reindex" });
       const meeting = await meetings.get(id);
       const op = await operation(meeting.connectionId);
-      return meetings.requestReindex(id, userId, op.profileId);
+      return meetings.requestReindex(id, userId, op.profileId, jobAuthContext(authState));
     },
-    async upload(meetingId, file, userId) {
+    async upload(meetingId, file, userId, authState) {
+      meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.parse" });
+      await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [meetingId], action: "source.upload" });
       const meeting = await meetings.get(meetingId);
       return (await operation(meeting.connectionId)).sources.upload(
         meetingId,
         file,
-        userId
+        userId,
+        jobAuthContext(authState)
       );
     },
-    async queueImport(input, userId) {
-      return queueImport(input, userId);
+    async queueImport(input, userId, authState) {
+      return queueImport(input, userId, authState);
+    },
+    async retryJob(id, authState) {
+      meetingAuthAccess.assertRemoteAllowed({ authState, action: "job.retry" });
+      const job = await prisma.meeting_jobs.findUnique({ where: { id: Number(id) } });
+      let context;
+      try { context = JSON.parse(job?.payload || "{}").authContext; } catch {}
+      const current = jobAuthContext(authState);
+      if (!context || context.kind !== current.kind ||
+          Number(context.userId) !== Number(current.userId) ||
+          (current.kind === "GATEWAY_SESSION" && (context.sessionId !== current.sessionId || Number(context.credentialEpoch) !== Number(current.credentialEpoch))))
+        throw new MeetingError("Meeting job is unavailable to this user", "MGW_RESOURCE_NOT_ACCESSIBLE", 403);
+      return jobRunner.retry(id);
     },
     async start() {
       jobRunner.start();
@@ -663,15 +728,21 @@ function createMeetingRuntime({
   Object.defineProperty(runtime, "sources", {
     get() {
       return {
-        addText: async (id, ...args) => {
+        addText: async (id, data, userId, authState) => {
+          meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.parse" });
+          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "source.add" });
           const m = await meetings.get(id);
-          return (await operation(m.connectionId)).sources.addText(id, ...args);
+          return (await operation(m.connectionId)).sources.addText(id, data, userId, jobAuthContext(authState));
         },
-        remove: async (id, ...args) => {
+        remove: async (id, sourceId, userId, authState) => {
+          meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.reindex" });
+          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "source.remove" });
           const m = await meetings.get(id);
-          return (await operation(m.connectionId)).sources.remove(id, ...args);
+          return (await operation(m.connectionId)).sources.remove(id, sourceId, userId, jobAuthContext(authState));
         },
-        retry: async (meetingId, sourceId, userId) => {
+        retry: async (meetingId, sourceId, userId, authState) => {
+          meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.retry" });
+          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [meetingId], action: "source.retry" });
           const source = await prisma.meeting_sources.findFirst({
             where: {
               id: Number(sourceId),
@@ -688,23 +759,26 @@ function createMeetingRuntime({
           const meeting = await meetings.get(meetingId);
           return (await operation(meeting.connectionId)).sources.retry(
             source.id,
-            userId
+            userId,
+            jobAuthContext(authState)
           );
         },
-        getSource: async (id, ...args) => {
+        getSource: async (id, sourceId, authState) => {
+          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "source.read" });
           const m = await meetings.get(id);
           return (await operation(m.connectionId)).sources.getSource(
             id,
-            ...args
+            sourceId
           );
         },
-        getArchivedSource: async (id, ...args) => {
+        getArchivedSource: async (id, sourceId, authState) => {
+          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "source.read" });
           const m = await prisma.meetings.findUnique({
             where: { id: Number(id) },
           });
           return (await operation(m?.connectionId)).sources.getArchivedSource(
             id,
-            ...args
+            sourceId
           );
         },
       };

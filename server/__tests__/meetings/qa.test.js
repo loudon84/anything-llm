@@ -18,14 +18,22 @@ function fakePrisma({ meetingRows, sourceRows, chunkRows } = {}) {
         meetings.find((row) => row.id === where.id) || null,
     },
     meeting_sources: {
-      findMany: async ({ where }) =>
-        sources.filter(
-          (row) => row.meetingId === where.meetingId && row.deletedAt == null
-        ),
+      findMany: async ({ where = {} }) => sources.filter((row) =>
+        (where.meetingId == null || (Array.isArray(where.meetingId?.in)
+          ? where.meetingId.in.includes(row.meetingId)
+          : row.meetingId === where.meetingId)) &&
+        (where.deletedAt == null || row.deletedAt === where.deletedAt) &&
+        (!where.parseStatus || row.parseStatus === where.parseStatus)
+      ),
     },
     meeting_chunks: {
-      findMany: async ({ where }) =>
-        chunks.filter((row) => row.meetingId === where.meetingId),
+      findMany: async ({ where = {} }) => chunks.filter((row) =>
+        (where.meetingId == null || (Array.isArray(where.meetingId?.in)
+          ? where.meetingId.in.includes(row.meetingId)
+          : row.meetingId === where.meetingId)) &&
+        (where.sourceId == null || where.sourceId.in?.includes(row.sourceId)) &&
+        (where.generation == null || row.generation === where.generation)
+      ),
     },
     meeting_conversations: {
       create: async ({ data }) => {
@@ -145,6 +153,69 @@ function setup(overrides = {}) {
 }
 
 describe("fixed-scope meeting QA and history", () => {
+  test("rejects a mixed-owner Gateway question before meeting or workspace retrieval", async () => {
+    const first = { ...availableMeeting(1), createdBy: 11 };
+    const second = { ...availableMeeting(2), createdBy: 22 };
+    const prisma = fakePrisma({
+      meetingRows: [first, second],
+      sourceRows: [activeSource(1, 1), activeSource(2, 2)],
+    });
+    const indexer = { search: jest.fn(async () => [citation("meeting:chunk:1")]) };
+    const workspaceRetriever = {
+      resolve: jest.fn(async ({ workspaceIds }) => workspaceIds.map((id) => ({ id }))),
+      search: jest.fn(async () => []),
+    };
+    const llm = { generate: jest.fn(async () => ({ status: "ANSWERED", text: "answer", citations: [] })) };
+    const { createMeetingAuthAccess } = require("../../utils/meetingGateway/meetingAuthAccess");
+    const meetingAuthAccess = createMeetingAuthAccess({
+      meetingStore: { findMeetings: async (ids) => [first, second].filter((row) => ids.includes(row.id)) },
+    });
+    const qa = createQAService({ prisma, indexer, workspaceRetriever, llm, meetingAuthAccess });
+    const state = {
+      authenticated: true,
+      kind: "GATEWAY_SESSION",
+      actor: { id: 11, userId: 11 },
+      session: { id: "s11", userId: 11, credentialEpoch: 0, expiresAt: "2099-01-01T00:00:00.000Z", remoteAccessMode: "LOCAL_ONLY" },
+      remoteAccessMode: "LOCAL_ONLY",
+    };
+
+    await expect(qa.createConversation({ meetingIds: [1, 2] }, 11, state))
+      .rejects.toMatchObject({ code: "MGW_RESOURCE_NOT_ACCESSIBLE", status: 403 });
+    expect(indexer.search).not.toHaveBeenCalled();
+    expect(workspaceRetriever.search).not.toHaveBeenCalled();
+    expect(llm.generate).not.toHaveBeenCalled();
+  });
+
+  test("answers a LOCAL_ONLY owner question from the persisted local index", async () => {
+    const meeting = { ...availableMeeting(1), createdBy: 11 };
+    const source = { ...activeSource(1, 1), contentText: "The launch date is May 18.", segments: JSON.stringify([{ text: "The launch date is May 18.", location: { type: "paragraph", paragraph: 0 } }]) };
+    const chunk = { id: 21, meetingId: 1, sourceId: 1, generation: 1, text: "The launch date is May 18.", location: JSON.stringify({ type: "paragraph", paragraph: 0 }), embedding: JSON.stringify({ profileId: "fixture", vector: [1, 0] }) };
+    const prisma = fakePrisma({ meetingRows: [meeting], sourceRows: [source], chunkRows: [chunk] });
+    const indexer = createIndexer({
+      prisma,
+      profileId: "fixture",
+      embedder: { embedQuery: async () => [1, 0], embedDocuments: async (texts) => texts.map(() => [1, 0]) },
+    });
+    const { createMeetingAuthAccess } = require("../../utils/meetingGateway/meetingAuthAccess");
+    const meetingAuthAccess = createMeetingAuthAccess({
+      meetingStore: { findMeetings: async (ids) => [meeting].filter((row) => ids.includes(row.id)) },
+    });
+    const workspaceRetriever = { resolve: async ({ workspaceIds }) => workspaceIds.map((id) => ({ id })), search: async () => [] };
+    const qa = createQAService({
+      prisma,
+      indexer,
+      workspaceRetriever,
+      meetingAuthAccess,
+      llm: { generate: async () => ({ status: "ANSWERED", text: "May 18", missingInfo: null, citations: [{ evidenceId: "meeting:21", quote: "The launch date is May 18." }] }) },
+    });
+    const state = { authenticated: true, kind: "GATEWAY_SESSION", actor: { id: 11, userId: 11 }, session: { id: "s11", userId: 11, credentialEpoch: 3, expiresAt: "2099-01-01T00:00:00.000Z", remoteAccessMode: "LOCAL_ONLY" }, remoteAccessMode: "LOCAL_ONLY" };
+    const conversation = await qa.createConversation({ meetingIds: [1], workspaceIds: [] }, 11, state);
+    const answer = await qa.ask(conversation.id, { question: "When is launch?" }, 11, state);
+
+    expect(answer.text).toBe("May 18");
+    expect(answer.citations[0].quote).toBe("The launch date is May 18.");
+  });
+
   test("lists only the current owner's recent fixed-scope conversations", async () => {
     const prisma = fakePrisma({ meetingRows: [availableMeeting()] });
     const { service: qa } = setup({ prisma });
