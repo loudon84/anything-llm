@@ -55,6 +55,12 @@ const FAILURE_DECISIONS = Object.freeze({
     state: "PENDING_CLEANUP",
     retryPolicy: "RECOVERY",
   },
+  AUTHORIZATION_RECOVERY: {
+    code: "MGW_OAUTH_RECOVERY_REQUIRED",
+    status: 202,
+    state: "PENDING",
+    retryPolicy: "RECOVERY",
+  },
   INPUT: {
     code: "MGW_INPUT_INVALID",
     status: 422,
@@ -82,7 +88,7 @@ function classifyFailure({ stage, httpStatus, reason, writeOutcome = "NONE", res
   // A write with no definitive result, including a transport loss or upstream 5xx,
   // requires operation-journal recovery and must never be blindly replayed.
   if (writeOutcome === "UNKNOWN" && (!responseReceived || httpStatus == null || httpStatus >= 300)) {
-    return stage === "QUERY" ? FAILURE_DECISIONS.QUERY_RECOVERY : FAILURE_DECISIONS.IMPORT_RECOVERY;
+    return stage === "QUERY" ? FAILURE_DECISIONS.QUERY_RECOVERY : stage === "AUTHORIZATION" ? FAILURE_DECISIONS.AUTHORIZATION_RECOVERY : FAILURE_DECISIONS.IMPORT_RECOVERY;
   }
   if (reason === "CONFIG_INVALID") return FAILURE_DECISIONS.CONFIG;
   if (reason === "CONTRACT_UNAVAILABLE") return FAILURE_DECISIONS.CONTRACT_UNAVAILABLE;

@@ -35,8 +35,9 @@ function fixture({ gatewayAvailable = true } = {}) {
   };
   const gateway = {
     transportAvailable: gatewayAvailable,
-    async accountLogin() { return { accessToken: "ms-secret", expiresAt: NOW + 800, binding: { orgId: "org-1", memberId: "member-1", userId: "gateway-user-1" } }; },
-    async exchange() { return { accessToken: "mt-secret", expiresAt: NOW + 700 }; },
+    resource: "https://gateway.example.test/api",
+    async accountLogin() { return { accessToken: "ms_secret", expiresAt: NOW + 800, binding: { orgId: "org-1", memberId: "member-1", userId: "gateway-user-1", gatewayInstanceId: "gateway-one", memberRole: "MEMBER" } }; },
+    async exchange() { return { accessToken: "mt_secret", expiresAt: NOW + 700, resource: "https://gateway.example.test/api", scope: "meeting.read" }; },
   };
   const keyring = { activeKeyId: "k1", keys: { k1: KEY }, hmacKey: KEY };
   const session = createSessionModule({
@@ -48,7 +49,7 @@ function fixture({ gatewayAvailable = true } = {}) {
     },
   });
   const user = { id: 11, password: "bcrypt-hash", suspended: false };
-  return { session, gateway, sessions, bindings, user, JWT };
+  return { session, gateway, sessions, bindings, store, user, JWT };
 }
 
 test("bridge cannot outlive any credential or the 15 minute cap", () => {
@@ -114,4 +115,72 @@ test("binding revoke makes every bridge require local reauthorization", async ()
 test("Gateway account login stays blocked until its contract is confirmed", async () => {
   const { session, user, JWT } = fixture({ gatewayAvailable: false });
   await expect(session.login({ user, jwt: JWT(11, NOW + 1200), credentials: { account: "a", password: "p" }, origin: "https://anything.example" })).rejects.toThrow("MGW_UPSTREAM_CONTRACT_ERROR");
+});
+
+test("projected employee bridge accepts passwordless local users while preserving the Gateway instance tuple", async () => {
+  const { session, sessions, JWT } = fixture();
+  const user = { id: 22, username: "mgw_employee", role: "default", password: null, suspended: false };
+  const localJwt = JWT(22, NOW + 1000);
+  const result = await session.bindProjected({
+    user, jwt: localJwt, origin: "https://anything.example",
+    account: { sessionToken: "ms_employee", expiresAt: NOW + 800, binding: {
+      gatewayInstanceId: "gateway-one", orgId: "org-1", memberId: "member-1", userId: "gateway-user-1", memberRole: "MEMBER", issuer: "account-login-v1",
+    } },
+    rest: { accessToken: "mt_employee", refreshToken: "mr_secret", expiresAt: NOW + 700, resource: "https://gateway.example.test/api", scope: "meeting.read" },
+  });
+  expect(result.cookie.options).toMatchObject({ httpOnly: true, secure: true, sameSite: "strict" });
+  expect(sessions.values().next().value.binding).toMatchObject({ gateway_instance_id: "gateway-one", gateway_org_id: "org-1", gateway_member_id: "member-1" });
+  expect(JSON.stringify(result)).not.toMatch(/ms_employee|mt_employee|mr_secret/);
+  expect((await session.requireBridge({ user, jwt: localJwt, cookie: result.cookie.value })).allowed).toBe(true);
+});
+
+test("projected bridge rejects the wrong Gateway resource before persistence", async () => {
+  const { session, sessions, JWT } = fixture();
+  const user = { id: 23, username: "mgw_employee", role: "default", password: null };
+  const account = { sessionToken: "ms_employee", expiresAt: NOW + 800, binding: {
+    gatewayInstanceId: "gateway-one", orgId: "org-1", memberId: "member-1", userId: "gateway-user-1", memberRole: "MEMBER",
+  } };
+  await expect(session.bindProjected({ user, jwt: JWT(23, NOW + 1000), origin: "https://anything.example", account, rest: {
+    accessToken: "mt_employee", expiresAt: NOW + 700, resource: "https://attacker.example/api", scope: "meeting.read",
+  } })).rejects.toThrow("MGW_UPSTREAM_CONTRACT_ERROR");
+  expect(sessions.size).toBe(0);
+});
+test("authenticated link refuses to replace an existing different Gateway actor", async () => {
+  const { session, bindings, gateway, user, JWT, sessions } = fixture();
+  bindings.set(user.id, { gateway_instance_id: "gateway-two", gateway_org_id: "org-1", gateway_member_id: "other-member", gateway_user_id: "other-user", status: "BOUND" });
+  await expect(session.login({ user, jwt: JWT(11, NOW + 1200), credentials: { account: "a", password: "p" }, origin: "https://anything.example" }))
+    .rejects.toThrow("MGW_IDENTITY_BINDING_CONFLICT");
+  expect(sessions.size).toBe(0);
+});
+test("server-only bridge credential accessor revalidates actor and decrypts member token", async () => {
+  const { session, user: _unused, JWT } = fixture();
+  const user = { id: 24, username: "mgw_employee", role: "default", password: null };
+  const localJwt = JWT(24, NOW + 1000);
+  const { cookie } = await session.bindProjected({
+    user, jwt: localJwt, origin: "https://anything.example",
+    account: { sessionToken: "ms_employee", expiresAt: NOW + 800, binding: {
+      gatewayInstanceId: "gateway-one", orgId: "org-1", memberId: "member-1", userId: "gateway-user-1", memberRole: "MEMBER",
+    } },
+    rest: { accessToken: "mt_employee", refreshToken: "mr_employee", expiresAt: NOW + 700, resource: "https://gateway.example.test/api", scope: "meeting.read" },
+  });
+  await expect(session.credentialsForBridge({ user, jwt: localJwt, cookie: cookie.value })).resolves.toEqual({
+    accessToken: "mt_employee", refreshToken: "mr_employee", expiresAt: new Date((NOW + 700) * 1000).toISOString(),
+    resource: "https://gateway.example.test/api", scope: "meeting.read",
+    member: { gatewayInstanceId: "gateway-one", orgId: "org-1", memberId: "member-1", userId: "gateway-user-1" },
+  });
+  await expect(session.credentialsForBridge({ user: { ...user, id: 25 }, jwt: localJwt, cookie: cookie.value })).rejects.toThrow("MGW_BUSINESS_AUTH_REQUIRED");
+});
+test("bridge persistence is revoked if its post-commit lookup fails", async () => {
+  const { session, store, sessions, JWT } = fixture();
+  const user = { id: 26, username: "mgw_employee", role: "default", password: null };
+  const originalCreate = store.createBridgeSession;
+  store.createBridgeSession = async (row) => { await originalCreate(row); throw new Error("lookup failure"); };
+  await expect(session.bindProjected({
+    user, jwt: JWT(26, NOW + 1000), origin: "https://anything.example",
+    account: { sessionToken: "ms_employee", expiresAt: NOW + 800, binding: {
+      gatewayInstanceId: "gateway-one", orgId: "org-1", memberId: "member-1", userId: "gateway-user-1", memberRole: "MEMBER",
+    } },
+    rest: { accessToken: "mt_employee", expiresAt: NOW + 700, resource: "https://gateway.example.test/api", scope: "meeting.read" },
+  })).rejects.toThrow("lookup failure");
+  expect([...sessions.values()][0].revoked_at).toBeInstanceOf(Date);
 });

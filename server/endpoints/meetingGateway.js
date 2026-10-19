@@ -10,8 +10,38 @@ function setBridgeCookie(response, cookie) {
 function clearBridgeCookie(response) {
   response.setHeader("Set-Cookie", COOKIE_NAME + "=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict");
 }
-function meetingGatewayEndpoints(apiRouter, { sessions = null, oauth = null, enabled = false, contractConfirmed = false } = {}) {
+function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = null, oauth = null, enabled = false, contractConfirmed = false } = {}) {
   const oauthReady = enabled === true && contractConfirmed === true && oauth?.contractConfirmed === true;
+  const employeeLoginAttempts = new Map();
+  apiRouter.post("/meeting-gateway/employee-login", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    const body = request.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !["account", "password"].includes(key)) || typeof body.account !== "string" || typeof body.password !== "string")
+      return response.status(422).json({ error: "MGW_INPUT_INVALID" });
+    const now = Date.now();
+    const key = String(request.ip || request.socket?.remoteAddress || "unknown");
+    const current = employeeLoginAttempts.get(key);
+    if (!current || now - current.startedAt >= 60_000) employeeLoginAttempts.set(key, { startedAt: now, count: 1 });
+    else if (current.count >= 10) return response.status(429).json({ error: "MGW_RATE_LIMITED" });
+    else current.count++;
+    if (!employeeAuth) return response.status(503).json({ error: "MGW_DEPENDENCY_NOT_READY" });
+    try {
+      const result = await employeeAuth.login({
+        credentials: { account: body.account, password: body.password },
+        origin: request.header("Origin"), oldBridge: readBridgeCookie(request.header("Cookie")),
+      });
+      for (const cookie of [result.sessionCookie, result.bridgeCookie]) {
+        const expires = cookie.options.expires.toUTCString();
+        response.append("Set-Cookie", cookie.name + "=" + cookie.value + "; Path=/; Expires=" + expires + "; HttpOnly; Secure; SameSite=" + (cookie.options.sameSite === "lax" ? "Lax" : "Strict"));
+      }
+      const { sessionCookie: _sessionCookie, bridgeCookie: _bridgeCookie, bridge: _bridge, ...dto } = result;
+      return response.status(200).json(dto);
+    } catch (error) {
+      const code = typeof error?.code === "string" && error.code.startsWith("MGW_") ? error.code : "MGW_UPSTREAM_UNAVAILABLE";
+      const status = Number.isInteger(error?.status) ? error.status : code === "MGW_LOGIN_REJECTED" ? 401 : code === "MGW_CSRF_REJECTED" ? 403 : 503;
+      return response.status(status).json({ error: code });
+    }
+  });
   apiRouter.post("/meeting-gateway/session", [validatedRequest], async (request, response) => {
     if (!sessions) return response.status(503).json({ error: "MGW_CONFIG_INVALID" });
     if (!enabled) return response.status(503).json({ error: "MGW_UPSTREAM_CONTRACT_ERROR" });

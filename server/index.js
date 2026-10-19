@@ -53,6 +53,8 @@ const { httpLogger } = require("./middleware/httpLogger");
 const { meetingGatewayEndpoints } = require("./endpoints/meetingGateway");
 const { createWeComAuthEndpoints } = require("./endpoints/wecomAuth");
 const { createSessionModule } = require("./utils/meetingGateway/sessions");
+const { createGatewayClient } = require("./utils/meetingGateway/client");
+const { createEmployeeAuthService } = require("./utils/meetingGateway/employeeAuth");
 const {
   createWeComGatewayClient,
 } = require("./utils/meetingGateway/wecomClient");
@@ -61,6 +63,24 @@ const {
 } = require("./utils/meetingGateway/wecomAuthRuntime");
 const { createMeetingStore } = require("./models/meetingGateway");
 const { createWeComIdentityStore } = require("./models/wecomIdentity");
+const meetingGatewayOrigin = process.env.MEETING_GATEWAY_ORIGIN || "";
+const meetingGatewayScopes = (process.env.MEETING_GATEWAY_SCOPES || "meeting.read meeting.query").split(/\s+/).filter(Boolean);
+const meetingGatewayAuthReady = Boolean(
+  process.env.MEETING_GATEWAY_ENABLED === "true" && meetingGatewayOrigin &&
+  process.env.MEETING_GATEWAY_INSTANCE_ID && process.env.MEETING_GATEWAY_CLIENT_ID &&
+  process.env.MEETING_GATEWAY_CLIENT_SECRET && process.env.MEETING_GATEWAY_REST_RESOURCE
+);
+let meetingGatewayAuthClient = null;
+if (meetingGatewayAuthReady) {
+  try { meetingGatewayAuthClient = createGatewayClient({
+  origin: meetingGatewayOrigin, originAllowlist: [meetingGatewayOrigin],
+  allowlist: ["/api/v1/auth/account-login", "/api/v1/auth/exchange", "/api/v1/oauth/authorizations", "/api/v1/me/connections"],
+  gatewayInstanceId: process.env.MEETING_GATEWAY_INSTANCE_ID, clientId: process.env.MEETING_GATEWAY_CLIENT_ID,
+  clientSecret: process.env.MEETING_GATEWAY_CLIENT_SECRET, scopes: meetingGatewayScopes,
+  resource: process.env.MEETING_GATEWAY_REST_RESOURCE, enabled: true,
+  contractEvidence: { confirmed: /^[a-f0-9]{64}$/i.test(process.env.MEETING_GATEWAY_CONTRACT_SHA256 || "") && Boolean(process.env.MEETING_GATEWAY_CONTRACT_REVISION) },
+}); } catch (_error) { meetingGatewayAuthClient = null; }
+}
 const { SystemSettings } = require("./models/systemSettings");
 const { User } = require("./models/user");
 const prisma = require("./utils/prisma");
@@ -95,7 +115,7 @@ const meetingKeyring = parseMeetingKeyring();
 const meetingSessions = meetingKeyring
   ? createSessionModule({
       store: createMeetingStore({ prisma }),
-      gateway: null,
+      gateway: meetingGatewayAuthClient,
       keyring: meetingKeyring,
       origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
     })
@@ -122,6 +142,13 @@ const meetingWecomAuth = createWeComAuthRuntime({
     : null,
   cryptoConfig: meetingKeyring,
 });
+const meetingGatewayIdentityStore = createWeComIdentityStore({ prisma });
+const meetingEmployeeAuth = meetingGatewayAuthClient && meetingSessions && process.env.JWT_SECRET ? createEmployeeAuthService({
+  gateway: meetingGatewayAuthClient, identityStore: meetingGatewayIdentityStore, sessions: meetingSessions,
+  jwt: { sign: (claims, expiresIn) => require("jsonwebtoken").sign(claims, process.env.JWT_SECRET, { expiresIn }) },
+  origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || null,
+  isMultiUserMode: () => SystemSettings.isMultiUserMode(),
+}) : null;
 const app = express();
 app.locals.meetingWecomAuth = meetingWecomAuth;
 const apiRouter = express.Router();
@@ -200,6 +227,7 @@ meetingsEndpoints(apiRouter, {
 createWeComAuthEndpoints(apiRouter, { auth: meetingWecomAuth });
 meetingGatewayEndpoints(apiRouter, {
   sessions: meetingSessions,
+  employeeAuth: meetingEmployeeAuth,
   oauth: app.locals.meetingGateway.oauth,
   enabled: app.locals.meetingGateway.enabled,
   contractConfirmed: app.locals.meetingGateway.contractConfirmed,

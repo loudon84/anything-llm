@@ -2,6 +2,14 @@ const { classifyFailure } = require("../../utils/meetingGateway/errors");
 const { createGatewayClient } = require("../../utils/meetingGateway/client");
 const { redact } = require("../../utils/meetingGateway/redact");
 
+function jsonResponse(data, status = 200) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    async json() { return data; },
+  };
+}
+
 describe("Meeting Gateway client boundaries", () => {
   let consoleWarnSpy;
   beforeEach(() => {
@@ -83,6 +91,8 @@ describe("Meeting Gateway client boundaries", () => {
   });
 
   test("TEST-A-REV-010-01: unknown external write outcome requires recovery", async () => {
+    expect(classifyFailure({ stage: "AUTHORIZATION", reason: "timeout", writeOutcome: "UNKNOWN" }))
+      .toMatchObject({ code: "MGW_OAUTH_RECOVERY_REQUIRED", status: 202, state: "PENDING", retryPolicy: "RECOVERY" });
     expect(classifyFailure({ stage: "IMPORT", reason: "timeout", writeOutcome: "UNKNOWN" }))
       .toMatchObject({ code: "MGW_IMPORT_RECOVERY_REQUIRED", status: 202, state: "PENDING_CLEANUP", retryPolicy: "RECOVERY" });
     const client = createGatewayClient({
@@ -123,6 +133,116 @@ describe("Meeting Gateway client boundaries", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  test("account login unwraps the Gateway envelope and drops Backend credentials", async () => {
+    const logger = { warn: jest.fn() };
+    const fetchImpl = jest.fn(async () => jsonResponse({
+      code: 0, error_code: 0,
+      data: {
+        session_token: "ms_employee_session", token_type: "bearer", expires_in: 600,
+        org_id: "org-1",
+        user: { user_id: "user-1", member_id: "member-1", name: "Ada", member_role: "member" },
+        access_token: "backend-jwt-canary", refresh_token: "backend-refresh-canary",
+      },
+    }));
+    const client = createGatewayClient({
+      origin: "https://gateway.example.test",
+      originAllowlist: ["https://gateway.example.test"],
+      allowlist: ["/api/v1/auth/account-login", "/api/v1/auth/exchange"],
+      fetchImpl, enabled: true, gatewayInstanceId: "gateway-instance-1",
+      resource: "https://gateway.example.test/api", logger,
+      clock: () => 1_792_368_000_000,
+    });
+
+    const result = await client.accountLogin({ account: "ada", password: "password-canary" });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      new URL("https://gateway.example.test/api/v1/auth/account-login"),
+      expect.objectContaining({
+        method: "POST", redirect: "error",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account: "ada", password: "password-canary" }),
+      })
+    );
+    expect(result).toEqual({
+      sessionToken: "ms_employee_session",
+      expiresAt: "2026-10-19T00:09:55.000Z",
+      binding: {
+        gatewayInstanceId: "gateway-instance-1", orgId: "org-1", memberId: "member-1",
+        userId: "user-1", memberRole: "MEMBER", issuer: "account-login-v1", displayName: "Ada", active: true,
+        identityExpiresAt: "2026-10-19T00:09:55.000Z",
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/backend-jwt-canary|backend-refresh-canary|password-canary/);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/password-canary|backend-jwt-canary|backend-refresh-canary/);
+  });
+
+  test("exchange sends only an ms_ subject token and verifies the REST resource response", async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({
+      code: 0, error_code: 0,
+      data: {
+        access_token: "mt_employee_api", token_type: "Bearer", expires_in: 300,
+        refresh_token: "mr_employee_refresh", scope: "meeting.read meeting.query",
+        resource: "https://gateway.example.test/api",
+      },
+    }));
+    const client = createGatewayClient({
+      origin: "https://gateway.example.test",
+      originAllowlist: ["https://gateway.example.test"],
+      allowlist: ["/api/v1/auth/exchange"], fetchImpl, enabled: true,
+      clientId: "registered-client", clientSecret: "client-secret-canary",
+      scopes: ["meeting.read", "meeting.query"],
+      resource: "https://gateway.example.test/api", clock: () => 1_792_368_000_000,
+    });
+
+    const result = await client.exchange("ms_employee_session");
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      new URL("https://gateway.example.test/api/v1/auth/exchange"),
+      expect.objectContaining({
+        method: "POST", redirect: "error",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: "registered-client", client_secret: "client-secret-canary",
+          subject_token: "ms_employee_session", scopes: ["meeting.read", "meeting.query"],
+          resource: "https://gateway.example.test/api",
+        }),
+      })
+    );
+    expect(result).toEqual({
+      accessToken: "mt_employee_api", refreshToken: "mr_employee_refresh",
+      expiresAt: "2026-10-19T00:04:55.000Z", scope: "meeting.read meeting.query",
+      resource: "https://gateway.example.test/api",
+    });
+    await expect(client.exchange("backend-jwt-canary")).rejects.toMatchObject({ code: "MGW_BUSINESS_AUTH_REQUIRED" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  test("allows only the explicit AUTHORIZATION write stage for OAuth operations", async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({ code: 0, error_code: 0, data: { accepted: true } }));
+    const client = createGatewayClient({
+      origin: "https://gateway.example.test", originAllowlist: ["https://gateway.example.test"],
+      allowlist: ["/api/v1/oauth/authorizations"], fetchImpl, enabled: true,
+      contractEvidence: { confirmed: true }, headersForSubject: (bridge) => ({ Authorization: `Bearer ${bridge}` }),
+    });
+    await expect(client.requestForSubject({ bridge: "mt_actor", path: "/api/v1/oauth/authorizations", method: "POST", stage: "AUTHORIZATION", body: "{}" }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(client.requestForSubject({ bridge: "mt_actor", path: "/api/v1/oauth/authorizations", method: "POST", stage: "LOGIN", body: "{}" }))
+      .rejects.toMatchObject({ code: "MGW_CONFIG_INVALID" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects account-login identities that are not Gateway members", async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({ code: 0, error_code: 0, data: {
+      session_token: "ms_employee_session", expires_in: 600, org_id: "org-1",
+      user: { user_id: "user-1", member_id: "member-1", name: "Ada", member_role: "admin" },
+    } }));
+    const client = createGatewayClient({
+      origin: "https://gateway.example.test", originAllowlist: ["https://gateway.example.test"],
+      allowlist: ["/api/v1/auth/account-login"], fetchImpl, enabled: true,
+      gatewayInstanceId: "gateway-instance-1", clock: () => 1_792_368_000_000,
+    });
+    await expect(client.accountLogin({ account: "ada", password: "secret" }))
+      .rejects.toMatchObject({ code: "MGW_UPSTREAM_CONTRACT_ERROR" });
+  });
   test("TEST-A-SEC-003-03: origin must match an exact trusted origin", () => {
     const fetchImpl = jest.fn();
     expect(() => createGatewayClient({

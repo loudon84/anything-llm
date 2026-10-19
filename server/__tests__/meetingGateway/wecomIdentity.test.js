@@ -109,6 +109,12 @@ describe("WeCom identity projection and local session persistence", () => {
     });
     const { PrismaClient: IsolatedPrismaClient } = require(path.join(isolatedClientDir, "generated-client"));
     schemaClient = new IsolatedPrismaClient({ datasources: { db: { url: `file:${dbPath.replace(/\\/g, "/")}` } } });
+    await schemaClient.$executeRawUnsafe(`CREATE TABLE meeting_bridge_sessions (
+      id TEXT NOT NULL PRIMARY KEY, anything_user_id INTEGER NOT NULL, session_binding_hmac TEXT NOT NULL UNIQUE,
+      jwt_binding_hmac TEXT NOT NULL, csrf_hmac TEXT NOT NULL, credential_binding_hmac TEXT NOT NULL,
+      ciphertext BLOB NOT NULL, nonce BLOB NOT NULL, key_id TEXT NOT NULL, ms_expiry DATETIME NOT NULL, mt_expiry DATETIME NOT NULL,
+      jwt_expiry DATETIME NOT NULL, session_expiry DATETIME NOT NULL, gateway_expiry DATETIME NOT NULL, created_at DATETIME NOT NULL, revoked_at DATETIME
+    )`);
     legacyForeignKeyErrors = await schemaClient.$queryRawUnsafe("PRAGMA foreign_key_check");
 
     if (typeof createWeComIdentityStore === "function") {
@@ -193,7 +199,7 @@ describe("WeCom identity projection and local session persistence", () => {
       gateway_user_id: "legacy-user",
     });
     expect(await legacyStore.getBinding(1)).toMatchObject({ gateway_instance_id: null, gateway_member_id: "member-one" });
-    expect(await legacyStore.getBinding(2)).toBeNull();
+    expect(await legacyStore.getBinding(2)).toMatchObject({ id: "new-row", gateway_instance_id: "gateway-one" });
     await expect(legacyStore.saveBinding({
       anything_user_id: 2,
       gateway_org_id: "org-one",
@@ -203,7 +209,26 @@ describe("WeCom identity projection and local session persistence", () => {
     expect(await schemaClient.$queryRawUnsafe("SELECT gateway_instance_id FROM meeting_gateway_bindings WHERE id='new-row'")).toEqual([{ gateway_instance_id: "gateway-one" }]);
   });
 
-  test("same-name identities and the same org/member in different Gateway instances remain separate", async () => {
+  test("bridge persistence preserves the identity projection's Gateway instance binding", async () => {
+    const projected = await store.upsertGatewayUserProjection({ profile: profile() });
+    const meetingStore = createMeetingStore({ prisma: schemaClient, clock: () => now });
+    await meetingStore.createBridgeSession({
+      id: "bridge-instance-bound", anything_user_id: projected.user.id,
+      binding: {
+        anything_user_id: projected.user.id, gateway_instance_id: "gateway-one", gateway_org_id: "org-one",
+        gateway_member_id: "member-one", gateway_user_id: "gateway-user-one", identity_issuer: "issuer-one",
+      },
+      session_binding_hmac: "a".repeat(64), jwt_binding_hmac: "b".repeat(64), csrf_hmac: "c".repeat(64),
+      credential_binding_hmac: "d".repeat(64), ciphertext: Buffer.alloc(32, 7), nonce: Buffer.alloc(12, 8), key_id: "test",
+      ms_expiry: new Date("2026-10-19T01:00:00.000Z"), mt_expiry: new Date("2026-10-19T01:00:00.000Z"),
+      jwt_expiry: new Date("2026-10-19T01:00:00.000Z"), session_expiry: new Date("2026-10-19T01:00:00.000Z"),
+      gateway_expiry: new Date("2026-10-19T01:00:00.000Z"),
+    });
+    expect(await meetingStore.getBinding(projected.user.id)).toMatchObject({
+      gateway_instance_id: "gateway-one", gateway_org_id: "org-one", gateway_member_id: "member-one",
+    });
+    expect(await meetingStore.findBridgeSessionByBinding("a".repeat(64))).toMatchObject({ id: "bridge-instance-bound" });
+  });  test("same-name identities and the same org/member in different Gateway instances remain separate", async () => {
     const sameName = await store.upsertGatewayUserProjection({ profile: profile() });
     const anotherMember = await store.upsertGatewayUserProjection({ profile: profile({ memberId: "member-two", userId: "gateway-user-two" }) });
     const otherInstance = await store.upsertGatewayUserProjection({ profile: profile({ gatewayInstanceId: "gateway-two" }) });
