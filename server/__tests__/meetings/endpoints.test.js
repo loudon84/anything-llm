@@ -245,6 +245,47 @@ describe("authenticated meeting endpoints", () => {
     });
   });
 
+  test("admits passwordless single-user requests through the real middleware and meeting route", async () => {
+    SystemSettings.isMultiUserMode.mockResolvedValue(false);
+    const oldAuthToken = process.env.AUTH_TOKEN;
+    const oldJwtSecret = process.env.JWT_SECRET;
+    delete process.env.AUTH_TOKEN;
+    delete process.env.JWT_SECRET;
+    try {
+      const { routes } = setup({}, {}, { authenticate: validatedRequest });
+      const route = routes.find((item) => item.method === "get" && item.path === "/meetings");
+      const response = await invokeMiddlewareChain(route);
+      expect(response.statusCode).toBe(200);
+      expect(response.value.meetings).toEqual([]);
+    } finally {
+      if (oldAuthToken === undefined) delete process.env.AUTH_TOKEN;
+      else process.env.AUTH_TOKEN = oldAuthToken;
+      if (oldJwtSecret === undefined) delete process.env.JWT_SECRET;
+      else process.env.JWT_SECRET = oldJwtSecret;
+    }
+  });
+
+  test("does not downgrade an invalid bearer token to passwordless legacy auth", async () => {
+    SystemSettings.isMultiUserMode.mockResolvedValue(false);
+    const oldAuthToken = process.env.AUTH_TOKEN;
+    const oldJwtSecret = process.env.JWT_SECRET;
+    delete process.env.AUTH_TOKEN;
+    delete process.env.JWT_SECRET;
+    try {
+      const { routes } = setup({}, {}, { authenticate: validatedRequest });
+      const route = routes.find((item) => item.method === "get" && item.path === "/meetings");
+      const response = await invokeMiddlewareChain(route, { authorization: "Bearer invalid-token" });
+      expect(response.statusCode).toBe(401);
+      expect(response.value.error).toBe("Invalid auth token.");
+      expect(response.value.code).toBe("AUTHENTICATION_REQUIRED");
+    } finally {
+      if (oldAuthToken === undefined) delete process.env.AUTH_TOKEN;
+      else process.env.AUTH_TOKEN = oldAuthToken;
+      if (oldJwtSecret === undefined) delete process.env.JWT_SECRET;
+      else process.env.JWT_SECRET = oldJwtSecret;
+    }
+  });
+
   test("wraps the actual admin role denial without bypassing the role check", async () => {
     SystemSettings.isMultiUserMode.mockResolvedValue(true);
     const authenticateAsEmployee = (_req, res, next) => {

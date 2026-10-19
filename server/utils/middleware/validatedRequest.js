@@ -26,7 +26,18 @@ async function validatedRequest(request, response, next) {
     !process.env.AUTH_TOKEN ||
     !process.env.JWT_SECRET
   ) {
+    if (authorization && !(signedClaims?.id || signedClaims?.p)) {
+      response.status(401).json({ error: "Invalid auth token." });
+      return;
+    }
     UserMetaCache.setFromRequest(request);
+    response.locals.meetingAuthState = {
+      authenticated: true,
+      kind: "LEGACY_SINGLE_USER",
+      actor: null,
+      session: null,
+      remoteAccessMode: null,
+    };
     next();
     return;
   }
