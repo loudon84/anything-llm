@@ -62,6 +62,7 @@ const {
   createWeComAuthRuntime,
 } = require("./utils/meetingGateway/wecomAuthRuntime");
 const { createMeetingStore } = require("./models/meetingGateway");
+const { createOAuthModule } = require("./utils/meetingGateway/oauth");
 const { createWeComIdentityStore } = require("./models/wecomIdentity");
 const meetingGatewayOrigin = process.env.MEETING_GATEWAY_ORIGIN || "";
 const meetingGatewayScopes = (process.env.MEETING_GATEWAY_SCOPES || "meeting.read meeting.query").split(/\s+/).filter(Boolean);
@@ -74,7 +75,7 @@ let meetingGatewayAuthClient = null;
 if (meetingGatewayAuthReady) {
   try { meetingGatewayAuthClient = createGatewayClient({
   origin: meetingGatewayOrigin, originAllowlist: [meetingGatewayOrigin],
-  allowlist: ["/api/v1/auth/account-login", "/api/v1/auth/exchange", "/api/v1/oauth/authorizations", "/api/v1/me/connections"],
+  allowlist: ["/api/v1/auth/account-login", "/api/v1/auth/exchange", "/api/v1/oauth/authorizations", "/api/v1/me/connections", "/api/v1/connections/:connectionId/confirm"],
   gatewayInstanceId: process.env.MEETING_GATEWAY_INSTANCE_ID, clientId: process.env.MEETING_GATEWAY_CLIENT_ID,
   clientSecret: process.env.MEETING_GATEWAY_CLIENT_SECRET, scopes: meetingGatewayScopes,
   resource: process.env.MEETING_GATEWAY_REST_RESOURCE, enabled: true,
@@ -120,6 +121,28 @@ const meetingSessions = meetingKeyring
       origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
     })
   : null;
+const meetingGatewayOauthApplicationId = process.env.MEETING_GATEWAY_OAUTH_APPLICATION_ID || "";
+const meetingGatewayPublicBaseUrl = process.env.MEETING_GATEWAY_PUBLIC_BASE_URL || "";
+const meetingGatewayConsumerOrigin = process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || "";
+const meetingGatewayOauthConfig = meetingGatewayOauthApplicationId && meetingGatewayPublicBaseUrl && meetingGatewayConsumerOrigin &&
+  process.env.MEETING_GATEWAY_TENCENT_CORP_ID && process.env.MEETING_GATEWAY_TENCENT_SDK_ID
+  ? {
+      applicationId: meetingGatewayOauthApplicationId,
+      corpId: process.env.MEETING_GATEWAY_TENCENT_CORP_ID,
+      sdkId: process.env.MEETING_GATEWAY_TENCENT_SDK_ID,
+      callbackUri: meetingGatewayPublicBaseUrl.replace(/\/$/, "") + "/callbacks/tencent/oauth/" + encodeURIComponent(meetingGatewayOauthApplicationId),
+      returnTo: meetingGatewayConsumerOrigin.replace(/\/$/, "") + "/api/meeting-gateway/oauth/return",
+    }
+  : null;
+const meetingGatewayOauth = meetingGatewayAuthClient && meetingSessions && meetingGatewayOauthConfig
+  ? createOAuthModule({
+      gateway: meetingGatewayAuthClient,
+      store: createMeetingStore({ prisma }),
+      allowedAuthorizationPaths: ["/marketplace/authorize.html"],
+      authorizationConfig: meetingGatewayOauthConfig,
+      enabled: true,
+    })
+  : null;
 // No live WeCom wire contract is signed off. Keep the client unavailable while
 // allowing the BFF to expose an explicit dependency status without startup failure.
 const meetingWecomGateway = createWeComGatewayClient({
@@ -157,11 +180,9 @@ const meetingGatewayContractConfirmed =
   /^[a-f0-9]{64}$/i.test(process.env.MEETING_GATEWAY_CONTRACT_SHA256 || "") &&
   Boolean(process.env.MEETING_GATEWAY_CONTRACT_REVISION);
 app.locals.meetingGateway = Object.freeze({
-  enabled:
-    process.env.MEETING_GATEWAY_ENABLED === "true" &&
-    meetingGatewayContractConfirmed,
+  enabled: meetingGatewayAuthReady,
   contractConfirmed: meetingGatewayContractConfirmed,
-  oauth: null,
+  oauth: meetingGatewayOauth,
 });
 const FILE_LIMIT = "3GB";
 

@@ -29,6 +29,20 @@ describe("meeting gateway SQLite state store", () => {
     for (const statement of migration.split(";").map((sql) => sql.trim()).filter(Boolean)) {
       await prisma.$executeRawUnsafe(statement);
     }
+    const bridgeBindingsMigration = fs.readFileSync(
+      path.join(__dirname, "../../prisma/migrations/20261018000200_meeting_bridge_bindings/migration.sql"),
+      "utf8"
+    );
+    for (const statement of bridgeBindingsMigration.split(";").map((sql) => sql.trim()).filter(Boolean)) {
+      await prisma.$executeRawUnsafe(statement);
+    }
+    const oauthSnapshotMigration = fs.readFileSync(
+      path.join(__dirname, "../../prisma/migrations/20261020000100_meeting_oauth_connection_snapshot/migration.sql"),
+      "utf8"
+    );
+    for (const statement of oauthSnapshotMigration.split(";").map((sql) => sql.trim()).filter(Boolean)) {
+      await prisma.$executeRawUnsafe(statement);
+    }
     now = new Date("2026-10-18T00:00:00.000Z");
   });
 
@@ -107,6 +121,20 @@ describe("meeting gateway SQLite state store", () => {
       new Date("2026-10-18T00:05:00.000Z"),
       now
     );
+  });
+
+  test("persists the pre-authorization connection id snapshot with its one-use pending transaction", async () => {
+    await prisma.$executeRawUnsafe(
+      "INSERT INTO meeting_bridge_sessions (id, anything_user_id, session_binding_hmac, ciphertext, nonce, key_id, gateway_expiry, created_at) VALUES ('oauth-snapshot-bridge', 1, 'hmac-snapshot', ?, ?, 'test-key', ?, ?)",
+      Buffer.from("ciphertext"), Buffer.from("nonce"), new Date("2026-10-18T00:15:00.000Z"), now
+    );
+    const store = newStore();
+    const row = await store.createOAuthTransaction({
+      transactionId: "oauth-snapshot-transaction", ownerUserId: 1, bridgeSessionId: "oauth-snapshot-bridge",
+      expiresAt: new Date("2026-10-18T00:05:00.000Z"), state: "PENDING", existingConnectionIds: ["prior-connection"],
+    });
+    expect(row.existingConnectionIds).toEqual(["prior-connection"]);
+    expect((await store.findPendingOAuthForBridge("oauth-snapshot-bridge")).existingConnectionIds).toEqual(["prior-connection"]);
   });
 
   test("A-STATE-001-01 concurrent duplicate identity reservations keep one row", async () => {

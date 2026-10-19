@@ -38,7 +38,7 @@ function createBoundedRateLimiter({ windowMs = 60_000, maxAttempts = 10, maxEntr
 }
 
 function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = null, oauth = null, enabled = false, contractConfirmed = false } = {}) {
-  const oauthReady = enabled === true && contractConfirmed === true && oauth?.contractConfirmed === true;
+  const oauthReady = enabled === true && oauth?.contractConfirmed === true;
   const employeeLoginAttempts = createBoundedRateLimiter();
   apiRouter.post("/meeting-gateway/employee-login", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
@@ -113,12 +113,30 @@ function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = nu
     }
   });
   const oauthUnavailable = (_request, response) => response.status(503).json({ error: "MGW_UPSTREAM_CONTRACT_ERROR" });
+  const oauthRemoteAllowed = (_request, response) => {
+    const authState = response.locals.meetingAuthState;
+    if (authState?.kind === "GATEWAY_SESSION" && (authState.remoteAccessMode ?? authState.session?.remoteAccessMode) !== "GATEWAY_ENABLED") {
+      response.status(403).json({ error: "MGW_REMOTE_ACCESS_REQUIRED" });
+      return false;
+    }
+    return true;
+  };
   const hasEmptyJsonObject = (body) => body !== null && typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0;
-  const oauthContext = (_request, response) => ({
-    ownerUserId: Number(response.locals.user?.id),
-    bridgeSessionId: response.locals.meetingBridge.bridgeId,
-    bridgeExpiresAt: response.locals.meetingBridge.expiresAt,
-  });
+  const oauthContext = async (request, response, mutation = false) => {
+    const sessionCredentials = sessions?.credentialsForBridge ? await sessions.credentialsForBridge({
+      user: response.locals.user,
+      jwt: /^Bearer (\S+)$/.exec(request.header("Authorization") || "")?.[1],
+      cookie: readBridgeCookie(request.header("Cookie")),
+      csrf: request.header("X-Meeting-CSRF"),
+      origin: request.header("Origin"), mutation,
+    }) : null;
+    return {
+      ownerUserId: Number(response.locals.user?.id),
+      bridgeSessionId: response.locals.meetingBridge.bridgeId,
+      bridgeExpiresAt: response.locals.meetingBridge.expiresAt,
+      ...(sessionCredentials ? { gatewayAccessToken: sessionCredentials.accessToken, gatewayMemberId: sessionCredentials.member.memberId } : {}),
+    };
+  };
   const connectionItemsDto = (connections) => {
     if (!Array.isArray(connections)) throw new Error("MGW_UPSTREAM_CONTRACT_ERROR");
     return connections.map((connection) => {
@@ -138,16 +156,18 @@ function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = nu
   };
   apiRouter.get("/meeting-gateway/connections", [validatedRequest, meetingBridge({ sessions })], async (request, response) => {
     if (!oauthReady) return oauthUnavailable(request, response);
+    if (!oauthRemoteAllowed(request, response)) return;
     try {
-      const connections = await oauth.listConnections(oauthContext(request, response));
+      const connections = await oauth.listConnections(await oauthContext(request, response));
       return response.json({ items: connectionItemsDto(connections) });
     } catch (error) { return oauthError(error, response); }
   });
   apiRouter.post("/meeting-gateway/oauth/start", [validatedRequest, meetingBridge({ sessions, mutation: true })], async (request, response) => {
     if (!oauthReady) return oauthUnavailable(request, response);
+    if (!oauthRemoteAllowed(request, response)) return;
     if (!hasEmptyJsonObject(request.body)) return response.status(422).json({ error: "MGW_INPUT_INVALID" });
     try {
-      const result = await oauth.start(oauthContext(request, response));
+      const result = await oauth.start(await oauthContext(request, response, true));
       if (!result || typeof result.authorizationUrl !== "string" || typeof result.transactionId !== "string" || typeof result.expiresAt !== "string")
         throw new Error("MGW_UPSTREAM_CONTRACT_ERROR");
       return response.status(200).json({ authorization_url: result.authorizationUrl, transaction_id: result.transactionId, expires_at: result.expiresAt });
@@ -155,12 +175,22 @@ function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = nu
   });
   apiRouter.post("/meeting-gateway/connections/:connectionId/confirm", [validatedRequest, meetingBridge({ sessions, mutation: true })], async (request, response) => {
     if (!oauthReady) return oauthUnavailable(request, response);
+    if (!oauthRemoteAllowed(request, response)) return;
     if (!hasEmptyJsonObject(request.body)) return response.status(422).json({ error: "MGW_INPUT_INVALID" });
     try {
-      const connection = await oauth.confirm(oauthContext(request, response), request.params.connectionId);
+      const connection = await oauth.confirm(await oauthContext(request, response, true), request.params.connectionId);
       if (connection?.status !== "ACTIVE") throw new Error("MGW_OAUTH_CONFIRM_DENIED");
       return response.json({ status: "ACTIVE" });
     } catch (error) { return oauthError(error, response); }
+  });
+  apiRouter.get("/meeting-gateway/oauth/return", [], (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    let query;
+    try { query = new URL(request.originalUrl || request.url, "https://consumer.invalid").searchParams; } catch (_error) { query = null; }
+    if (!query || [...query.keys()].length !== 1 || query.getAll("connection_id").length !== 1 || !/^[A-Za-z0-9_-]{1,128}$/.test(query.get("connection_id") || ""))
+      return response.status(400).send("Invalid meeting authorization return");
+    return response.redirect(303, "/sso/meeting-gateway/result?connection_id=" + encodeURIComponent(query.get("connection_id")));
   });
 }
 module.exports = { meetingGatewayEndpoints, createBoundedRateLimiter };

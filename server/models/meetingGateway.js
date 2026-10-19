@@ -406,6 +406,7 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
       bridgeSessionId: row.bridge_session_id,
       expiresAt: row.expires_at,
       state: row.state,
+      existingConnectionIds: (() => { try { return JSON.parse(row.existing_connection_ids || "[]"); } catch { return []; } })(),
     };
   }
   async function findPendingOAuthForBridge(bridgeSessionId) {
@@ -446,8 +447,9 @@ function createMeetingStore({ prisma, clock = () => new Date() }) {
       );
       if (pending.length) throw new Error('MGW_OAUTH_ALREADY_PENDING');
       await tx.$executeRawUnsafe(
-        "INSERT INTO meeting_oauth_transactions (id, transaction_id, owner_user_id, bridge_session_id, expires_at, state, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)",
-        id, row.transactionId, row.ownerUserId, row.bridgeSessionId, row.expiresAt, timestamp
+        "INSERT INTO meeting_oauth_transactions (id, transaction_id, owner_user_id, bridge_session_id, expires_at, state, created_at, existing_connection_ids) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)",
+        id, row.transactionId, row.ownerUserId, row.bridgeSessionId, row.expiresAt, timestamp,
+        JSON.stringify(Array.isArray(row.existingConnectionIds) ? row.existingConnectionIds.filter((value) => typeof value === "string" && value.length <= 128).slice(0, 500) : [])
       );
       const rows = await tx.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
       return oauthTransactionDto(rows[0]);

@@ -16,6 +16,30 @@ describe("Meeting Gateway client boundaries", () => {
     consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => consoleWarnSpy.mockRestore());
+  test("uses the actor token for the exact Gateway OAuth and connection routes without query-contract evidence", async () => {
+    const fetchImpl = jest.fn(async (url, options) => {
+      const path = new URL(url).pathname;
+      if (path === "/api/v1/oauth/authorizations") return jsonResponse({ code: 0, error_code: 0, data: { authorization_url: "https://meeting.tencent.com/marketplace/authorize.html", transaction_id: "tx-a", expires_at: "2026-10-20T00:05:00Z" } }, 201);
+      if (path === "/api/v1/me/connections") return jsonResponse({ code: 0, error_code: 0, data: { items: [{ id: "conn-a", application_id: "app-a", name: "Tencent", kind: "THIRD_PARTY_OAUTH", status: "PENDING_CONFIRMATION", owner_member_id: "member-a" }] } });
+      return jsonResponse({ code: 0, error_code: 0, data: { id: "conn-a", status: "ACTIVE" } });
+    });
+    const client = createGatewayClient({
+      origin: "https://gateway.example.test", originAllowlist: ["https://gateway.example.test"],
+      allowlist: ["/api/v1/oauth/authorizations", "/api/v1/me/connections", "/api/v1/connections/:connectionId/confirm"],
+      fetchImpl, enabled: true,
+    });
+    await expect(client.startAuthorization({ gatewayAccessToken: "mt_employee", applicationId: "app-a", returnTo: "https://consumer.example/return" }))
+      .resolves.toEqual({ authorizationUrl: "https://meeting.tencent.com/marketplace/authorize.html", transactionId: "tx-a", expiresAt: "2026-10-20T00:05:00Z" });
+    await expect(client.listConnections({ gatewayAccessToken: "mt_employee" })).resolves.toEqual([
+      { connectionId: "conn-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", name: "Tencent", status: "PENDING_CONFIRMATION" },
+    ]);
+    await client.confirmConnection({ gatewayAccessToken: "mt_employee" }, "conn-a");
+    expect(fetchImpl.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      "/api/v1/oauth/authorizations", "/api/v1/me/connections", "/api/v1/connections/conn-a/confirm",
+    ]);
+    expect(fetchImpl.mock.calls.every(([, options]) => options.headers.Authorization === "Bearer mt_employee")).toBe(true);
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ application_id: "app-a", return_to: "https://consumer.example/return" });
+  });
   test("TEST-A-REV-008-01: refuses transport until contract evidence is confirmed", async () => {
     const fetchImpl = jest.fn();
     const client = createGatewayClient({

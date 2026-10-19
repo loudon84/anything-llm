@@ -66,6 +66,7 @@ function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = g
     throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
   }
   const allowedPaths = normalizeAllowlist(allowlist || []);
+  const pathAllowed = (value) => allowedPaths.has(value) || (allowedPaths.has("/api/v1/connections/:connectionId/confirm") && /^\/api\/v1\/connections\/[A-Za-z0-9_-]{1,128}\/confirm$/.test(value));
   if (typeof fetchImpl !== "function") throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
   const timeout = Math.min(Math.max(Number(timeoutMs) || DEFAULT_TIMEOUT_MS, 1), MAX_TIMEOUT_MS);
   const safeLogger = createSafeGatewayLogger(logger);
@@ -80,14 +81,14 @@ function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = g
 
   async function requestForSubject({ bridge, path: requestPath, method = "GET", body, stage } = {}) {
     assertEnabled();
-    if (typeof bridge !== "string" || bridge.length === 0 || typeof requestPath !== "string" || !allowedPaths.has(requestPath) || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    if (typeof bridge !== "string" || bridge.length === 0 || typeof requestPath !== "string" || !pathAllowed(requestPath) || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
       throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
     }
     const requestStage = stage || (method === "GET" ? "REQUEST" : undefined);
     if (method !== "GET" && !["QUERY", "IMPORT", "AUTHORIZATION"].includes(requestStage)) {
       throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
     }
-    assertContract();
+    if (requestStage !== "AUTHORIZATION") assertContract();
     const subjectHeaders = headersForSubject(bridge);
     if (!subjectHeaders || typeof subjectHeaders !== "object" || Array.isArray(subjectHeaders)) {
       throw createGatewayError(classifyFailure({ reason: "CONFIG_INVALID" }));
@@ -100,7 +101,7 @@ function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = g
         method,
         redirect: "error",
         signal: controller.signal,
-        headers: subjectHeaders,
+        headers: body === undefined ? subjectHeaders : { ...subjectHeaders, "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body }),
       });
       if (response.status >= 300 && response.status < 400) {
@@ -245,7 +246,34 @@ function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = g
     };
   }
 
-  return { accountLogin, exchange, requestForSubject, resource, transportAvailable: enabled === true };
+  async function authorizationData({ token, path, method = "GET", body } = {}) {
+    const result = await requestForSubject({ bridge: token, path, method, body: body === undefined ? undefined : JSON.stringify(body), stage: "AUTHORIZATION" });
+    let envelope;
+    try { envelope = await result.response.json(); } catch (_error) { throw contractError(); }
+    if (!envelope || envelope.code !== 0 || envelope.error_code !== 0 || !envelope.data || typeof envelope.data !== "object") throw contractError();
+    return envelope.data;
+  }
+  async function startAuthorization({ gatewayAccessToken, applicationId, returnTo } = {}) {
+    if (!applicationId || !returnTo) throw contractError();
+    const data = await authorizationData({ token: gatewayAccessToken, path: "/api/v1/oauth/authorizations", method: "POST", body: { application_id: applicationId, return_to: returnTo } });
+    if (typeof data.authorization_url !== "string" || typeof data.transaction_id !== "string" || typeof data.expires_at !== "string") throw contractError();
+    return { authorizationUrl: data.authorization_url, transactionId: data.transaction_id, expiresAt: data.expires_at };
+  }
+  async function listConnections({ gatewayAccessToken } = {}) {
+    const data = await authorizationData({ token: gatewayAccessToken, path: "/api/v1/me/connections" });
+    if (!Array.isArray(data.items)) throw contractError();
+    return data.items.map((item) => {
+      if (!item || typeof item.id !== "string" || typeof item.name !== "string" || typeof item.kind !== "string" || typeof item.status !== "string" || typeof item.owner_member_id !== "string") throw contractError();
+      return { connectionId: item.id, name: item.name, memberId: item.owner_member_id, type: item.kind, status: item.status };
+    });
+  }
+  async function confirmConnection({ gatewayAccessToken } = {}, connectionId) {
+    if (typeof connectionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(connectionId)) throw contractError();
+    const data = await authorizationData({ token: gatewayAccessToken, path: `/api/v1/connections/${connectionId}/confirm`, method: "POST", body: {} });
+    if (!data || typeof data.id !== "string" || typeof data.status !== "string") throw contractError();
+    return data;
+  }
+  return { accountLogin, exchange, requestForSubject, startAuthorization, listConnections, confirmConnection, resource, transportAvailable: enabled === true };
 }
 
 module.exports = { createGatewayClient, validateOrigin, normalizeAllowlist, normalizeOriginAllowlist };

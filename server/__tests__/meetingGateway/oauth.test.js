@@ -5,13 +5,16 @@ jest.mock("../../utils/meetingGateway/workspacePolicy", () => ({ createWorkspace
 const { createOAuthModule, validateAuthorizationUrl } = require("../../utils/meetingGateway/oauth");
 const { meetingGatewayEndpoints } = require("../../endpoints/meetingGateway");
 
-const AUTH_URL = "https://meeting.tencent.com/oauth?state=secret-state&sdk_id=33510141629&redirect_uri=https%3A%2F%2Fcopilot.superic.com%3A9999%2Fcallbacks%2Ftencent%2Foauth%2F33510141629";
-const AUTH_PATH = "/oauth";
+const AUTH_URL = "https://meeting.tencent.com/marketplace/authorize.html?corp_id=corp-a&sdk_id=sdk-a&redirect_uri=https%3A%2F%2Fgateway.example%2Fcallbacks%2Ftencent%2Foauth%2Fapp-a&state=secret-state";
+const AUTH_PATH = "/marketplace/authorize.html";
+const OAUTH_CONFIG = { corpId: "corp-a", sdkId: "sdk-a", callbackUri: "https://gateway.example/callbacks/tencent/oauth/app-a", applicationId: "app-a", returnTo: "https://consumer.example/api/meeting-gateway/oauth/return" };
 
 function fixture() {
   const rows = [];
   const calls = [];
   let connectionStatus = "PENDING_CONFIRMATION";
+  let currentConnections = [];
+  let clockNow = Date.parse("2026-10-18T00:00:00.000Z");
   const store = {
     async getBinding() { return { status: "BOUND", gateway_member_id: "member-a" }; },
     async findPendingOAuthForBridge(bridgeSessionId) {
@@ -42,39 +45,44 @@ function fixture() {
   const gateway = {
     async startAuthorization() {
       calls.push("start");
+      currentConnections.push({ connectionId: "connection-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", status: connectionStatus });
       return { authorizationUrl: AUTH_URL, transactionId: "gateway-transaction", expiresAt: "2026-10-18T00:05:00.000Z" };
     },
     async listConnections() {
       calls.push("list");
-      return [{ connectionId: "connection-a", memberId: "member-a", type: "THIRD_PARTY_OAUTH", status: connectionStatus }];
+      return currentConnections;
     },
-    async confirmConnection() { calls.push("confirm"); connectionStatus = "ACTIVE"; },
+    async confirmConnection() { calls.push("confirm"); connectionStatus = "ACTIVE"; currentConnections[0].status = "ACTIVE"; },
   };
-  const oauth = createOAuthModule({ gateway, store, clock: () => new Date("2026-10-18T00:00:00.000Z"), allowedAuthorizationPaths: [AUTH_PATH], contractEvidence: { confirmed: true }, enabled: true });
-  return { oauth, rows, calls, store, gateway };
+  const oauth = createOAuthModule({ gateway, store, clock: () => new Date(clockNow), allowedAuthorizationPaths: [AUTH_PATH], authorizationConfig: OAUTH_CONFIG, enabled: true });
+  return { oauth, rows, calls, store, gateway, setConnections: (value) => { currentConnections = value; }, setNow: (value) => { clockNow = value; } };
 }
 
-const ctx = { ownerUserId: 1, bridgeSessionId: "bridge-a", gatewayMemberId: "member-a", bridgeExpiresAt: new Date("2026-10-18T00:02:00.000Z") };
+const ctx = { ownerUserId: 1, bridgeSessionId: "bridge-a", gatewayMemberId: "member-a", bridgeExpiresAt: new Date("2026-10-18T00:06:00.000Z"), gatewayAccessToken: "mt_member" };
 
 describe("Meeting Gateway OAuth safety seams", () => {
   test("rejects missing or duplicate state and duplicate required query parameters", () => {
     const invalid = [
-      AUTH_URL.replace("state=secret-state&", ""),
+      AUTH_URL.replace("&state=secret-state", ""),
       AUTH_URL.replace("state=secret-state", "state=one&state=two"),
       AUTH_URL.replace("state=secret-state", "state="),
-      AUTH_URL.replace("sdk_id=33510141629", "sdk_id="),
-      AUTH_URL.replace("sdk_id=33510141629", "sdk_id=33510141629&sdk_id=33510141629"),
+      AUTH_URL.replace("sdk_id=sdk-a", "sdk_id="),
+      AUTH_URL.replace("sdk_id=sdk-a", "sdk_id=sdk-a&sdk_id=sdk-a"),
       AUTH_URL.replace(/&redirect_uri=.*/, "&redirect_uri="),
-      AUTH_URL.replace("&redirect_uri=", "&redirect_uri=https%3A%2F%2Fcopilot.superic.com%3A9999%2Fcallbacks%2Ftencent%2Foauth%2F33510141629&redirect_uri="),
+      AUTH_URL.replace("&redirect_uri=", "&redirect_uri=https%3A%2F%2Fgateway.example%2Fcallbacks%2Ftencent%2Foauth%2Fapp-a&redirect_uri="),
+      AUTH_URL.replace("corp_id=corp-a&", ""),
+      AUTH_URL.replace("corp_id=corp-a", "corp_id=corp-other"),
+      AUTH_URL.replace("corp_id=corp-a", "corp_id=corp-a&corp_id=corp-a"),
+      AUTH_URL.replace("gateway.example", "evil.example"),
       AUTH_URL + "&return_to=https%3A%2F%2Fexample.com",
       AUTH_URL + "&extra=1",
     ];
     for (const value of invalid)
-      expect(() => validateAuthorizationUrl(value, { allowedPaths: [AUTH_PATH] })).toThrow("MGW_OAUTH_START_REJECTED");
+      expect(() => validateAuthorizationUrl(value, { allowedPaths: [AUTH_PATH], config: OAUTH_CONFIG })).toThrow("MGW_OAUTH_START_REJECTED");
   });
   test("rejects authorization URLs with lookalike host, wrong redirect, or unconfirmed path", () => {
-    expect(() => validateAuthorizationUrl("https://meeting.tencent.com.evil.invalid/oauth", { allowedPaths: [AUTH_PATH] })).toThrow("MGW_OAUTH_START_REJECTED");
-    expect(() => validateAuthorizationUrl(AUTH_URL.replace("33510141629", "33510141628"), { allowedPaths: [AUTH_PATH] })).toThrow("MGW_OAUTH_START_REJECTED");
+    expect(() => validateAuthorizationUrl("https://meeting.tencent.com.evil.invalid/marketplace/authorize.html", { allowedPaths: [AUTH_PATH], config: OAUTH_CONFIG })).toThrow("MGW_OAUTH_START_REJECTED");
+    expect(() => validateAuthorizationUrl(AUTH_URL.replace("sdk-a", "sdk-b"), { allowedPaths: [AUTH_PATH], config: OAUTH_CONFIG })).toThrow("MGW_OAUTH_START_REJECTED");
     expect(() => validateAuthorizationUrl(AUTH_URL)).toThrow("MGW_UPSTREAM_CONTRACT_ERROR");
   });
 
@@ -92,7 +100,7 @@ describe("Meeting Gateway OAuth safety seams", () => {
     const { oauth, gateway } = fixture();
     gateway.startAuthorization = async () => ({ authorizationUrl: AUTH_URL, transactionId: "gateway-transaction", expiresAt: "2026-10-18T00:20:00.000Z" });
     const result = await oauth.start(ctx);
-    expect(result.expiresAt).toBe("2026-10-18T00:02:00.000Z");
+    expect(result.expiresAt).toBe("2026-10-18T00:05:00.000Z");
   });
 
   test("keeps the reservation and requires recovery when authorization POST outcome is unknown", async () => {
@@ -114,14 +122,22 @@ describe("Meeting Gateway OAuth safety seams", () => {
     const { oauth, calls } = fixture();
     await oauth.start(ctx);
     await expect(oauth.start(ctx)).rejects.toThrow("MGW_OAUTH_ALREADY_PENDING");
-    expect(calls).toEqual(["start"]);
+    expect(calls).toEqual(["list", "start"]);
   });
 
   test("cannot confirm a transaction from another owner or bridge", async () => {
     const { oauth, calls } = fixture();
     await oauth.start(ctx);
     await expect(oauth.confirm({ ...ctx, ownerUserId: 2 }, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
-    expect(calls).toEqual(["start"]);
+    await expect(oauth.confirm({ ...ctx, bridgeSessionId: "bridge-b" }, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
+    expect(calls).toEqual(["list", "start"]);
+  });
+  test("expires pending return verification at the bounded authorization deadline", async () => {
+    const { oauth, rows, setNow } = fixture();
+    await oauth.start(ctx);
+    setNow(Date.parse("2026-10-18T00:05:01.000Z"));
+    await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
+    expect(rows[0].state).toBe("EXPIRED");
   });
 
   test("rejects confirmation for a non third-party OAuth connection", async () => {
@@ -132,7 +148,7 @@ describe("Meeting Gateway OAuth safety seams", () => {
       return [{ connectionId: "connection-a", memberId: "member-a", type: "PASSWORD", status: "PENDING_CONFIRMATION" }];
     };
     await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
-    expect(calls).toEqual(["start", "list"]);
+    expect(calls).toEqual(["list", "start", "list"]);
   });
 
   test("keeps the pending reservation when confirmation POST outcome is unknown", async () => {
@@ -174,7 +190,7 @@ describe("Meeting Gateway OAuth safety seams", () => {
     const connection = await oauth.confirm(ctx, "connection-a");
     expect(connection.status).toBe("ACTIVE");
     expect(rows[0].state).toBe("CONFIRMED");
-    expect(calls).toEqual(["start", "list", "confirm", "list"]);
+    expect(calls).toEqual(["list", "start", "list", "confirm", "list"]);
   });
 
   test("rejects concurrent starts for the same bridge", async () => {
@@ -182,7 +198,7 @@ describe("Meeting Gateway OAuth safety seams", () => {
     const results = await Promise.allSettled([oauth.start(ctx), oauth.start(ctx)]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")[0].reason.message).toBe("MGW_OAUTH_ALREADY_PENDING");
-    expect(calls).toEqual(["start"]);
+    expect(calls).toEqual(["list", "start"]);
   });
   test("does not confirm a corp-mismatched connection", async () => {
     const { oauth, calls, gateway } = fixture();
@@ -192,7 +208,7 @@ describe("Meeting Gateway OAuth safety seams", () => {
       return [{ connectionId: "connection-a", memberId: "member-a", status: "CORP_MISMATCH" }];
     };
     await expect(oauth.confirm(ctx, "connection-a")).rejects.toThrow("MGW_OAUTH_CONFIRM_DENIED");
-    expect(calls).toEqual(["start", "list"]);
+    expect(calls).toEqual(["list", "start", "list"]);
   });
 
   test("BFF routes serialize OAuth data to PRD DTO allowlists", async () => {
@@ -311,6 +327,59 @@ describe("Meeting Gateway OAuth safety seams", () => {
     await invoke("POST /meeting-gateway/oauth/start", { body: {} });
     await invoke("POST /meeting-gateway/connections/:connectionId/confirm", { params: { connectionId: "connection-a" }, body: {} });
     expect(listConnections).not.toHaveBeenCalled();
+  });
+  test("Consumer return accepts only one connection_id and redirects to fixed same-origin UI", async () => {
+    const routes = new Map();
+    const router = {
+      get(path, middleware, handler) { routes.set("GET " + path, typeof middleware === "function" ? middleware : handler); },
+      post(path, _middleware, handler) { routes.set("POST " + path, handler); },
+      delete(path, _middleware, handler) { routes.set("DELETE " + path, handler); },
+    };
+    meetingGatewayEndpoints(router, { enabled: true, oauth: { contractConfirmed: true } });
+    const response = {
+      headers: {}, setHeader(key, value) { this.headers[key] = value; },
+      status(code) { this.statusCode = code; return this; },
+      send(body) { this.body = body; return this; },
+      redirect(code, destination) { this.statusCode = code; this.destination = destination; return this; },
+    };
+    routes.get("GET /meeting-gateway/oauth/return")({ originalUrl: "/api/meeting-gateway/oauth/return?connection_id=conn-1" }, response);
+    expect(response.statusCode).toBe(303);
+    expect(response.destination).toBe("/sso/meeting-gateway/result?connection_id=conn-1");
+    expect(response.headers).toMatchObject({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+    const rejected = { ...response, headers: {}, status(code) { this.statusCode = code; return this; }, send(body) { this.body = body; return this; } };
+    routes.get("GET /meeting-gateway/oauth/return")({ originalUrl: "/api/meeting-gateway/oauth/return?connection_id=conn-1&state=anything" }, rejected);
+    expect(rejected.statusCode).toBe(400);
+  });
+  test("LOCAL_ONLY sessions cannot trigger remote connection listing", async () => {
+    const routes = new Map();
+    const router = {
+      get(path, _middleware, handler) { routes.set("GET " + path, handler); },
+      post(path, _middleware, handler) { routes.set("POST " + path, handler); },
+      delete(path, _middleware, handler) { routes.set("DELETE " + path, handler); },
+    };
+    const listConnections = jest.fn();
+    meetingGatewayEndpoints(router, { enabled: true, oauth: { contractConfirmed: true, listConnections } });
+    const response = {
+      locals: { meetingAuthState: { kind: "GATEWAY_SESSION", remoteAccessMode: "LOCAL_ONLY", session: { remoteAccessMode: "LOCAL_ONLY" } } },
+      status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; },
+    };
+    await routes.get("GET /meeting-gateway/connections")({}, response);
+    expect(response.statusCode).toBe(403);
+    expect(response.body.error).toBe("MGW_REMOTE_ACCESS_REQUIRED");
+    expect(listConnections).not.toHaveBeenCalled();
+  });
+  test("missing OAuth runtime configuration leaves BFF disabled without blocking legacy routes", async () => {
+    const routes = new Map();
+    const router = {
+      get(path, middleware, handler) { routes.set("GET " + path, typeof middleware === "function" ? middleware : handler); },
+      post(path, _middleware, handler) { routes.set("POST " + path, handler); },
+      delete(path, _middleware, handler) { routes.set("DELETE " + path, handler); },
+    };
+    meetingGatewayEndpoints(router, { enabled: false, sessions: null, oauth: null });
+    const response = { status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    await routes.get("GET /meeting-gateway/connections")({}, response);
+    expect(response.statusCode).toBe(503);
+    expect(response.body.error).toBe("MGW_UPSTREAM_CONTRACT_ERROR");
   });
   test("is disabled until the upstream contract is confirmed", async () => {
     const { oauth } = fixture();
