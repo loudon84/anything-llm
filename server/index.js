@@ -51,35 +51,94 @@ const { createMeetingRuntime } = require("./modules/meetings/runtime");
 const { attachMeetingRuntime } = require("./modules/meetings/serverLifecycle");
 const { httpLogger } = require("./middleware/httpLogger");
 const { meetingGatewayEndpoints } = require("./endpoints/meetingGateway");
+const { createWeComAuthEndpoints } = require("./endpoints/wecomAuth");
 const { createSessionModule } = require("./utils/meetingGateway/sessions");
+const {
+  createWeComGatewayClient,
+} = require("./utils/meetingGateway/wecomClient");
+const { createWeComAuthService } = require("./utils/meetingGateway/wecomAuth");
 const { createMeetingStore } = require("./models/meetingGateway");
+const { createWeComIdentityStore } = require("./models/wecomIdentity");
+const { User } = require("./models/user");
 const prisma = require("./utils/prisma");
 function parseMeetingKeyring() {
   try {
     const hmacHex = process.env.MEETING_GATEWAY_BRIDGE_HMAC_KEY || "";
-    const keyring = JSON.parse(process.env.MEETING_GATEWAY_BRIDGE_KEYRING_JSON || "{}");
-    if (!/^[a-f0-9]{64}$/i.test(hmacHex) || !keyring.activeKeyId || !keyring.keys || typeof keyring.keys !== "object") return null;
+    const keyring = JSON.parse(
+      process.env.MEETING_GATEWAY_BRIDGE_KEYRING_JSON || "{}"
+    );
+    if (
+      !/^[a-f0-9]{64}$/i.test(hmacHex) ||
+      !keyring.activeKeyId ||
+      !keyring.keys ||
+      typeof keyring.keys !== "object"
+    )
+      return null;
     const keys = {};
     for (const [keyId, value] of Object.entries(keyring.keys)) {
       if (!/^[a-f0-9]{64}$/i.test(value)) return null;
       keys[keyId] = Buffer.from(value, "hex");
     }
-    return { activeKeyId: keyring.activeKeyId, keys, hmacKey: Buffer.from(hmacHex, "hex") };
-  } catch (_error) { return null; }
+    return {
+      activeKeyId: keyring.activeKeyId,
+      keys,
+      hmacKey: Buffer.from(hmacHex, "hex"),
+    };
+  } catch {
+    return null;
+  }
 }
 const meetingKeyring = parseMeetingKeyring();
-const meetingSessions = meetingKeyring ? createSessionModule({
-  store: createMeetingStore({ prisma }), gateway: null, keyring: meetingKeyring,
-  origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
-}) : null;
+const meetingSessions = meetingKeyring
+  ? createSessionModule({
+      store: createMeetingStore({ prisma }),
+      gateway: null,
+      keyring: meetingKeyring,
+      origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
+    })
+  : null;
+// No live WeCom wire contract is signed off. Keep the client unavailable while
+// allowing the BFF to expose an explicit dependency status without startup failure.
+const meetingWecomGateway = createWeComGatewayClient({
+  contract: null,
+  transport: null,
+});
+const meetingWecomAuth =
+  meetingKeyring && process.env.JWT_SECRET
+    ? createWeComAuthService({
+        gateway: meetingWecomGateway,
+        store: createWeComIdentityStore({ prisma }),
+        jwt: {
+          sign: (claims, expiresIn) =>
+            require("jsonwebtoken").sign(claims, process.env.JWT_SECRET, {
+              expiresIn,
+            }),
+          verify: (token) =>
+            require("jsonwebtoken").verify(token, process.env.JWT_SECRET),
+        },
+        getUser: (id) => User.get({ id }),
+        origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || null,
+        callbackUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
+          ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN +
+            "/api/auth/wecom/callback"
+          : null,
+        resultUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
+          ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN + "/sso/wecom/result"
+          : null,
+        cryptoConfig: meetingKeyring,
+      })
+    : null;
 const app = express();
+app.locals.meetingWecomAuth = meetingWecomAuth;
 const apiRouter = express.Router();
 const meetingRuntime = createMeetingRuntime();
 const meetingGatewayContractConfirmed =
   /^[a-f0-9]{64}$/i.test(process.env.MEETING_GATEWAY_CONTRACT_SHA256 || "") &&
   Boolean(process.env.MEETING_GATEWAY_CONTRACT_REVISION);
 app.locals.meetingGateway = Object.freeze({
-  enabled: process.env.MEETING_GATEWAY_ENABLED === "true" && meetingGatewayContractConfirmed,
+  enabled:
+    process.env.MEETING_GATEWAY_ENABLED === "true" &&
+    meetingGatewayContractConfirmed,
   contractConfirmed: meetingGatewayContractConfirmed,
   oauth: null,
 });
@@ -144,6 +203,7 @@ meetingsEndpoints(apiRouter, {
   runtime: meetingRuntime,
   prisma: require("./utils/prisma"),
 });
+createWeComAuthEndpoints(apiRouter, { auth: meetingWecomAuth });
 meetingGatewayEndpoints(apiRouter, {
   sessions: meetingSessions,
   oauth: app.locals.meetingGateway.oauth,

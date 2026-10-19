@@ -8,6 +8,14 @@ const EncryptionMgr = new EncryptionManager();
 async function validatedRequest(request, response, next) {
   const multiUserMode = await SystemSettings.isMultiUserMode();
   response.locals.multiUserMode = multiUserMode;
+  const authorization = request.header("Authorization");
+  const signedClaims = decodeJWT(
+    authorization ? authorization.split(" ")[1] : null
+  );
+  if (signedClaims?.session_id && !multiUserMode) {
+    response.status(401).json({ error: "Invalid auth token." });
+    return;
+  }
   if (multiUserMode)
     return await validateMultiUserRequest(request, response, next);
 
@@ -68,6 +76,13 @@ async function validatedRequest(request, response, next) {
   }
 
   UserMetaCache.setFromRequest(request);
+  response.locals.meetingAuthState = {
+    authenticated: true,
+    kind: "LEGACY_SINGLE_USER",
+    actor: null,
+    session: null,
+    remoteAccessMode: null,
+  };
   next();
 }
 
@@ -105,9 +120,48 @@ async function validateMultiUserRequest(request, response, next) {
     return;
   }
 
+  if (valid.session_id) {
+    const authService = request.app?.locals?.meetingWecomAuth;
+    const tokenProof = requestCookie(request, "__Host-meeting_session");
+    const proof = tokenProof?.slice((tokenProof || "").indexOf(".") + 1);
+    if (!authService || !proof) {
+      response.status(401).json({ error: "Invalid auth token." });
+      return;
+    }
+    try {
+      response.locals.meetingAuthState =
+        await authService.getValidatedSessionActor({
+          sessionId: valid.session_id,
+          userId: Number(valid.id),
+          credentialEpoch: valid.credential_epoch,
+          browserProof: proof,
+        });
+    } catch {
+      response.status(401).json({ error: "Invalid auth token." });
+      return;
+    }
+  } else {
+    response.locals.meetingAuthState = {
+      authenticated: true,
+      kind: "LEGACY_MULTI_USER",
+      actor: { id: Number(user.id), userId: Number(user.id) },
+      session: null,
+      remoteAccessMode: null,
+    };
+  }
+
   response.locals.user = user;
   UserMetaCache.setFromRequest(request, user.id);
   next();
+}
+
+function requestCookie(request, name) {
+  for (const part of String(request.header("Cookie") || "").split(";")) {
+    const index = part.indexOf("=");
+    if (index > 0 && part.slice(0, index).trim() === name)
+      return part.slice(index + 1).trim();
+  }
+  return null;
 }
 
 module.exports = {
