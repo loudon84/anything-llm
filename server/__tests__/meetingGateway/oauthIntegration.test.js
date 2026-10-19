@@ -35,7 +35,7 @@ test("Gateway start, connection-only return id and owner confirmation stay bound
     async updateOAuthTransactionState(id, state) { rows[0].state = state; return rows[0]; },
   };
   const config = {
-    applicationId: "app-a", corpId: "corp-a", sdkId: "sdk-a",
+    applicationId: "app-a", callbackRef: "app-a", corpId: "corp-a", sdkId: "sdk-a",
     callbackUri: "https://gateway.example/callbacks/tencent/oauth/app-a",
     returnTo: "https://consumer.example/api/meeting-gateway/oauth/return",
   };

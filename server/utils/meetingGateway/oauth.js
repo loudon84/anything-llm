@@ -5,15 +5,15 @@ const START_REJECTED = "MGW_OAUTH_START_REJECTED";
 const CONFIRM_DENIED = "MGW_OAUTH_CONFIRM_DENIED";
 
 function validateAuthorizationConfig(config) {
-  if (!config || ![config.corpId, config.sdkId, config.callbackUri].every((v) => typeof v === "string" && v.trim())) throw new Error(CONTRACT_ERROR);
+  if (!config || ![config.corpId, config.sdkId, config.callbackUri, config.callbackRef].every((v) => typeof v === "string" && v.trim()) || typeof config.applicationId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(config.callbackRef)) throw new Error(CONTRACT_ERROR);
   let callback;
   let consumerReturn;
   try {
     callback = new URL(config.callbackUri);
     consumerReturn = new URL(config.returnTo);
   } catch (_error) { throw new Error(CONTRACT_ERROR); }
-  if (!config.applicationId || callback.protocol !== "https:" || callback.username || callback.password || callback.search || callback.hash ||
-      callback.pathname !== `/callbacks/tencent/oauth/${encodeURIComponent(config.applicationId)}` || consumerReturn.protocol !== "https:" ||
+  if (callback.protocol !== "https:" || callback.username || callback.password || callback.search || callback.hash ||
+      callback.pathname !== `/callbacks/tencent/oauth/${encodeURIComponent(config.callbackRef)}` || consumerReturn.protocol !== "https:" ||
       consumerReturn.username || consumerReturn.password || consumerReturn.search || consumerReturn.hash || consumerReturn.pathname !== "/api/meeting-gateway/oauth/return")
     throw new Error(CONTRACT_ERROR);
 }

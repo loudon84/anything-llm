@@ -40,6 +40,15 @@ describe("Meeting Gateway client boundaries", () => {
     expect(fetchImpl.mock.calls.every(([, options]) => options.headers.Authorization === "Bearer mt_employee")).toBe(true);
     expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ application_id: "app-a", return_to: "https://consumer.example/return" });
   });
+  test("preserves empty application_id when selecting Gateway's ENV-owned OAuth application", async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({ code: 0, error_code: 0, data: {
+      authorization_url: "https://meeting.tencent.com/marketplace/authorize.html?corp_id=c&sdk_id=s&redirect_uri=https%3A%2F%2Fg.example%2Fcallbacks%2Ftencent%2Foauth%2Fs&state=st",
+      transaction_id: "tx", expires_at: "2026-10-20T00:05:00Z",
+    } }, 201));
+    const client = createGatewayClient({ origin: "https://gateway.example.test", originAllowlist: ["https://gateway.example.test"], allowlist: ["/api/v1/oauth/authorizations"], fetchImpl, enabled: true });
+    await client.startAuthorization({ gatewayAccessToken: "mt_employee", applicationId: "", returnTo: "https://consumer.example/api/meeting-gateway/oauth/return" });
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ application_id: "", return_to: "https://consumer.example/api/meeting-gateway/oauth/return" });
+  });
   test("TEST-A-REV-008-01: refuses transport until contract evidence is confirmed", async () => {
     const fetchImpl = jest.fn();
     const client = createGatewayClient({

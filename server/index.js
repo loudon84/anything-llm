@@ -121,16 +121,18 @@ const meetingSessions = meetingKeyring
       origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
     })
   : null;
-const meetingGatewayOauthApplicationId = process.env.MEETING_GATEWAY_OAUTH_APPLICATION_ID || "";
+const meetingGatewayOauthApplicationId = process.env.MEETING_GATEWAY_OAUTH_APPLICATION_ID ?? "";
+const meetingGatewayOauthCallbackRef = process.env.MEETING_GATEWAY_OAUTH_CALLBACK_REF || "";
 const meetingGatewayPublicBaseUrl = process.env.MEETING_GATEWAY_PUBLIC_BASE_URL || "";
 const meetingGatewayConsumerOrigin = process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || "";
-const meetingGatewayOauthConfig = meetingGatewayOauthApplicationId && meetingGatewayPublicBaseUrl && meetingGatewayConsumerOrigin &&
+const meetingGatewayOauthConfig = meetingGatewayOauthCallbackRef && meetingGatewayPublicBaseUrl && meetingGatewayConsumerOrigin &&
   process.env.MEETING_GATEWAY_TENCENT_CORP_ID && process.env.MEETING_GATEWAY_TENCENT_SDK_ID
   ? {
       applicationId: meetingGatewayOauthApplicationId,
+      callbackRef: meetingGatewayOauthCallbackRef,
       corpId: process.env.MEETING_GATEWAY_TENCENT_CORP_ID,
       sdkId: process.env.MEETING_GATEWAY_TENCENT_SDK_ID,
-      callbackUri: meetingGatewayPublicBaseUrl.replace(/\/$/, "") + "/callbacks/tencent/oauth/" + encodeURIComponent(meetingGatewayOauthApplicationId),
+      callbackUri: meetingGatewayPublicBaseUrl.replace(/\/$/, "") + "/callbacks/tencent/oauth/" + encodeURIComponent(meetingGatewayOauthCallbackRef),
       returnTo: meetingGatewayConsumerOrigin.replace(/\/$/, "") + "/api/meeting-gateway/oauth/return",
     }
   : null;

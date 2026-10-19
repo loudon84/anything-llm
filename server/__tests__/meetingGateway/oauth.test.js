@@ -7,7 +7,7 @@ const { meetingGatewayEndpoints } = require("../../endpoints/meetingGateway");
 
 const AUTH_URL = "https://meeting.tencent.com/marketplace/authorize.html?corp_id=corp-a&sdk_id=sdk-a&redirect_uri=https%3A%2F%2Fgateway.example%2Fcallbacks%2Ftencent%2Foauth%2Fapp-a&state=secret-state";
 const AUTH_PATH = "/marketplace/authorize.html";
-const OAUTH_CONFIG = { corpId: "corp-a", sdkId: "sdk-a", callbackUri: "https://gateway.example/callbacks/tencent/oauth/app-a", applicationId: "app-a", returnTo: "https://consumer.example/api/meeting-gateway/oauth/return" };
+const OAUTH_CONFIG = { corpId: "corp-a", sdkId: "sdk-a", callbackUri: "https://gateway.example/callbacks/tencent/oauth/app-a", applicationId: "app-a", callbackRef: "app-a", returnTo: "https://consumer.example/api/meeting-gateway/oauth/return" };
 
 function fixture() {
   const rows = [];
@@ -84,6 +84,18 @@ describe("Meeting Gateway OAuth safety seams", () => {
     expect(() => validateAuthorizationUrl("https://meeting.tencent.com.evil.invalid/marketplace/authorize.html", { allowedPaths: [AUTH_PATH], config: OAUTH_CONFIG })).toThrow("MGW_OAUTH_START_REJECTED");
     expect(() => validateAuthorizationUrl(AUTH_URL.replace("sdk-a", "sdk-b"), { allowedPaths: [AUTH_PATH], config: OAUTH_CONFIG })).toThrow("MGW_OAUTH_START_REJECTED");
     expect(() => validateAuthorizationUrl(AUTH_URL)).toThrow("MGW_UPSTREAM_CONTRACT_ERROR");
+  });
+  test("uses the SDK id as ENV callback public_ref while keeping an explicit application UUID separate", () => {
+    const appUuid = "app-uuid-a";
+    const envConfig = { ...OAUTH_CONFIG, applicationId: "", callbackRef: "sdk-a", callbackUri: "https://gateway.example/callbacks/tencent/oauth/sdk-a" };
+    const envUrl = AUTH_URL.replace("oauth%2Fapp-a", "oauth%2Fsdk-a");
+    expect(validateAuthorizationUrl(envUrl, { allowedPaths: [AUTH_PATH], config: envConfig })).toBe(envUrl);
+    expect(() => validateAuthorizationUrl(envUrl.replace("oauth%2Fsdk-a", `oauth%2F${appUuid}`), { allowedPaths: [AUTH_PATH], config: envConfig })).toThrow("MGW_OAUTH_START_REJECTED");
+
+    const explicitConfig = { ...OAUTH_CONFIG, applicationId: appUuid, callbackRef: appUuid, callbackUri: `https://gateway.example/callbacks/tencent/oauth/${appUuid}` };
+    const explicitUrl = AUTH_URL.replace("oauth%2Fapp-a", `oauth%2F${appUuid}`);
+    expect(validateAuthorizationUrl(explicitUrl, { allowedPaths: [AUTH_PATH], config: explicitConfig })).toBe(explicitUrl);
+    expect(() => validateAuthorizationUrl(envUrl, { allowedPaths: [AUTH_PATH], config: explicitConfig })).toThrow("MGW_OAUTH_START_REJECTED");
   });
 
   test("lists only this member's third-party OAuth connections", async () => {

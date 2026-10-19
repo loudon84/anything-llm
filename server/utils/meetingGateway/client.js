@@ -254,7 +254,7 @@ function createGatewayClient({ origin, originAllowlist, allowlist, fetchImpl = g
     return envelope.data;
   }
   async function startAuthorization({ gatewayAccessToken, applicationId, returnTo } = {}) {
-    if (!applicationId || !returnTo) throw contractError();
+    if (typeof applicationId !== "string" || !returnTo) throw contractError();
     const data = await authorizationData({ token: gatewayAccessToken, path: "/api/v1/oauth/authorizations", method: "POST", body: { application_id: applicationId, return_to: returnTo } });
     if (typeof data.authorization_url !== "string" || typeof data.transaction_id !== "string" || typeof data.expires_at !== "string") throw contractError();
     return { authorizationUrl: data.authorization_url, transactionId: data.transaction_id, expiresAt: data.expires_at };
