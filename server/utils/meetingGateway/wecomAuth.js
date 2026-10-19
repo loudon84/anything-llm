@@ -44,6 +44,7 @@ function createWeComAuthService({
   store,
   jwt,
   getUser = null,
+  isPasswordlessSingleUser = async () => false,
   clock = () => new Date(),
   origin,
   callbackUri,
@@ -353,9 +354,27 @@ function createWeComAuthService({
     }
   }
 
+  async function isLegacyPasswordlessMode() {
+    try {
+      return (await isPasswordlessSingleUser()) === true;
+    } catch {
+      return false;
+    }
+  }
+
   async function getState({ localToken, browserProof, preloginCookie } = {}) {
     const preloginState = await getPreloginState(preloginCookie);
-    if (!localToken) return preloginState;
+    if (!localToken) {
+      if (!(await isLegacyPasswordlessMode())) return preloginState;
+      return {
+        ...preloginState,
+        authenticated: true,
+        remoteAccessMode: null,
+        reason: null,
+        expiresAt: null,
+        user: null,
+      };
+    }
     let claims;
     try {
       claims = jwt.verify(localToken);

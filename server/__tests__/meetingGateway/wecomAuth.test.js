@@ -185,6 +185,22 @@ describe("WeCom BFF auth service", () => {
     await expect(auth.getValidatedSessionActor({ sessionId: "s1", userId: 1 })).rejects.toMatchObject({ code: "MGW_BUSINESS_AUTH_REQUIRED" });
   });
 
+  test("recognizes only server-confirmed passwordless single-user auth without a bearer", async () => {
+    const fx = fixture();
+    const passwordless = service(fx, { isPasswordlessSingleUser: async () => true });
+    expect(await passwordless.getState()).toMatchObject({ authenticated: true, remoteAccessMode: null, user: null });
+    expect(await passwordless.getRequestAuthState()).toMatchObject({ authenticated: true, kind: "LEGACY_SINGLE_USER", actor: null, remoteAccessMode: null });
+
+    const protectedSingleUser = service(fx, { isPasswordlessSingleUser: async () => false });
+    expect(await protectedSingleUser.getState()).toMatchObject({ authenticated: false, remoteAccessMode: null, user: null });
+    expect(await protectedSingleUser.getRequestAuthState()).toMatchObject({ authenticated: false, kind: "UNAUTHENTICATED" });
+    await expect(protectedSingleUser.getState({ localToken: "not-a-valid-token" })).resolves.toMatchObject({ authenticated: false });
+
+    const multiUser = service(fx, { isPasswordlessSingleUser: async () => false });
+    expect(await multiUser.getState()).toMatchObject({ authenticated: false });
+    const invalidGateway = jwt.sign({ id: 1, session_id: "missing", credential_epoch: 0 }, "local-test-secret", { expiresIn: "1h" });
+    await expect(passwordless.getState({ localToken: invalidGateway })).rejects.toMatchObject({ code: "MGW_BUSINESS_AUTH_REQUIRED" });
+  });
   test("internal request auth state distinguishes gateway, legacy, and unauthenticated callers", async () => {
     const fx = fixture(); const auth = service(fx);
     await fx.store.createLocalSession({ userId: 1, bindingId: "b1", identityExpiresAt: iso(fx.now + 3600000), authMethod: "wecom", browserProofHash: auth.hashBrowserProof("proof") });
@@ -214,7 +230,7 @@ describe("WeCom BFF auth service", () => {
   });
 
   test("serves the frozen response envelope and enforces request Origin over HTTP", async () => {
-    const fx = fixture(); const auth = service(fx);
+    const fx = fixture(); const auth = service(fx, { isPasswordlessSingleUser: async () => true });
     const app = express(); app.use(express.json()); createWeComAuthEndpoints(app, { auth });
     const server = createServer(app); await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -222,6 +238,8 @@ describe("WeCom BFF auth service", () => {
       const configResponse = await fetch(url);
       expect(configResponse.headers.get("cache-control")).toBe("no-store");
       expect(await configResponse.json()).toMatchObject({ data: { enabled: false, available: false, reason: "DEPENDENCY_NOT_READY" }, meta: { schema_version: "2.0" } });
+      const legacyStateResponse = await fetch(url.replace("/config", "/state"));
+      expect((await legacyStateResponse.json()).data).toMatchObject({ authenticated: true, remoteAccessMode: null, user: null });
       const rejected = await fetch(url.replace("/config", "/start"), { method: "POST", headers: { "content-type": "application/json", origin: "https://attacker.example" }, body: "{}" });
       expect(rejected.status).toBe(403);
       expect((await rejected.json()).error.code).toBe("MGW_CSRF_REJECTED");

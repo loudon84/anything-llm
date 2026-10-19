@@ -59,6 +59,7 @@ const {
 const { createWeComAuthService } = require("./utils/meetingGateway/wecomAuth");
 const { createMeetingStore } = require("./models/meetingGateway");
 const { createWeComIdentityStore } = require("./models/wecomIdentity");
+const { SystemSettings } = require("./models/systemSettings");
 const { User } = require("./models/user");
 const prisma = require("./utils/prisma");
 function parseMeetingKeyring() {
@@ -117,6 +118,8 @@ const meetingWecomAuth =
             require("jsonwebtoken").verify(token, process.env.JWT_SECRET),
         },
         getUser: (id) => User.get({ id }),
+        isPasswordlessSingleUser: async () =>
+          !process.env.AUTH_TOKEN && !(await SystemSettings.isMultiUserMode()),
         origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN || null,
         callbackUri: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN
           ? process.env.MEETING_GATEWAY_ALLOWED_ORIGIN +
