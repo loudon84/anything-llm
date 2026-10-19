@@ -1,5 +1,6 @@
 const { v4 } = require("uuid");
 const prisma = require("../utils/prisma");
+const workspacePolicy = require("../utils/meetingGateway/workspacePolicy").createWorkspacePolicy();
 /**
  * Valid chat modes for embeds.
  * - chat: Chat mode will use the workspace's chat mode.
@@ -98,6 +99,22 @@ const EmbedConfig = {
     });
 
     try {
+      const existing = await prisma.embed_configs.findFirst({
+        where: { id: Number(embedId) },
+        select: { workspace_id: true },
+      });
+      if (!existing) throw new Error("Embed not found");
+
+      const workspaceIds = new Set([existing.workspace_id]);
+      if (Object.hasOwn(updates, "workspace_id")) workspaceIds.add(updates.workspace_id);
+      for (const workspaceId of workspaceIds) {
+        await workspacePolicy.assertMutation({
+          workspaceId,
+          actor: { kind: "API_KEY" },
+          action: "embed.update",
+        });
+      }
+
       await prisma.embed_configs.update({
         where: { id: Number(embedId) },
         data: updates,

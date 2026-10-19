@@ -39,6 +39,7 @@ const DocumentVectors = {
   },
 
   deleteForWorkspace: async function (workspaceId) {
+    await Document.assertNoManagedDocuments({ workspaceId });
     const documents = await Document.forWorkspace(workspaceId);
     const docIds = [...new Set(documents.map((doc) => doc.docId))];
 
@@ -66,6 +67,9 @@ const DocumentVectors = {
   },
 
   delete: async function (clause = {}) {
+    const vectors = await prisma.document_vectors.findMany({ where: clause });
+    const docIds = [...new Set(vectors.map(({ docId }) => docId))];
+    if (docIds.length > 0) await Document.assertNoManagedDocuments({ docId: { in: docIds } });
     try {
       await prisma.document_vectors.deleteMany({ where: clause });
       return true;

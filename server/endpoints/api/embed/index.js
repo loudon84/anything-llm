@@ -1,4 +1,5 @@
 const { EmbedConfig } = require("../../../models/embedConfig");
+const workspacePolicy = require("../../../utils/meetingGateway/workspacePolicy").createWorkspacePolicy();
 const { EmbedChats } = require("../../../models/embedChats");
 const { validApiKey } = require("../../../utils/middleware/validApiKey");
 const { reqBody } = require("../../../utils/http");
@@ -272,6 +273,12 @@ function apiEmbedEndpoints(app) {
       if (!workspace)
         return response.status(404).json({ error: "Workspace not found" });
 
+      try {
+        await workspacePolicy.assertMutation({ workspaceId: workspace.id, actor: { kind: "API_KEY" }, action: "embed.create" });
+      } catch (error) {
+        if (error.message?.startsWith("MGW_")) return response.status(403).json({ error: error.message });
+        throw error;
+      }
       const { embed, message: error } = await EmbedConfig.new({
         ...data,
         workspace_id: workspace.id,

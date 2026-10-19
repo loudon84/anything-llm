@@ -7,6 +7,7 @@ const {
   normalizePath,
   isWithin,
   moveProcessedDocsToFolder,
+  isManagedDocumentLocation,
   viewLocalFiles,
 } = require("../../../utils/files");
 const { reqBody, safeJsonParse, queryParams } = require("../../../utils/http");
@@ -940,6 +941,10 @@ function apiDocumentEndpoints(app) {
     */
     try {
       const { docName } = request.params;
+      if (isManagedDocumentLocation(docName)) {
+        response.sendStatus(404).end();
+        return;
+      }
       const document = await findDocumentInDocuments(docName);
       if (!document) {
         response.sendStatus(404).end();
@@ -1128,7 +1133,7 @@ function apiDocumentEndpoints(app) {
         const documents = await Document.where({ docpath: { in: docpaths } });
         const embeddedFiles = documents.map((doc) => doc.docpath);
         const moveableFiles = files.filter(
-          ({ from }) => !embeddedFiles.includes(from)
+          ({ from, to }) => !embeddedFiles.includes(from) && !isManagedDocumentLocation(from) && !isManagedDocumentLocation(to)
         );
         const movePromises = moveableFiles.map(({ from, to }) => {
           const sourcePath = path.join(documentsPath, normalizePath(from));

@@ -12,6 +12,8 @@ const { Workspace } = require("../../models/workspace");
 
 async function purgeDocument(filename = null) {
   if (!filename || !normalizePath(filename)) return;
+  if (filename.replace(/\\/g, "/").split("/").includes("meeting-managed"))
+    throw new Error("MGW_MANAGED_DOCUMENT_REQUIRES_CLEANUP");
 
   await purgeVectorCache(filename);
   await purgeSourceDocument(filename);
@@ -39,7 +41,7 @@ async function purgeFolder(folderName = null) {
     .map((folder) => {
       // Filter out any results which are not folders or
       // are the protected custom-documents folder.
-      if (folder === "custom-documents") return null;
+      if (["custom-documents", "meeting-managed"].includes(folder)) return null;
       const subfolderPath = path.resolve(documentsPath, folder);
       if (!fs.lstatSync(subfolderPath).isDirectory()) return null;
       return folder;

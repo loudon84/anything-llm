@@ -3,7 +3,8 @@ import usePfp from "@/hooks/usePfp";
 import useUser from "@/hooks/useUser";
 import System from "@/models/system";
 import paths from "@/utils/paths";
-import { userFromStorage } from "@/utils/request";
+import { baseHeaders, userFromStorage } from "@/utils/request";
+import { API_BASE } from "@/utils/constants";
 import { Person } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import AccountModal from "../AccountModal";
@@ -16,6 +17,23 @@ import {
 } from "@/utils/constants";
 import { useTranslation } from "react-i18next";
 
+async function revokeMeetingBridgeBeforeLogout() {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 1500);
+  try {
+    const headers = baseHeaders();
+    const endpoint = API_BASE + "/meeting-gateway/session";
+    const session = await fetch(endpoint, { headers, credentials: "same-origin", signal: controller.signal });
+    if (!session.ok) return;
+    const { csrf_token: csrf } = await session.json();
+    if (!csrf) return;
+    await fetch(endpoint, { method: "DELETE", headers: { ...headers, "X-Meeting-CSRF": csrf }, credentials: "same-origin", signal: controller.signal });
+  } catch (_error) {
+    // Logout remains local when the API is unreachable.
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
 export default function UserButton() {
   const { t } = useTranslation();
   const mode = useLoginMode();
@@ -93,7 +111,8 @@ export default function UserButton() {
               {t("profile_settings.support")}
             </a>
             <button
-              onClick={() => {
+              onClick={async () => {
+                await revokeMeetingBridgeBeforeLogout();
                 window.localStorage.removeItem(AUTH_USER);
                 window.localStorage.removeItem(AUTH_TOKEN);
                 window.localStorage.removeItem(AUTH_TIMESTAMP);

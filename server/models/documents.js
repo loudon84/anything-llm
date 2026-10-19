@@ -6,6 +6,17 @@ const { EventLogs } = require("./eventLogs");
 const { safeJsonParse } = require("../utils/http");
 const { getModelTag } = require("../endpoints/utils");
 
+const MANAGED_PROVENANCE_FIELDS = ["operation_id", "import_id", "generation", "owner_user_id", "workspace_id", "payload_sha256"];
+function sameManagedProvenance(existing, incoming) {
+  if (!existing || !incoming) return false;
+  const existingFields = Object.keys(existing).sort();
+  const incomingFields = Object.keys(incoming).sort();
+  const expectedFields = [...MANAGED_PROVENANCE_FIELDS].sort();
+  if (JSON.stringify(existingFields) !== JSON.stringify(expectedFields) ||
+      JSON.stringify(incomingFields) !== JSON.stringify(expectedFields)) return false;
+  return MANAGED_PROVENANCE_FIELDS.every((field) => existing[field] === incoming[field]);
+}
+
 const Document = {
   writable: ["pinned", "watched", "lastUpdatedAt"],
   /**
@@ -36,7 +47,24 @@ const Document = {
     });
   },
 
+  isManagedPath: function (path) {
+    return typeof path === "string" && path.replace(/\\/g, "/").split("/").includes("meeting-managed");
+  },
+
+  assertNoManagedPaths: function (paths = []) {
+    if (paths.some((path) => this.isManagedPath(path)))
+      throw new Error("MGW_MANAGED_DOCUMENT_REQUIRES_CLEANUP");
+  },
+
+  assertNoManagedDocuments: async function (clause = {}) {
+    const documents = await prisma.workspace_documents.findMany({ where: clause });
+    if (documents.some((document) => this.isManagedPath(document.docpath)))
+      throw new Error("MGW_MANAGED_DOCUMENT_REQUIRES_CLEANUP");
+    return true;
+  },
+
   delete: async function (clause = {}) {
+    await this.assertNoManagedDocuments(clause);
     try {
       await prisma.workspace_documents.deleteMany({ where: clause });
       return true;
@@ -86,11 +114,10 @@ const Document = {
     userId = null,
     { originalRetention = null } = {}
   ) {
-    const VectorDb = getVectorDbClass();
-    const workspaceOriginals =
-      originalRetention ||
-      require("../utils/workspaceOriginals").getWorkspaceOriginals();
     if (additions.length === 0) return { failed: [], embedded: [] };
+    this.assertNoManagedPaths(additions);
+    const VectorDb = getVectorDbClass();
+    let workspaceOriginals = originalRetention;
     const { fileData } = require("../utils/files");
     const { emitProgress } = require("../utils/EmbeddingWorkerManager");
     const embedded = [];
@@ -166,6 +193,7 @@ const Document = {
       let originalBound = false;
       try {
         if (typeof data.workspaceOriginalId === "string") {
+          workspaceOriginals ||= require("../utils/workspaceOriginals").getWorkspaceOriginals();
           await workspaceOriginals.bind({
             referenceId: data.workspaceOriginalId,
             workspaceId: workspace.id,
@@ -244,17 +272,93 @@ const Document = {
     return { failedToEmbed, errors: Array.from(errors), embedded };
   },
 
+  addManagedDocument: async function ({ tx = null, workspace, location, docId, document }) {
+    if (!workspace?.id || !location || !docId || document?.id !== docId ||
+        !location.replace(/\\/g, "/").split("/").includes("meeting-managed") ||
+        typeof document.pageContent !== "string" || !document.managedProvenance)
+      throw new Error("MGW_MANAGED_DOCUMENT_INVALID");
+
+    const db = tx || prisma;
+    const existing = await db.workspace_documents.findFirst({
+      where: { docId },
+    });
+    if (existing) {
+      const existingMetadata = safeJsonParse(existing.metadata, null);
+      if (existing.workspaceId !== workspace.id || existing.docpath !== location ||
+          !sameManagedProvenance(existingMetadata?.managedProvenance, document.managedProvenance))
+        throw new Error("MGW_IMPORT_CONFLICT");
+    }
+    if (!existing) {
+      const { pageContent: _pageContent, ...metadata } = document;
+      await db.workspace_documents.create({
+        data: {
+          docId,
+          filename: location.split(/[/\\]/).pop(),
+          docpath: location,
+          workspaceId: workspace.id,
+          metadata: JSON.stringify(metadata),
+        },
+      });
+    }
+    return { associated: true, docId };
+  },
+
+  getManagedDocument: async function ({ workspaceId, location, docId }) {
+    const document = await prisma.workspace_documents.findFirst({
+      where: { docId, workspaceId, docpath: location },
+    });
+    if (!document) return null;
+    const vectorCount = await prisma.document_vectors.count({ where: { docId } });
+    return { docId: document.docId, workspaceId: document.workspaceId, docpath: document.docpath, vectorCount };
+  },
+
+  getManagedDocumentByDocId: async function ({ docId }) {
+    const document = await prisma.workspace_documents.findFirst({ where: { docId } });
+    if (!document) return null;
+    const metadata = safeJsonParse(document.metadata, null);
+    const vectorCount = await prisma.document_vectors.count({ where: { docId } });
+    return {
+      docId: document.docId,
+      workspaceId: document.workspaceId,
+      docpath: document.docpath,
+      managedProvenance: metadata?.managedProvenance || null,
+      vectorCount,
+    };
+  },
+
+  getWorkspace: async function (workspaceId) {
+    const { Workspace } = require("./workspace");
+    return Workspace.get({ id: workspaceId });
+  },
+
+  removeManagedDocument: async function ({ tx = null, workspace, location, docId }) {
+    const db = tx || prisma;
+    const document = await db.workspace_documents.findFirst({
+      where: { docId, workspaceId: workspace?.id, docpath: location },
+    });
+    if (!document) return { removed: false };
+    if (tx) {
+      await tx.document_vectors.deleteMany({ where: { docId } });
+      await tx.workspace_documents.delete({ where: { id: document.id } });
+    } else {
+      await prisma.$transaction([
+        prisma.document_vectors.deleteMany({ where: { docId } }),
+        prisma.workspace_documents.delete({ where: { id: document.id } }),
+      ]);
+    }
+    return { removed: true, docId };
+  },
+
   removeDocuments: async function (
     workspace,
     removals = [],
     userId = null,
     { originalRetention = null } = {}
   ) {
-    const VectorDb = getVectorDbClass();
-    const workspaceOriginals =
-      originalRetention ||
-      require("../utils/workspaceOriginals").getWorkspaceOriginals();
     if (removals.length === 0) return;
+    this.assertNoManagedPaths(removals);
+    const VectorDb = getVectorDbClass();
+    let workspaceOriginals = originalRetention;
 
     for (const path of removals) {
       const document = await this.get({
@@ -272,12 +376,14 @@ const Document = {
           where: { id: document.id, workspaceId: workspace.id },
         });
         const metadata = safeJsonParse(document.metadata, {});
-        if (typeof metadata.workspaceOriginalId === "string")
+        if (typeof metadata.workspaceOriginalId === "string") {
+          workspaceOriginals ||= require("../utils/workspaceOriginals").getWorkspaceOriginals();
           await workspaceOriginals.unbind({
             referenceId: metadata.workspaceOriginalId,
             workspaceId: workspace.id,
             docId: document.docId,
           });
+        }
         await prisma.document_vectors.deleteMany({
           where: { docId: document.docId },
         });

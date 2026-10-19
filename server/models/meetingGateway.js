@@ -1,0 +1,489 @@
+const { randomUUID } = require("crypto");
+const { ACCESS_STATES, assertTransition } = require("../utils/meetingGateway/lifecycle");
+
+const IMPORT_FIELDS = [
+  "anything_user_id",
+  "gateway_org_id",
+  "gateway_member_id",
+  "connection_ref",
+  "gateway_meeting_id",
+  "gateway_recording_id",
+  "gateway_asset_id",
+  "content_type",
+  "source_version",
+  "content_sha256",
+  "workspace_slug",
+  "workspace_id",
+  "identity_key",
+];
+const GENERATION_PATCH_FIELDS = new Set([
+  "state",
+  "document_location",
+  "vector_doc_id",
+  "last_applied_doc_sha256",
+  "container_sha256",
+  "policy_epoch",
+]);
+
+function dateFromClock(clock) {
+  const value = clock();
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(typeof value === "number" ? value * 1000 : value);
+  if (Number.isNaN(date.getTime())) throw new Error("MGW_INVALID_CLOCK");
+  return date;
+}
+
+function requiredIdentity(input) {
+  if (!input || IMPORT_FIELDS.some((field) => input[field] === undefined || input[field] === null))
+    throw new Error("MGW_IDENTITY_INVALID");
+  if (!Number.isInteger(input.anything_user_id) || !Number.isInteger(input.workspace_id))
+    throw new Error("MGW_IDENTITY_INVALID");
+  if (!["transcript", "minutes"].includes(input.content_type)) throw new Error("MGW_IDENTITY_INVALID");
+  if (IMPORT_FIELDS.some((field) => typeof input[field] === "string" && !input[field].trim()))
+    throw new Error("MGW_IDENTITY_INVALID");
+}
+
+function sameIdentity(row, input) {
+  return IMPORT_FIELDS.every((field) => row[field] === input[field]);
+}
+
+function createMeetingStore({ prisma, clock = () => new Date() }) {
+  if (!prisma || typeof prisma.$transaction !== "function") throw new Error("MGW_PRISMA_REQUIRED");
+  const now = () => dateFromClock(clock);
+
+  async function getById(db, table, id) {
+    const rows = await db.$queryRawUnsafe(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`, id);
+    return rows[0] || null;
+  }
+
+  async function reserveIdentity(input) {
+    requiredIdentity(input);
+    const id = randomUUID();
+    const timestamp = now();
+    try {
+      return await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          `INSERT INTO meeting_imports (
+            id, anything_user_id, gateway_org_id, gateway_member_id, connection_ref,
+            gateway_meeting_id, gateway_recording_id, gateway_asset_id, content_type,
+            source_version, content_sha256, workspace_slug, workspace_id, identity_key,
+            current_generation, status, access_state, attempt_count, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PENDING', 'UNVERIFIED', 0, ?, ?)
+          ON CONFLICT(identity_key) DO NOTHING`,
+          id,
+          input.anything_user_id,
+          input.gateway_org_id,
+          input.gateway_member_id,
+          input.connection_ref,
+          input.gateway_meeting_id,
+          input.gateway_recording_id,
+          input.gateway_asset_id,
+          input.content_type,
+          input.source_version,
+          input.content_sha256,
+          input.workspace_slug,
+          input.workspace_id,
+          input.identity_key,
+          timestamp,
+          timestamp
+        );
+        const rows = await tx.$queryRawUnsafe("SELECT * FROM meeting_imports WHERE identity_key = ?", input.identity_key);
+        const existing = rows[0];
+        if (!existing || !sameIdentity(existing, input)) throw new Error("MGW_IDENTITY_BINDING_CONFLICT");
+        return existing;
+      });
+    } catch (error) {
+      if (error.message === "MGW_IDENTITY_BINDING_CONFLICT") throw error;
+      const existing = (await prisma.$queryRawUnsafe("SELECT * FROM meeting_imports WHERE identity_key = ?", input.identity_key))[0];
+      if (existing && sameIdentity(existing, input)) return existing;
+      const boundMember = (
+        await prisma.$queryRawUnsafe(
+          "SELECT id FROM meeting_imports WHERE gateway_org_id = ? AND gateway_member_id = ? AND anything_user_id <> ? LIMIT 1",
+          input.gateway_org_id,
+          input.gateway_member_id,
+          input.anything_user_id
+        )
+      )[0];
+      if (boundMember) throw new Error("MGW_IDENTITY_BINDING_CONFLICT");
+      throw error;
+    }
+  }
+
+  async function claimGeneration(importId) {
+    return prisma.$transaction(async (tx) => {
+      const imported = await getById(tx, "meeting_imports", importId);
+      if (!imported) throw new Error("MGW_IMPORT_NOT_FOUND");
+      const policy = (
+        await tx.$queryRawUnsafe("SELECT * FROM meeting_restricted_workspaces WHERE workspace_id = ?", imported.workspace_id)
+      )[0];
+      if (!policy || policy.owner_user_id !== imported.anything_user_id || policy.state !== "ACTIVE")
+        throw new Error("MGW_WORKSPACE_POLICY_REQUIRED");
+
+      const generationNumber = imported.current_generation + 1;
+      if (imported.current_generation > 0) {
+        const previous = (
+          await tx.$queryRawUnsafe(
+            "SELECT * FROM meeting_import_generations WHERE import_id = ? AND generation = ?",
+            importId,
+            imported.current_generation
+          )
+        )[0];
+        if (!previous || ["PENDING_CLEANUP", "REVOKING"].includes(previous.state))
+          throw new Error("MGW_CLEANUP_IN_PROGRESS");
+        if (previous.state !== "REMOVED") throw new Error("MGW_IMPORT_CONFLICT");
+      }
+
+      const updated = await tx.$executeRawUnsafe(
+        "UPDATE meeting_imports SET current_generation = ?, status = 'PENDING', updated_at = ? WHERE id = ? AND current_generation = ?",
+        generationNumber,
+        now(),
+        importId,
+        imported.current_generation
+      );
+      if (updated !== 1) throw new Error("MGW_IMPORT_CONFLICT");
+
+      const id = randomUUID();
+      const operationId = randomUUID();
+      const timestamp = now();
+      await tx.$executeRawUnsafe(
+        `INSERT INTO meeting_import_generations (
+          id, import_id, generation, operation_id, state, policy_epoch, fencing_token, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'PENDING', ?, 0, ?, ?)`,
+        id,
+        importId,
+        generationNumber,
+        operationId,
+        policy.policy_epoch,
+        timestamp,
+        timestamp
+      );
+      return getById(tx, "meeting_import_generations", id);
+    });
+  }
+
+  async function acquireLease(generationId, workerId) {
+    if (typeof workerId !== "string" || !workerId.trim()) throw new Error("MGW_WORKER_ID_REQUIRED");
+    return prisma.$transaction(async (tx) => {
+      const timestamp = now();
+      const deadline = new Date(timestamp.getTime() + 60_000);
+      const updated = await tx.$executeRawUnsafe(
+        `UPDATE meeting_import_generations
+         SET lease_owner = ?, lease_deadline = ?,
+         fencing_token = CASE WHEN lease_owner = ? AND lease_deadline > ? THEN fencing_token ELSE fencing_token + 1 END,
+         updated_at = ?
+         WHERE id = ? AND (lease_deadline IS NULL OR lease_deadline <= ? OR lease_owner = ?)`,
+        workerId,
+        deadline,
+        workerId,
+        timestamp,
+        timestamp,
+        generationId,
+        timestamp,
+        workerId
+      );
+      if (updated !== 1) {
+        if (!(await getById(tx, "meeting_import_generations", generationId))) throw new Error("MGW_GENERATION_NOT_FOUND");
+        throw new Error("MGW_LEASE_HELD");
+      }
+      return getById(tx, "meeting_import_generations", generationId);
+    });
+  }
+
+  async function commitGeneration(generationId, fence, patch) {
+    if (!Number.isInteger(fence) || !patch || typeof patch !== "object") throw new Error("MGW_GENERATION_PATCH_INVALID");
+    const keys = Object.keys(patch);
+    if (keys.some((key) => !GENERATION_PATCH_FIELDS.has(key))) throw new Error("MGW_GENERATION_PATCH_INVALID");
+
+    return prisma.$transaction(async (tx) => {
+      const existing = await getById(tx, "meeting_import_generations", generationId);
+      if (!existing) throw new Error("MGW_GENERATION_NOT_FOUND");
+      if (patch.state !== undefined) assertTransition(existing.state, patch.state);
+      const timestamp = now();
+      const fields = [...keys, "updated_at"];
+      const values = [...keys.map((key) => patch[key]), timestamp, generationId, fence, timestamp];
+      const assignments = [...keys.map((key) => `"${key}" = ?`), '"updated_at" = ?'].join(", ");
+      const updated = await tx.$executeRawUnsafe(
+        `UPDATE meeting_import_generations SET ${assignments} WHERE id = ? AND fencing_token = ? AND lease_deadline > ?`,
+        ...values
+      );
+      if (updated !== 1) throw new Error("MGW_STALE_FENCE");
+      const committed = await getById(tx, "meeting_import_generations", generationId);
+      if (patch.state !== undefined) {
+        const parentUpdates = ["status = ?"];
+        const parentValues = [patch.state];
+        if (patch.state === "VERIFIED") {
+          parentUpdates.push("active_generation = ?", "document_location = ?", "last_applied_doc_sha256 = ?");
+          parentValues.push(
+            committed.generation,
+            committed.document_location,
+            committed.last_applied_doc_sha256
+          );
+        } else if (patch.state === "REMOVED") {
+          parentUpdates.push("active_generation = NULL", "document_location = NULL", "last_applied_doc_sha256 = NULL");
+        } else {
+          if (Object.hasOwn(patch, "document_location")) {
+            parentUpdates.push("document_location = ?");
+            parentValues.push(patch.document_location);
+          }
+          if (Object.hasOwn(patch, "last_applied_doc_sha256")) {
+            parentUpdates.push("last_applied_doc_sha256 = ?");
+            parentValues.push(patch.last_applied_doc_sha256);
+          }
+        }
+        parentUpdates.push("updated_at = ?");
+        parentValues.push(timestamp, committed.import_id);
+        await tx.$executeRawUnsafe(
+          `UPDATE meeting_imports SET ${parentUpdates.join(", ")} WHERE id = ?`,
+          ...parentValues
+        );
+      }
+      return committed;
+    });
+  }
+
+  async function assertManagedDocumentFence(tx, input, allowedStates) {
+    const { generationId, fencingToken, workspaceId, policyEpoch, docId, location, signal } = input;
+    if (signal?.aborted) throw new Error("MGW_FENCED_STORE_OPERATION_ABORTED");
+    if (!Number.isInteger(fencingToken) || !Number.isInteger(workspaceId) || !Number.isInteger(policyEpoch) ||
+        typeof docId !== "string" || !docId || typeof location !== "string" || !location ||
+        typeof input.mutateAssociation !== "function")
+      throw new Error("MGW_FENCED_STORE_OPERATION_INVALID");
+    const generation = await getById(tx, "meeting_import_generations", generationId);
+    if (!generation) throw new Error("MGW_GENERATION_NOT_FOUND");
+    if (generation.fencing_token !== fencingToken ||
+        generation.policy_epoch !== policyEpoch || generation.vector_doc_id !== docId ||
+        generation.document_location !== location || !allowedStates.includes(generation.state))
+      throw new Error("MGW_STALE_FENCE");
+    const imported = await getById(tx, "meeting_imports", generation.import_id);
+    const policies = await tx.$queryRawUnsafe(
+      "SELECT * FROM meeting_restricted_workspaces WHERE workspace_id = ? LIMIT 1",
+      workspaceId
+    );
+    const policy = policies[0];
+    if (!imported || imported.workspace_id !== workspaceId || !policy ||
+        policy.owner_user_id !== imported.anything_user_id || policy.state !== "ACTIVE" ||
+        policy.policy_epoch !== policyEpoch)
+      throw new Error("MGW_WORKSPACE_NOT_PRIVATE");
+    const timestamp = now();
+    const updated = await tx.$executeRawUnsafe(
+      `UPDATE meeting_import_generations SET updated_at = ?
+       WHERE id = ? AND fencing_token = ? AND lease_deadline > ? AND policy_epoch = ?
+         AND vector_doc_id = ? AND document_location = ?
+         AND EXISTS (
+           SELECT 1 FROM meeting_imports i
+           JOIN meeting_restricted_workspaces p ON p.workspace_id = i.workspace_id
+           WHERE i.id = meeting_import_generations.import_id AND i.workspace_id = ?
+             AND p.owner_user_id = i.anything_user_id AND p.state = 'ACTIVE' AND p.policy_epoch = ?
+         )`,
+      timestamp, generationId, fencingToken, timestamp, policyEpoch, docId, location, workspaceId, policyEpoch
+    );
+    if (updated !== 1) throw new Error("MGW_STALE_FENCE");
+    if (signal.aborted) throw new Error("MGW_FENCED_STORE_OPERATION_ABORTED");
+  }
+
+  async function fencedManagedDocumentMutation(input, allowedStates) {
+    if (!input || typeof input.signal?.addEventListener !== "function" || input.signal.aborted)
+      throw new Error("MGW_FENCED_STORE_OPERATION_ABORTED");
+    return prisma.$transaction(async (tx) => {
+      await assertManagedDocumentFence(tx, input, allowedStates)
+      const result = await input.mutateAssociation(tx);
+      await assertManagedDocumentFence(tx, input, allowedStates)
+      return result;
+    });
+  }
+
+  async function addManagedDocumentFenced(input) {
+    return fencedManagedDocumentMutation(input, ["ATTACHING"]);
+  }
+
+  async function removeManagedDocumentFenced(input) {
+    return fencedManagedDocumentMutation(input, ["ATTACHING", "VERIFYING", "VERIFIED", "REVOKING", "PENDING_CLEANUP", "SUPERSEDED"]);
+  }
+  async function markAccess(importId, state) {
+    if (!ACCESS_STATES.includes(state)) throw new Error("MGW_INVALID_ACCESS_STATE");
+    const updated = await prisma.$executeRawUnsafe(
+      "UPDATE meeting_imports SET access_state = ?, updated_at = ? WHERE id = ?",
+      state,
+      now(),
+      importId
+    );
+    if (updated !== 1) throw new Error("MGW_IMPORT_NOT_FOUND");
+    return getById(prisma, "meeting_imports", importId);
+  }
+
+  async function policyByWorkspace(workspaceId) {
+    const rows = await prisma.$queryRawUnsafe(
+      "SELECT * FROM meeting_restricted_workspaces WHERE workspace_id = ? LIMIT 1",
+      workspaceId
+    );
+    return rows[0] || null;
+  }
+
+  async function createBridgeSession(row) {
+    const timestamp = now();
+    const id = row.id || randomUUID();
+    await prisma.$transaction(async (tx) => {
+      const binding = row.binding;
+      if (!binding) throw new Error('MGW_IDENTITY_INVALID');
+      const existingBinding = (await tx.$queryRawUnsafe("SELECT gateway_org_id, gateway_member_id, gateway_user_id, status FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1", binding.anything_user_id))[0];
+      if (existingBinding && existingBinding.status === "BOUND" && (existingBinding.gateway_org_id !== binding.gateway_org_id || existingBinding.gateway_member_id !== binding.gateway_member_id || existingBinding.gateway_user_id !== binding.gateway_user_id)) throw new Error("MGW_IDENTITY_BINDING_CONFLICT");
+      await tx.$executeRawUnsafe(
+        `INSERT INTO meeting_gateway_bindings (
+          id, anything_user_id, gateway_org_id, gateway_member_id, gateway_user_id,
+          identity_issuer, status, verified_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
+        ON CONFLICT(anything_user_id) DO UPDATE SET
+          gateway_org_id = excluded.gateway_org_id, gateway_member_id = excluded.gateway_member_id,
+          gateway_user_id = excluded.gateway_user_id, identity_issuer = excluded.identity_issuer,
+          status = 'BOUND', verified_at = excluded.verified_at, updated_at = excluded.updated_at`,
+        randomUUID(), binding.anything_user_id, binding.gateway_org_id, binding.gateway_member_id,
+        binding.gateway_user_id, binding.identity_issuer || 'account-login-v1', timestamp, timestamp, timestamp
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO meeting_bridge_sessions (
+          id, anything_user_id, session_binding_hmac, jwt_binding_hmac, csrf_hmac,
+          credential_binding_hmac, ciphertext, nonce, key_id, ms_expiry, mt_expiry,
+          jwt_expiry, session_expiry, gateway_expiry, created_at, revoked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        id, row.anything_user_id, row.session_binding_hmac, row.jwt_binding_hmac,
+        row.csrf_hmac, row.credential_binding_hmac, row.ciphertext, row.nonce,
+        row.key_id, row.ms_expiry, row.mt_expiry, row.jwt_expiry,
+        row.session_expiry, row.gateway_expiry, timestamp
+      );
+      if (row.oldBridgeBindingHmac) {
+        await tx.$executeRawUnsafe(
+          'UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND session_binding_hmac = ? AND revoked_at IS NULL',
+          timestamp, row.anything_user_id, row.oldBridgeBindingHmac
+        );
+      }
+    });
+    return findBridgeSessionByBinding(row.session_binding_hmac);
+  }
+  async function findBridgeSessionByBinding(binding) {
+    const rows = await prisma.$queryRawUnsafe('SELECT * FROM meeting_bridge_sessions WHERE session_binding_hmac = ? LIMIT 1', binding);
+    return rows[0] || null;
+  }
+  async function revokeBridgeSession(id, revokedAt = now()) {
+    await prisma.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', revokedAt, id);
+  }
+  async function revokeBridgeSessionsForUser(userId, revokedAt = now()) {
+    await prisma.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND revoked_at IS NULL', revokedAt, userId);
+  }
+  async function getBinding(userId) {
+    const rows = await prisma.$queryRawUnsafe('SELECT * FROM meeting_gateway_bindings WHERE anything_user_id = ? LIMIT 1', userId);
+    return rows[0] || null;
+  }
+  async function saveBinding(binding) {
+    const timestamp = now();
+    const id = randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO meeting_gateway_bindings (
+        id, anything_user_id, gateway_org_id, gateway_member_id, gateway_user_id,
+        identity_issuer, status, verified_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'BOUND', ?, ?, ?)
+      ON CONFLICT(anything_user_id) DO UPDATE SET
+        gateway_org_id = excluded.gateway_org_id, gateway_member_id = excluded.gateway_member_id,
+        gateway_user_id = excluded.gateway_user_id, identity_issuer = excluded.identity_issuer,
+        status = 'BOUND', verified_at = excluded.verified_at, updated_at = excluded.updated_at`,
+      id, binding.anything_user_id, binding.gateway_org_id, binding.gateway_member_id,
+      binding.gateway_user_id, binding.identity_issuer || 'account-login-v1', timestamp, timestamp, timestamp
+    );
+    return getBinding(binding.anything_user_id);
+  }
+  async function revokeBinding(userId, revokedAt = now()) {
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('UPDATE meeting_bridge_sessions SET revoked_at = ? WHERE anything_user_id = ? AND revoked_at IS NULL', revokedAt, userId);
+      await tx.$executeRawUnsafe("UPDATE meeting_gateway_bindings SET status = 'REVOKED', updated_at = ? WHERE anything_user_id = ?", revokedAt, userId);
+      await tx.$executeRawUnsafe("UPDATE meeting_restricted_workspaces SET state = 'FROZEN', updated_at = ? WHERE owner_user_id = ? AND state = 'ACTIVE'", revokedAt, userId);
+    });
+  }
+  function oauthTransactionDto(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      transactionId: row.transaction_id,
+      ownerUserId: row.owner_user_id,
+      bridgeSessionId: row.bridge_session_id,
+      expiresAt: row.expires_at,
+      state: row.state,
+    };
+  }
+  async function findPendingOAuthForBridge(bridgeSessionId) {
+    if (typeof bridgeSessionId !== 'string' || !bridgeSessionId) return null;
+    const timestamp = now();
+    await prisma.$executeRawUnsafe(
+      "UPDATE meeting_oauth_transactions SET state = 'EXPIRED' WHERE bridge_session_id = ? AND state = 'PENDING' AND expires_at <= ?",
+      bridgeSessionId, timestamp
+    );
+    const rows = await prisma.$queryRawUnsafe(
+      "SELECT * FROM meeting_oauth_transactions WHERE bridge_session_id = ? AND state = 'PENDING' LIMIT 1",
+      bridgeSessionId
+    );
+    return oauthTransactionDto(rows[0]);
+  }
+  async function createOAuthTransaction(row) {
+    if (!row || typeof row.transactionId !== 'string' || !row.transactionId || !Number.isInteger(row.ownerUserId) ||
+        typeof row.bridgeSessionId !== 'string' || !(row.expiresAt instanceof Date) || row.state !== 'PENDING')
+      throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    const timestamp = now();
+    const id = randomUUID();
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        "UPDATE meeting_oauth_transactions SET state = 'EXPIRED' WHERE bridge_session_id = ? AND state = 'PENDING' AND expires_at <= ?",
+        row.bridgeSessionId, timestamp
+      );
+      const bridges = await tx.$queryRawUnsafe(
+        "SELECT anything_user_id, revoked_at, session_expiry, gateway_expiry FROM meeting_bridge_sessions WHERE id = ? LIMIT 1",
+        row.bridgeSessionId
+      );
+      const bridge = bridges[0];
+      const bridgeExpiry = bridge && (bridge.session_expiry || bridge.gateway_expiry);
+      if (!bridge || bridge.revoked_at || Number(bridge.anything_user_id) !== row.ownerUserId || !bridgeExpiry || new Date(bridgeExpiry) <= timestamp)
+        throw new Error('MGW_BUSINESS_AUTH_REQUIRED');
+      const pending = await tx.$queryRawUnsafe(
+        "SELECT id FROM meeting_oauth_transactions WHERE bridge_session_id = ? AND state = 'PENDING' LIMIT 1",
+        row.bridgeSessionId
+      );
+      if (pending.length) throw new Error('MGW_OAUTH_ALREADY_PENDING');
+      await tx.$executeRawUnsafe(
+        "INSERT INTO meeting_oauth_transactions (id, transaction_id, owner_user_id, bridge_session_id, expires_at, state, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)",
+        id, row.transactionId, row.ownerUserId, row.bridgeSessionId, row.expiresAt, timestamp
+      );
+      const rows = await tx.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
+      return oauthTransactionDto(rows[0]);
+    });
+  }
+  async function completeOAuthTransaction(id, transactionId, expiresAt) {
+    if (typeof id !== 'string' || typeof transactionId !== 'string' || !transactionId || !(expiresAt instanceof Date))
+      throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    try {
+      const updated = await prisma.$executeRawUnsafe(
+        "UPDATE meeting_oauth_transactions SET transaction_id = ?, expires_at = ? WHERE id = ? AND state = 'PENDING'",
+        transactionId, expiresAt, id
+      );
+      if (updated !== 1) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    } catch (_error) {
+      throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    }
+    const rows = await prisma.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
+    return oauthTransactionDto(rows[0]);
+  }  async function getOAuthTransactionForBridge(transactionId, bridgeSessionId, ownerUserId) {
+    const rows = await prisma.$queryRawUnsafe(
+      "SELECT * FROM meeting_oauth_transactions WHERE transaction_id = ? AND bridge_session_id = ? AND owner_user_id = ? LIMIT 1",
+      transactionId, bridgeSessionId, ownerUserId
+    );
+    return oauthTransactionDto(rows[0]);
+  }
+  async function updateOAuthTransactionState(id, state) {
+    if (!['CONFIRMED', 'EXPIRED', 'CANCELLED'].includes(state)) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    const updated = await prisma.$executeRawUnsafe(
+      "UPDATE meeting_oauth_transactions SET state = ? WHERE id = ? AND state = 'PENDING'",
+      state, id
+    );
+    if (updated !== 1) throw new Error('MGW_OAUTH_TRANSACTION_INVALID');
+    const rows = await prisma.$queryRawUnsafe("SELECT * FROM meeting_oauth_transactions WHERE id = ? LIMIT 1", id);
+    return oauthTransactionDto(rows[0]);
+  }
+  return { acquireLease, addManagedDocumentFenced, claimGeneration, commitGeneration, createBridgeSession, completeOAuthTransaction, createOAuthTransaction, findBridgeSessionByBinding, findPendingOAuthForBridge, getBinding, getOAuthTransactionForBridge, managedDocumentFenceContract: "anythingllm-meeting-managed-fence-v1", markAccess, policyByWorkspace, removeManagedDocumentFenced, reserveIdentity, revokeBinding, revokeBridgeSession, revokeBridgeSessionsForUser, saveBinding, updateOAuthTransactionState };
+}
+
+module.exports = { createMeetingStore };

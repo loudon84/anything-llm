@@ -1,5 +1,5 @@
 const { Document } = require("../models/documents");
-const { normalizePath, documentsPath, isWithin } = require("../utils/files");
+const { normalizePath, documentsPath, isWithin, isManagedDocumentLocation } = require("../utils/files");
 const { reqBody } = require("../utils/http");
 const {
   flexUserRoleValid,
@@ -52,7 +52,7 @@ function documentEndpoints(app) {
 
         const embeddedFiles = documents.map((doc) => doc.docpath);
         const moveableFiles = files.filter(
-          ({ from }) => !embeddedFiles.includes(from)
+          ({ from, to }) => !embeddedFiles.includes(from) && !isManagedDocumentLocation(from) && !isManagedDocumentLocation(to)
         );
 
         const movePromises = moveableFiles.map(({ from, to }) => {

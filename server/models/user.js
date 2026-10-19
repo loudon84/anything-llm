@@ -1,6 +1,13 @@
 const { Prisma } = require("@prisma/client");
 const prisma = require("../utils/prisma");
 const { EventLogs } = require("./eventLogs");
+const { createMeetingStore } = require("./meetingGateway");
+let meetingStore;
+
+function getMeetingStore() {
+  if (!meetingStore) meetingStore = createMeetingStore({ prisma });
+  return meetingStore;
+}
 
 /**
  * @typedef {Object} User
@@ -202,6 +209,9 @@ const User = {
         where: { id: parseInt(userId) },
         data: updates,
       });
+      if (Object.hasOwn(updates, "password")) {
+        try { await getMeetingStore().revokeBridgeSessionsForUser(parseInt(userId)); } catch (_error) { /* credential binding rejects stale bridges */ }
+      }
 
       await EventLogs.logEvent(
         "user_updated",
@@ -301,6 +311,10 @@ const User = {
 
   delete: async function (clause = {}) {
     try {
+      const users = await prisma.users.findMany({ where: clause, select: { id: true } });
+      for (const user of users) {
+        try { await getMeetingStore().revokeBridgeSessionsForUser(user.id); } catch (_error) { /* user deletion cascades bridge rows */ }
+      }
       await prisma.users.deleteMany({ where: clause });
       return true;
     } catch (error) {

@@ -50,9 +50,39 @@ const { meetingsEndpoints } = require("./endpoints/meetings");
 const { createMeetingRuntime } = require("./modules/meetings/runtime");
 const { attachMeetingRuntime } = require("./modules/meetings/serverLifecycle");
 const { httpLogger } = require("./middleware/httpLogger");
+const { meetingGatewayEndpoints } = require("./endpoints/meetingGateway");
+const { createSessionModule } = require("./utils/meetingGateway/sessions");
+const { createMeetingStore } = require("./models/meetingGateway");
+const prisma = require("./utils/prisma");
+function parseMeetingKeyring() {
+  try {
+    const hmacHex = process.env.MEETING_GATEWAY_BRIDGE_HMAC_KEY || "";
+    const keyring = JSON.parse(process.env.MEETING_GATEWAY_BRIDGE_KEYRING_JSON || "{}");
+    if (!/^[a-f0-9]{64}$/i.test(hmacHex) || !keyring.activeKeyId || !keyring.keys || typeof keyring.keys !== "object") return null;
+    const keys = {};
+    for (const [keyId, value] of Object.entries(keyring.keys)) {
+      if (!/^[a-f0-9]{64}$/i.test(value)) return null;
+      keys[keyId] = Buffer.from(value, "hex");
+    }
+    return { activeKeyId: keyring.activeKeyId, keys, hmacKey: Buffer.from(hmacHex, "hex") };
+  } catch (_error) { return null; }
+}
+const meetingKeyring = parseMeetingKeyring();
+const meetingSessions = meetingKeyring ? createSessionModule({
+  store: createMeetingStore({ prisma }), gateway: null, keyring: meetingKeyring,
+  origin: process.env.MEETING_GATEWAY_ALLOWED_ORIGIN,
+}) : null;
 const app = express();
 const apiRouter = express.Router();
 const meetingRuntime = createMeetingRuntime();
+const meetingGatewayContractConfirmed =
+  /^[a-f0-9]{64}$/i.test(process.env.MEETING_GATEWAY_CONTRACT_SHA256 || "") &&
+  Boolean(process.env.MEETING_GATEWAY_CONTRACT_REVISION);
+app.locals.meetingGateway = Object.freeze({
+  enabled: process.env.MEETING_GATEWAY_ENABLED === "true" && meetingGatewayContractConfirmed,
+  contractConfirmed: meetingGatewayContractConfirmed,
+  oauth: null,
+});
 const FILE_LIMIT = "3GB";
 
 // Only log HTTP requests in development mode and if the ENABLE_HTTP_LOGGER environment variable is set to true
@@ -113,6 +143,12 @@ memoryEndpoints(apiRouter);
 meetingsEndpoints(apiRouter, {
   runtime: meetingRuntime,
   prisma: require("./utils/prisma"),
+});
+meetingGatewayEndpoints(apiRouter, {
+  sessions: meetingSessions,
+  oauth: app.locals.meetingGateway.oauth,
+  enabled: app.locals.meetingGateway.enabled,
+  contractConfirmed: app.locals.meetingGateway.contractConfirmed,
 });
 // Externally facing embedder endpoints
 embeddedEndpoints(apiRouter);

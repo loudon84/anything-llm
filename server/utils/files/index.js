@@ -27,7 +27,12 @@ const generatedImagesPath =
 
 // Should take in a folder that is a subfolder of documents
 // eg: youtube-subject/video-123.json
+function isManagedDocumentLocation(filePath = "") {
+  return typeof filePath === "string" && filePath.replace(/\\/g, "/").split("/").includes("meeting-managed");
+}
+
 async function fileData(filePath = null) {
+  if (isManagedDocumentLocation(filePath)) return null;
   if (!filePath) throw new Error("No docPath provided in request");
   // The raw filePath is what gets persisted as a document's `docpath` and later
   // resolved directly by background jobs, so it must stay inside the documents
@@ -71,7 +76,7 @@ function listFolders() {
   const folders = [];
 
   for (const file of fs.readdirSync(documentsPath)) {
-    if (path.extname(file) === ".md") continue;
+    if (file === "meeting-managed" || path.extname(file) === ".md") continue;
     const folderPath = path.resolve(documentsPath, file);
     if (!fs.lstatSync(folderPath).isDirectory()) continue;
 
@@ -111,7 +116,7 @@ async function viewLocalFiles() {
   };
 
   for (const file of fs.readdirSync(documentsPath)) {
-    if (path.extname(file) === ".md") continue;
+    if (file === "meeting-managed" || path.extname(file) === ".md") continue;
     const folderPath = path.resolve(documentsPath, file);
     const isFolder = fs.lstatSync(folderPath).isDirectory();
     if (isFolder) {
@@ -212,7 +217,7 @@ function normalizePagination({ offset, limit } = {}) {
  */
 async function getDocumentsByFolder(folderName = "", pagination = {}) {
   const { offset, limit } = normalizePagination(pagination);
-  if (!folderName) {
+  if (!folderName || isManagedDocumentLocation(folderName)) {
     return {
       folder: folderName,
       documents: [],
@@ -356,8 +361,9 @@ async function purgeVectorCache(filename = null) {
 // Search for a specific document by its unique name in the entire `documents`
 // folder via iteration of all folders and checking if the expected file exists.
 async function findDocumentInDocuments(documentName = null) {
-  if (!documentName) return null;
+  if (!documentName || isManagedDocumentLocation(documentName)) return null;
   for (const folder of fs.readdirSync(documentsPath)) {
+    if (folder === "meeting-managed") continue;
     const isFolder = fs
       .lstatSync(path.join(documentsPath, folder))
       .isDirectory();
@@ -515,12 +521,13 @@ async function getWatchedDocumentFilenames(filenames = []) {
  * @returns {Promise<Array<object & {docpath: string}>>}
  */
 async function getDocumentsByDocPaths(docpaths = []) {
-  if (!docpaths.length) return [];
+  const readableDocpaths = docpaths.filter((docpath) => !isManagedDocumentLocation(docpath));
+  if (!readableDocpaths.length) return [];
   const liveSyncAvailable = await DocumentSyncQueue.enabled();
   const results = [];
   const filenames = {};
 
-  for (const docpath of docpaths) {
+  for (const docpath of readableDocpaths) {
     const fullPath = path.resolve(documentsPath, normalizePath(docpath));
     if (!fs.existsSync(fullPath) || !isWithin(documentsPath, fullPath))
       continue;
@@ -825,6 +832,7 @@ async function fileToPickerData({
   liveSyncAvailable = false,
   cachefilename = null,
 }) {
+  if (isManagedDocumentLocation(cachefilename || path.relative(documentsPath, pathToFile))) return null;
   let metadata = {};
   const filename = path.basename(pathToFile);
   const fileStats = fs.statSync(pathToFile);
@@ -834,6 +842,7 @@ async function fileToPickerData({
     const rawData = fs.readFileSync(pathToFile, "utf8");
     try {
       metadata = JSON.parse(rawData);
+      if (metadata?.managedProvenance) return null;
       // Remove the pageContent field from the metadata - it is large and not needed for the picker
       delete metadata.pageContent;
     } catch (err) {
@@ -1028,8 +1037,10 @@ module.exports = {
   chatHistoryAttachments,
   GENERATED_IMAGE_FILENAME_PATTERN,
   moveProcessedDocsToFolder,
+  isManagedDocumentLocation,
   viewLocalFiles,
   listFolders,
   searchDocuments,
   getDocumentsByDocPaths,
+  fileToPickerData,
 };
