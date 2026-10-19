@@ -8,13 +8,13 @@
 
 | 项 | 本次记录 |
 | --- | --- |
-| Consumer source | 最终 Consumer source `0453b27f029f23bbde69a5081067578c390b12ad`；包含 Task 3 runtime legacy-state 修复、Task 4 middleware 真实路由修复、Task 5 no-token Authorization header 修复与 Task 6 HTTP integration 覆盖 |
+| Consumer source | 最终 backend source `01823fe8`；该修订包含已审阅的最终 worker/queue fix。Frontend tree 相对 `0453b27f029f23bbde69a5081067578c390b12ad` 无差异（`git diff --quiet ... -- frontend` exit 0），因此前端测试/build沿用该 frontend 基线 |
 | Gateway source | 已审阅参考 revision `d6bf6465f07385ce5906a7e0fced488c0c0881e9`；该源码未提供已验证的 WeCom start/redeem/profile Consumer wire |
 | Deployment observation | `https://copilot.superic.com:9999` 只读观察记录于 2026-10-19；live health 可达，ready 显示 `database=true`, `backend=false`。不表示认证服务可用 |
 | Live auth config | 未提供已批准的 WeCom 契约、配置版本或真实 profile 样本。生产 adapter 当前 `DEPENDENCY_NOT_READY` |
 | Fixture config | 集成测试内的 `fixture-instance`、受控 HTTPS URL、profile 与加密/JWT测试密钥；只用于验证 Consumer 行为，不代表部署配置。测试密钥不是真实密钥且不写入部署 |
 | Spec | `prd/AnythingLLM_MeetingGateway_企业微信登录与接入迁移_开发需求PRD_v2.0.0.md`，内容版本 2.0.2，§4.6；SHA-256 `ff382298a2ef1fc18d9a0dd9af1901172116c96643887fb8e1080c1f2d09cfaf` |
-| Build under test | 最终 source `0453b27f029f23bbde69a5081067578c390b12ad`；scoped reviews clean；前端 production build exit 0，92.94s，6284 modules；存在既有 Vite browser-external、mixed-import 与 chunk >500 kB warnings，无 build errors |
+| Build under test | Frontend 基线 `0453b27f029f23bbde69a5081067578c390b12ad`；backend source 更新至 `01823fe8` 后确认 frontend tree 无差异，因此沿用该基线的 18+5 frontend tests 和 production build：exit 0，92.94s，6284 modules；既有 Vite warnings，无 errors。Schema 未变，沿用已验证结果 |
 
 ## 本轮实际验证
 
@@ -23,7 +23,7 @@
 | 命令 | 结果 | 证据边界 |
 | --- | --- | --- |
 | `corepack yarn test --runInBand --testTimeout=90000 server/__tests__/meetingGateway/authLocalSearchIntegration.test.js` | 1 suite / 2 tests PASS | 受控 fixture 的 BFF HTTP success 写入 passwordless default user 与 `GATEWAY_ENABLED` registry session；另一个用例证明当前 session 的兑换响应丢失会持久化 `LOCAL_ONLY`，返回原 session state，redeem 只调用一次。不是上游认证证据 |
-| Consolidated backend command (17 explicit suites; full command below) | **17 suites / 190 tests PASS** | Final Consumer source `0453b27f029f23bbde69a5081067578c390b12ad` |
+| Consolidated backend command (19 explicit suites; full command below) | **19 suites / 214 tests PASS** | Final backend source `01823fe8`; controller run 56.31s |
 | `node --test frontend/tests/baseHeaders.node.js frontend/tests/wecomAuth.node.js` | 18 / 18 PASS | 冻结 DTO 视图状态、legacy null-mode 会话兼容、LOCAL_ONLY UI 行为及 lost-response 不重交票据 |
 | `corepack yarn --cwd frontend test:meeting-gateway` | 5 / 5 PASS | Meeting Gateway 前端 DTO 兼容 |
 | `server\node_modules\.bin\prisma.cmd validate --schema server/prisma/schema.prisma` | PASS | 当前 schema 语法/关系有效；不等于生产 DB 已迁移或部署 client 已生成 |
@@ -56,19 +56,19 @@ Task 4 was approved at `3f8bbc62`; its scoped report records **9 suites / 110 te
 - Source/detail/segment/file endpoint denial before stored source reads, plus job admission denial before a worker handler. Worker tests use controlled job/session fixtures, not a production queue or real upstream.
 - LOCAL_ONLY mode blocks parse/reindex/import/retry work when that work can mutate data or invoke the configured OCR HTTP parser. This phase allows existing-data reads only.
 
-The final verification results and source identity are recorded in the evidence table above. The backend command below covers seven focused auth/store/gate/integration/user/session suites, the Gateway client suite, and Task 4’s nine meeting suites; these are fixture and application build results, not a real Gateway login.
+The final verification results and source identities are recorded in the evidence table above. The 19-suite command below covers the prior 17 suites plus `meetings/integration.test.js` and `meetings/lifecycle.test.js`; controller reported 214 tests passed in 56.31s. These are fixture and application results, not a real Gateway login.
 
 The following is the consolidated verification command reported by the controller:
 
 ```powershell
-corepack yarn test --runInBand --testTimeout=90000 server/__tests__/meetingGateway/wecomClient.test.js server/__tests__/meetingGateway/wecomIdentity.test.js server/__tests__/meetingGateway/wecomAuth.test.js server/__tests__/meetingGateway/authLocalSearchGate.test.js server/__tests__/meetingGateway/authLocalSearchIntegration.test.js server/__tests__/models/user.test.js server/__tests__/meetingGateway/sessions.test.js server/__tests__/meetingGateway/client.test.js server/__tests__/meetings/localOnlyAccess.test.js server/__tests__/meetings/endpoints.test.js server/__tests__/meetings/qa.test.js server/__tests__/meetings/runtime.test.js server/__tests__/meetings/retrieval.test.js server/__tests__/meetings/indexer.test.js server/__tests__/meetings/sources.test.js server/__tests__/meetings/importer.test.js server/__tests__/meetings/jobAdmission.test.js
+corepack yarn test --runInBand --testTimeout=120000 server/__tests__/meetingGateway/wecomClient.test.js server/__tests__/meetingGateway/wecomIdentity.test.js server/__tests__/meetingGateway/wecomAuth.test.js server/__tests__/meetingGateway/authLocalSearchGate.test.js server/__tests__/meetingGateway/authLocalSearchIntegration.test.js server/__tests__/models/user.test.js server/__tests__/meetingGateway/sessions.test.js server/__tests__/meetingGateway/client.test.js server/__tests__/meetings/localOnlyAccess.test.js server/__tests__/meetings/endpoints.test.js server/__tests__/meetings/qa.test.js server/__tests__/meetings/runtime.test.js server/__tests__/meetings/retrieval.test.js server/__tests__/meetings/indexer.test.js server/__tests__/meetings/sources.test.js server/__tests__/meetings/importer.test.js server/__tests__/meetings/jobAdmission.test.js server/__tests__/meetings/integration.test.js server/__tests__/meetings/lifecycle.test.js
 node --test frontend/tests/baseHeaders.node.js frontend/tests/wecomAuth.node.js
 corepack yarn --cwd frontend test:meeting-gateway
 corepack yarn --cwd frontend build
 server\node_modules\.bin\prisma.cmd validate --schema server/prisma/schema.prisma
 ```
 
-The earlier default passwordless single-user browser compatibility issue is resolved in final Consumer source `0453b27f029f23bbde69a5081067578c390b12ad` (T3 runtime fix, T4 middleware fix `ad46589c`, and T5 no-token header fix; all scoped reviews clean). Controller verified live BFF state without Authorization as HTTP 200 (`authenticated: true`, null mode/user), and `GET /api/meetings` without Authorization as HTTP 200 with `{meetings:[]}`. Browser `http://localhost:3000/meetings` loaded without auth/invalid-token errors; legacy controls appeared and the empty/filter state rendered. This confirms default single-user compatibility only; no real scan or import action was performed.
+The default passwordless single-user browser compatibility was verified on frontend baseline `0453b27f029f23bbde69a5081067578c390b12ad`; the final backend source `01823fe8` leaves frontend tree unchanged. T3 runtime, T4 middleware, and T5 no-token header fixes have scoped clean reviews. Controller verified live BFF state without Authorization as HTTP 200 (`authenticated: true`, null mode/user), and `GET /api/meetings` without Authorization as HTTP 200 with `{meetings:[]}`. Browser `http://localhost:3000/meetings` loaded without auth/invalid-token errors; legacy controls appeared and the empty/filter state rendered. This confirms default single-user compatibility only; no real scan or import action was performed.
 
 ## Phase gate operation and current AUTH dependency
 
@@ -78,4 +78,4 @@ Current external blocker remains: no owner-approved deployment WeCom start/redee
 
 ## Queued meeting jobs from before trusted initiator context
 
-The worker requires each new source or reindex job to contain a server-derived initiator context. A job already queued without that context is quarantined when the worker reaches it: it is marked `FAILED`, its active key and lease are cleared, and its error records `[MGW_BUSINESS_AUTH_REQUIRED] Meeting job has no trusted initiator`. The worker never infers a user, creates legacy authorization, or upgrades a missing context. Such a failed job cannot be retried through the authenticated retry route because it has no matching initiator; the user must repeat the operation through an existing authorized meeting route so the newly created job carries the current trusted context. `LOCAL_ONLY` jobs are similarly marked `FAILED` with `[MGW_REMOTE_ACCESS_REQUIRED]` and may only be recreated after an authorized state allows the operation. No queue migration or automatic legacy-job recovery is performed.
+The worker requires each new source or reindex job to contain a server-derived initiator context. A pre-existing `PARSE_SOURCE` job without that context is isolated and marked `FAILED`; source status may remain `PENDING`. Since the existing source retry path accepts only `FAILED`, a simple retry or repeating the same operation is not guaranteed to recover this item. Keep this job isolated pending a separately reviewed, authorized recovery procedure; this phase does not repair its data or grant authorization automatically. Existing indexed local reads are unaffected. A newly created trusted-legacy job has passed the actual SQLite-backed worker test. No queue migration or automatic legacy-job recovery is performed.

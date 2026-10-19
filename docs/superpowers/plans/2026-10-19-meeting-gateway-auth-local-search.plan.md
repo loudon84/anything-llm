@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. All implementation, code search/reading and reviews must use GPT-6 Luna subagents as explicitly requested by the user.
 
+**Implementation status (2026-10-19):** Consumer任务1–6已实施并完成逐项/整批审查；最终代码01823fe8，后端19 suites/214 tests通过。真实PHASE-AUTH-01与整体AUTH_LOCAL_SEARCH仍BLOCKED，缺获批WeCom契约/config、可信真实观察及provenance verifier接入；勾选完成不代表真实扫码验收通过。旧无上下文PARSE_SOURCE任务保持隔离，PENDING来源需后续受审恢复流程。
+
 **Goal:** 实现AnythingLLM消费Gateway企业微信扫码认证、拉取用户信息并同步本地投影；认证兑换结果丢失后只允许获本地授权的既有会议检索，暂停本阶段新导入开发与验收。
 
 **Architecture:** Gateway是企业用户身份源，Consumer持有必要本地用户投影、短时登录事务和可撤销session。可信服务端session/事务决定GATEWAY_ENABLED或LOCAL_ONLY；一个共享访问策略同时约束BFF远端出口与本地会议/QA/历史读取，页面只反映其结果。Gateway实际wire通过有来源证据的契约适配，不把测试adapter当生产认证。
@@ -276,8 +278,8 @@ expect(evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence: tamperedEvidenc
 
 - [x] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/authLocalSearchGate.test.js`; confirm new tests red.
 - [x] **Step 3:** Implement phasecase evidence validation with source/config/spec matching, actual testcommands/exitcounts, nohardcodedpass; keep currentphase importscope disposition separate fromexecutionstatus. Use existing evidenceintegrity/signing primitive only if present, otherwise explicitly record missing trustmaterial and failclosed forrealPASS rather than inventproductionkeys. Collect integrationtests ofactualBFF/profileprojection/localpolicy/QA with isolatedDB and controlledupstream. Missing actualGatewaywire/credentials/HTTPSrealuser samples isBLOCKED forrealphase; continue all independenttestabletasks.
-- [ ] **Step 4:** Run consolidated affected suites (not newimportacceptance), frontendtests/build, schemavalidate, isolatedmigrationcompatibility and scoped diffcheck. Run phasegate; report fixturepasses separately fromrealBLOCKED. Request final Luna wholechange review and address findings throughonefixwave + scopedrereview.
-- [ ] **Step 5:** Commit `test: verify gateway auth and local-search phase boundaries`; leavebranch/worktree intact. No push/merge orproductionDBmigration. Report exactimplementedtasks, currenttestresults, remainingexternaldependency and uservisiblepageURL only if verified.
+- [x] **Step 4:** Run consolidated affected suites (not newimportacceptance), frontendtests/build, schemavalidate, isolatedmigrationcompatibility and scoped diffcheck. Run phasegate; report fixturepasses separately fromrealBLOCKED. Request final Luna wholechange review and address findings throughonefixwave + scopedrereview.
+- [x] **Step 5:** Commit `test: verify gateway auth and local-search phase boundaries`; leavebranch/worktree intact. No push/merge orproductionDBmigration. Report exactimplementedtasks, currenttestresults, remainingexternaldependency and uservisiblepageURL only if verified.
 
 ## Controller self-review and preflight
 
