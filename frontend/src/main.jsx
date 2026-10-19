@@ -9,7 +9,9 @@ import PrivateRoute, {
 } from "@/components/PrivateRoute";
 import Login from "@/pages/Login";
 import SimpleSSOPassthrough from "@/pages/Login/SSO/simple";
+import WeComResult from "@/pages/Login/SSO/WeComResult";
 import OnboardingFlow from "@/pages/OnboardingFlow";
+import paths from "@/utils/paths";
 import "@/index.css";
 
 const isDev = import.meta.env.DEV;
@@ -34,6 +36,10 @@ const router = createBrowserRouter([
       {
         path: "/sso/simple",
         element: <SimpleSSOPassthrough />,
+      },
+      {
+        path: paths.sso.wecomResult(),
+        element: <WeComResult />,
       },
       {
         path: "/workspace/:slug/settings/:tab",

@@ -1,5 +1,6 @@
 import { API_BASE } from "@/utils/constants";
 import { baseHeaders } from "@/utils/request";
+import { createWeComAuthClient } from "@/models/wecomAuth";
 export {
   canSupplementSource,
   getMeetingSelectionState,
@@ -48,6 +49,12 @@ function queryString(values = {}) {
 }
 
 export const Meetings = {
+  async authState() {
+    return createWeComAuthClient({
+      apiBase: API_BASE,
+      getAuthHeaders: baseHeaders,
+    }).getState();
+  },
   async config() {
     return (await meetingRequest("/config")).config;
   },

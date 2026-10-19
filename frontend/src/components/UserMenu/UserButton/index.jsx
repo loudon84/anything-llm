@@ -5,6 +5,7 @@ import System from "@/models/system";
 import paths from "@/utils/paths";
 import { baseHeaders, userFromStorage } from "@/utils/request";
 import { API_BASE } from "@/utils/constants";
+import { createWeComAuthClient } from "@/models/wecomAuth";
 import { Person } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import AccountModal from "../AccountModal";
@@ -23,13 +24,39 @@ async function revokeMeetingBridgeBeforeLogout() {
   try {
     const headers = baseHeaders();
     const endpoint = API_BASE + "/meeting-gateway/session";
-    const session = await fetch(endpoint, { headers, credentials: "same-origin", signal: controller.signal });
+    const session = await fetch(endpoint, {
+      headers,
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
     if (!session.ok) return;
     const { csrf_token: csrf } = await session.json();
     if (!csrf) return;
-    await fetch(endpoint, { method: "DELETE", headers: { ...headers, "X-Meeting-CSRF": csrf }, credentials: "same-origin", signal: controller.signal });
-  } catch (_error) {
+    await fetch(endpoint, {
+      method: "DELETE",
+      headers: { ...headers, "X-Meeting-CSRF": csrf },
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+  } catch {
     // Logout remains local when the API is unreachable.
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+async function revokeWeComLocalSessionBeforeLogout() {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 1500);
+  const client = createWeComAuthClient({
+    apiBase: API_BASE,
+    getAuthHeaders: baseHeaders,
+    fetchImpl: (url, options) =>
+      fetch(url, { ...options, signal: controller.signal }),
+  });
+  try {
+    await client.logout();
+  } catch {
+    // Local sign-out still proceeds if the Consumer BFF is unavailable.
   } finally {
     window.clearTimeout(timeout);
   }
@@ -112,7 +139,10 @@ export default function UserButton() {
             </a>
             <button
               onClick={async () => {
-                await revokeMeetingBridgeBeforeLogout();
+                await Promise.all([
+                  revokeMeetingBridgeBeforeLogout(),
+                  revokeWeComLocalSessionBeforeLogout(),
+                ]);
                 window.localStorage.removeItem(AUTH_USER);
                 window.localStorage.removeItem(AUTH_TOKEN);
                 window.localStorage.removeItem(AUTH_TIMESTAMP);

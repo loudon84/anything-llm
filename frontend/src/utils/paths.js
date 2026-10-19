@@ -30,6 +30,7 @@ export default {
     login: () => {
       return "/sso/simple";
     },
+    wecomResult: () => "/sso/wecom/result",
   },
   onboarding: {
     home: () => {

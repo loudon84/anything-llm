@@ -7,6 +7,9 @@ import React, {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Meetings, getMeetingSelectionState } from "@/models/meetings";
+import { createWeComAuthClient, resolveWeComView } from "@/models/wecomAuth";
+import { API_BASE } from "@/utils/constants";
+import { baseHeaders } from "@/utils/request";
 import {
   getDateBounds,
   getPollingListParams,
@@ -25,6 +28,7 @@ import {
   Status,
   formatDate,
 } from "./MeetingsUI";
+import LocalOnlyNotice from "./LocalOnlyNotice";
 
 function currentQuarter() {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -60,6 +64,15 @@ const stageLabels = {
 
 export default function MeetingsCenter() {
   const navigate = useNavigate();
+  const wecomClient = useMemo(
+    () =>
+      createWeComAuthClient({ apiBase: API_BASE, getAuthHeaders: baseHeaders }),
+    []
+  );
+  const [authReady, setAuthReady] = useState(false);
+  const [authState, setAuthState] = useState(null);
+  const [authConfig, setAuthConfig] = useState(null);
+  const [rescanBusy, setRescanBusy] = useState(false);
   const [quarter, setQuarter] = useState(currentQuarter());
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -87,9 +100,36 @@ export default function MeetingsCenter() {
   const [workspaces, setWorkspaces] = useState([]);
   const [selectedWorkspaces, setSelectedWorkspaces] = useState(new Set());
   const [importing, setImporting] = useState(false);
+  const access = useMemo(
+    () =>
+      resolveWeComView({
+        authenticated: authState?.authenticated === true,
+        remoteAccessMode: authState?.remoteAccessMode,
+        available: authConfig?.available === true,
+        reason: authState?.reason || authConfig?.reason,
+      }),
+    [authState, authConfig]
+  );
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      Meetings.authState().catch(() => null),
+      wecomClient.getConfig().catch(() => null),
+    ]).then(([state, config]) => {
+      if (!active) return;
+      setAuthState(state);
+      setAuthConfig(config);
+      setAuthReady(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [wecomClient]);
 
   const refreshMeetings = useCallback(
     async (params = {}, preserveSelection = false) => {
+      if (!access.canSearchLocal) return;
       setLoading(true);
       setError("");
       try {
@@ -110,18 +150,20 @@ export default function MeetingsCenter() {
         setLoading(false);
       }
     },
-    []
+    [access.canSearchLocal]
   );
 
   const refreshJobs = useCallback(async () => {
+    if (!access.canSearchLocal) return;
     try {
       setJobs(await Meetings.jobs());
     } catch (e) {
       setError(e.message);
     }
-  }, []);
+  }, [access.canSearchLocal]);
 
   useEffect(() => {
+    if (!authReady || !access.canSearchLocal) return;
     const query = { quarter };
     activeListQuery.current = query;
     refreshMeetings(query);
@@ -129,10 +171,19 @@ export default function MeetingsCenter() {
     Meetings.conversations()
       .then(setConversationHistory)
       .catch((e) => setError(e.message));
-    Meetings.config()
-      .then((config) => setConnectionId(config?.id || null))
-      .catch((e) => setError(e.message));
-  }, [quarter, refreshMeetings, refreshJobs]);
+    if (access.canFetchRemote) {
+      Meetings.config()
+        .then((config) => setConnectionId(config?.id || null))
+        .catch((e) => setError(e.message));
+    }
+  }, [
+    authReady,
+    access.canSearchLocal,
+    access.canFetchRemote,
+    quarter,
+    refreshMeetings,
+    refreshJobs,
+  ]);
 
   useEffect(() => {
     const active = jobs.some(({ status }) =>
@@ -163,6 +214,7 @@ export default function MeetingsCenter() {
   }
 
   async function loadRemote(next = "") {
+    if (!access.canFetchRemote) return;
     setError("");
     setLoading(true);
     try {
@@ -193,6 +245,7 @@ export default function MeetingsCenter() {
   }
 
   async function chooseRemote(row) {
+    if (!access.canFetchRemote) return;
     setManifestTarget(row);
     setManifest(null);
     setImporting(true);
@@ -227,7 +280,7 @@ export default function MeetingsCenter() {
   }
 
   async function startImport() {
-    if (!manifestTarget || actionBusy) return;
+    if (!access.canFetchRemote || !manifestTarget || actionBusy) return;
     const selectedAttachments = (manifest?.attachments || []).filter(
       ({ externalFileId }) => attachmentIds.has(externalFileId)
     );
@@ -262,7 +315,7 @@ export default function MeetingsCenter() {
   }
 
   async function prepareConversation() {
-    if (!state.canStart || actionBusy) return;
+    if (!access.canSearchLocal || !state.canStart || actionBusy) return;
     setActionBusy(true);
     setError("");
     try {
@@ -277,7 +330,7 @@ export default function MeetingsCenter() {
   }
 
   async function startConversation() {
-    if (!state.canStart || actionBusy) return;
+    if (!access.canSearchLocal || !state.canStart || actionBusy) return;
     setActionBusy(true);
     setError("");
     try {
@@ -293,24 +346,59 @@ export default function MeetingsCenter() {
     }
   }
 
+  async function rescan() {
+    if (!access.canStartWeCom || rescanBusy) return;
+    setRescanBusy(true);
+    setError("");
+    try {
+      await wecomClient.start();
+    } catch {
+      setError("企业微信认证服务暂时无法启动，请稍后重试。");
+      setRescanBusy(false);
+    }
+  }
   return (
     <Page
       title="会议情报中心"
       description="按季度查看已导入会议，选择固定会议范围进行问答。日期区间按中国标准时间计算，结束日包含在内。"
       actions={
         <>
-          <Link
-            className="rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm"
-            to={paths.meetings.settings()}
+          {access.canFetchRemote ? (
+            <Link
+              className="rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm"
+              to={paths.meetings.settings()}
+            >
+              连接设置
+            </Link>
+          ) : (
+            <Button disabled>连接设置</Button>
+          )}
+          <Button
+            onClick={() => loadRemote()}
+            disabled={!access.canFetchRemote || loading}
           >
-            连接设置
-          </Link>
-          <Button onClick={() => loadRemote()} disabled={loading}>
             从腾讯会议导入
           </Button>
         </>
       }
     >
+      {!authReady && <Notice>正在验证本地登录会话…</Notice>}
+      {authReady && !access.canSearchLocal && (
+        <Notice tone="warning">
+          当前没有可用的本地登录会话。请先登录后再检索会议数据。{" "}
+          <Link className="underline" to={paths.login()}>
+            前往登录
+          </Link>
+        </Notice>
+      )}
+      {authState?.authenticated &&
+        authState.remoteAccessMode === "LOCAL_ONLY" && (
+          <LocalOnlyNotice
+            available={access.canStartWeCom}
+            loading={rescanBusy}
+            onRescan={rescan}
+          />
+        )}
       {error && <Notice tone="error">{error}</Notice>}
       <Panel title="最近的问答会话">
         {conversationHistory.length ? (
@@ -373,14 +461,16 @@ export default function MeetingsCenter() {
             />
           </Field>
           <div className="flex items-end">
-            <Button onClick={applyDateRange}>按日期筛选并全选</Button>
+            <Button onClick={applyDateRange} disabled={!access.canSearchLocal}>
+              按日期筛选并全选
+            </Button>
           </div>
         </div>
         <p className="mt-3 text-xs text-theme-text-secondary">
           筛选后自动选中所有结果；可逐项调整。选中数上限为 10，不会自动删减。
         </p>
       </Panel>
-      {meetings.length === 0 && !loading ? (
+      {meetings.length === 0 && !loading && access.canSearchLocal ? (
         <Notice>此筛选范围内没有会议。</Notice>
       ) : (
         <Panel title={`会议列表（已选 ${state.count} 项）`}>
@@ -478,14 +568,18 @@ export default function MeetingsCenter() {
               <ImportJobRow
                 key={job.id}
                 job={job}
-                onRetry={async () => {
-                  try {
-                    await Meetings.retryJob(job.id);
-                    await refreshJobs();
-                  } catch (e) {
-                    setError(e.message);
-                  }
-                }}
+                onRetry={
+                  access.canFetchRemote
+                    ? async () => {
+                        try {
+                          await Meetings.retryJob(job.id);
+                          await refreshJobs();
+                        } catch (e) {
+                          setError(e.message);
+                        }
+                      }
+                    : null
+                }
               />
             ))}
           </ul>
@@ -498,7 +592,7 @@ export default function MeetingsCenter() {
             <>
               <Button
                 onClick={() => loadRemote(nextCursor)}
-                disabled={!nextCursor || loading}
+                disabled={!access.canFetchRemote || !nextCursor || loading}
               >
                 下一页
               </Button>
@@ -524,7 +618,10 @@ export default function MeetingsCenter() {
               />
             </Field>
             <div className="flex items-end">
-              <Button onClick={() => loadRemote()} disabled={loading}>
+              <Button
+                onClick={() => loadRemote()}
+                disabled={!access.canFetchRemote || loading}
+              >
                 查询 90 天内会议
               </Button>
             </div>
@@ -544,7 +641,10 @@ export default function MeetingsCenter() {
                       {formatDate(row.startTime)} · {row.externalId}
                     </div>
                   </div>
-                  <Button onClick={() => chooseRemote(row)}>
+                  <Button
+                    onClick={() => chooseRemote(row)}
+                    disabled={!access.canFetchRemote}
+                  >
                     选择导入范围
                   </Button>
                 </div>
