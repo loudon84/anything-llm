@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Notice } from "./MeetingsUI";
+import { Button } from "./MeetingsUI";
 
 export default function LocalOnlyNotice({
   onRescan,
@@ -7,7 +7,10 @@ export default function LocalOnlyNotice({
   loading = false,
 }) {
   return (
-    <Notice tone="warning">
+    <div
+      role="status"
+      className="rounded-lg border border-amber-500/40 bg-amber-50 p-3 text-sm text-amber-950 dark:bg-amber-950/20 dark:text-amber-100"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <span>
           认证结果丢失，仅可检索本地已有会议数据；重新扫码后恢复远端访问
@@ -25,6 +28,6 @@ export default function LocalOnlyNotice({
           企业微信认证服务暂不可用。远端访问恢复前，仍可检索已有的本地会议数据。
         </p>
       )}
-    </Notice>
+    </div>
   );
 }
