@@ -10,20 +10,43 @@ function setBridgeCookie(response, cookie) {
 function clearBridgeCookie(response) {
   response.setHeader("Set-Cookie", COOKIE_NAME + "=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict");
 }
+function createBoundedRateLimiter({ windowMs = 60_000, maxAttempts = 10, maxEntries = 10_000, clock = () => Date.now() } = {}) {
+  if (![windowMs, maxAttempts, maxEntries].every((value) => Number.isInteger(value) && value > 0) || typeof clock !== "function")
+    throw new TypeError("Invalid rate limiter configuration");
+  const attempts = new Map();
+  let operations = 0;
+  function pruneExpired(now) {
+    for (const [key, entry] of attempts) if (now - entry.startedAt >= windowMs) attempts.delete(key);
+  }
+  return {
+    consume(key) {
+      if (typeof key !== "string" || !key) return false;
+      const now = clock();
+      const current = attempts.get(key);
+      if (current && now - current.startedAt < windowMs) {
+        if (current.count >= maxAttempts) return false;
+        current.count++;
+      } else {
+        if ((++operations % 256) === 0 || attempts.size >= maxEntries) pruneExpired(now);
+        if (attempts.size >= maxEntries) return false;
+        attempts.set(key, { startedAt: now, count: 1 });
+      }
+      return true;
+    },
+    get size() { return attempts.size; },
+  };
+}
+
 function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = null, oauth = null, enabled = false, contractConfirmed = false } = {}) {
   const oauthReady = enabled === true && contractConfirmed === true && oauth?.contractConfirmed === true;
-  const employeeLoginAttempts = new Map();
+  const employeeLoginAttempts = createBoundedRateLimiter();
   apiRouter.post("/meeting-gateway/employee-login", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     const body = request.body;
     if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !["account", "password"].includes(key)) || typeof body.account !== "string" || typeof body.password !== "string")
       return response.status(422).json({ error: "MGW_INPUT_INVALID" });
-    const now = Date.now();
     const key = String(request.ip || request.socket?.remoteAddress || "unknown");
-    const current = employeeLoginAttempts.get(key);
-    if (!current || now - current.startedAt >= 60_000) employeeLoginAttempts.set(key, { startedAt: now, count: 1 });
-    else if (current.count >= 10) return response.status(429).json({ error: "MGW_RATE_LIMITED" });
-    else current.count++;
+    if (!employeeLoginAttempts.consume(key)) return response.status(429).json({ error: "MGW_RATE_LIMITED" });
     if (!employeeAuth) return response.status(503).json({ error: "MGW_DEPENDENCY_NOT_READY" });
     try {
       const result = await employeeAuth.login({
@@ -140,4 +163,4 @@ function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = nu
     } catch (error) { return oauthError(error, response); }
   });
 }
-module.exports = { meetingGatewayEndpoints };
+module.exports = { meetingGatewayEndpoints, createBoundedRateLimiter };
