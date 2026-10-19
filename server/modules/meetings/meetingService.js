@@ -284,7 +284,7 @@ function createMeetingService({ prisma, audit = async () => {}, meetingAuthAcces
       });
     },
 
-    async revise(id, changes = {}, userId) {
+    async revise(id, changes = {}, userId, authContext = null) {
       const hasSummary = Object.prototype.hasOwnProperty.call(
         changes,
         "summary"
@@ -399,7 +399,10 @@ function createMeetingService({ prisma, audit = async () => {}, meetingAuthAcces
             externalId: meeting.externalId,
             activeKey: `REINDEX:${meeting.id}:${generation}`,
             quarter: meeting.quarter,
-            payload: JSON.stringify({ generation }),
+            payload: JSON.stringify({
+              generation,
+              ...(authContext ? { authContext } : {}),
+            }),
             status: "CREATED",
             attempts: 0,
           },

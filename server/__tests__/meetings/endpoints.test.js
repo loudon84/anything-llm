@@ -169,6 +169,35 @@ async function invokeMiddlewareChain(route, options = {}) {
 }
 
 describe("authenticated meeting endpoints", () => {
+  test("content revision passes trusted request auth state to the runtime", async () => {
+    const authState = {
+      authenticated: true,
+      kind: "LEGACY_MULTI_USER",
+      actor: { id: 19, userId: 19 },
+      session: null,
+      remoteAccessMode: null,
+    };
+    const revise = jest.fn(async () => ({ id: 4 }));
+    const { routes, runtime } = setup({ meetings: { revise } });
+    const route = routes.find(
+      (item) => item.method === "patch" && item.path === "/meetings/:id/content"
+    );
+
+    await invoke(route, {
+      params: { id: "4" },
+      body: { summary: "Revised summary" },
+      user: { id: 19, role: "default" },
+      authState,
+    });
+
+    expect(runtime.meetings.revise).toHaveBeenCalledWith(
+      4,
+      { summary: "Revised summary" },
+      19,
+      authState
+    );
+  });
+
   test("blocks LOCAL_ONLY remote listing before calling the remote adapter", async () => {
     const remoteList = jest.fn(async () => [{ id: "remote" }]);
     const { routes } = setup({ remote: { list: remoteList } });

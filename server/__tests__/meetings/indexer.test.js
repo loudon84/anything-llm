@@ -32,6 +32,68 @@ function prismaFor({ meetings, chunks, sources }) {
 }
 
 describe("located meeting chunk index", () => {
+  test("source changes during reindex preserve the trusted initiator on follow-up work", async () => {
+    const meeting = {
+      id: 1,
+      generation: 2,
+      retrievalStatus: "INDEXING",
+      deletedAt: null,
+      connectionId: 3,
+      externalId: "meeting-1",
+      quarter: "2026-Q2",
+    };
+    const firstSource = {
+      id: 10,
+      meetingId: 1,
+      contentHash: "one",
+      parseStatus: "SUCCESS",
+      deletedAt: null,
+      contentText: "first source",
+      segments: JSON.stringify([{ text: "first source", location: { type: "paragraph", paragraph: 0 } }]),
+    };
+    const changedSource = {
+      ...firstSource,
+      id: 11,
+      contentHash: "two",
+      contentText: "new source",
+      segments: JSON.stringify([{ text: "new source", location: { type: "paragraph", paragraph: 0 } }]),
+    };
+    let sourceReads = 0;
+    let queuedJob;
+    const tx = {
+      meetings: { findUnique: async () => meeting, update: async () => {} },
+      meeting_sources: {
+        findMany: async () => {
+          sourceReads += 1;
+          return sourceReads <= 2 ? [firstSource] : [firstSource, changedSource];
+        },
+      },
+      meeting_chunks: { deleteMany: async () => {}, create: async () => {} },
+      meeting_jobs: {
+        findFirst: async () => null,
+        create: async ({ data }) => { queuedJob = data; return data; },
+      },
+    };
+    const prisma = {
+      meetings: tx.meetings,
+      meeting_sources: tx.meeting_sources,
+      $transaction: async (callback) => callback(tx),
+    };
+    const authContext = { kind: "LEGACY_MULTI_USER", userId: 7 };
+    const indexer = createIndexer({
+      prisma,
+      embedder: { embedDocuments: async (texts) => texts.map(() => [1, 0]) },
+    });
+
+    await expect(
+      indexer.reindex(1, {
+        job: { payload: JSON.stringify({ generation: 2, authContext }) },
+      })
+    ).resolves.toMatchObject({ stale: true, sourceSetChanged: true });
+
+    expect(JSON.parse(queuedJob.payload).authContext).toEqual(authContext);
+  });
+
   test("reindex preserves ownership when an earlier source segment splits", async () => {
     const meeting = {
       id: 1,

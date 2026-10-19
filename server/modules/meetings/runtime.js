@@ -320,6 +320,11 @@ function createMeetingRuntime({
   });
   const meetings = createMeetingService({ prisma, audit: auditWrite, meetingAuthAccess });
   const jobAuthContext = (authState) => meetingAuthAccess.getJobAuthContext(authState);
+  const reviseMeeting = meetings.revise.bind(meetings);
+  meetings.revise = async (id, changes, userId, authState) => {
+    meetingAuthAccess.assertRemoteAllowed({ authState, action: "meeting.revise" });
+    return reviseMeeting(id, changes, userId, jobAuthContext(authState));
+  };
   async function authorizeJob(job) {
     let payload;
     try { payload = JSON.parse(job.payload || "{}"); } catch { payload = {}; }

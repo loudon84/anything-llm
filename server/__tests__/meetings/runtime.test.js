@@ -410,7 +410,57 @@ describe("runtime provider-to-QA boundary", () => {
 
     await expect(runtime.jobs.runOnce()).rejects.toMatchObject({ code: "MGW_REMOTE_ACCESS_REQUIRED", status: 403 });
     expect(authService.getValidatedSessionActor).toHaveBeenCalledWith({ sessionId: "s11", userId: 11, credentialEpoch: 3 });
-    expect(job.status).toBe("FAILED");
+    expect(job).toMatchObject({
+      status: "FAILED",
+      error: "[MGW_REMOTE_ACCESS_REQUIRED] Remote meeting action is unavailable in local-only mode: job.IMPORT",
+    });
+  });
+
+  test("legacy queued jobs without initiator context are durably quarantined", async () => {
+    const { runtime, prisma } = runtimeFixture({ getChatCompletion: async () => ({ textResponse: "" }) });
+    const job = { id: 92, kind: "REINDEX", payload: JSON.stringify({ generation: 1 }), status: "CREATED", attempts: 0 };
+    prisma.meeting_jobs = {
+      findMany: async () => job.status === "CREATED" ? [job] : [],
+      updateMany: async ({ where, data }) => {
+        if (where.id !== job.id || where.status !== job.status) return { count: 0 };
+        Object.assign(job, data);
+        return { count: 1 };
+      },
+      findUnique: async () => job,
+    };
+
+    await expect(runtime.jobs.runOnce()).rejects.toMatchObject({
+      code: "MGW_BUSINESS_AUTH_REQUIRED",
+      message: "Meeting job has no trusted initiator",
+    });
+
+    expect(job).toMatchObject({
+      status: "FAILED",
+      error: "[MGW_BUSINESS_AUTH_REQUIRED] Meeting job has no trusted initiator",
+      activeKey: null,
+      leaseOwner: null,
+    });
+  });
+
+  test("LOCAL_ONLY cannot revise meeting content or enqueue reindex work", async () => {
+    const { runtime } = runtimeFixture({ getChatCompletion: async () => ({ textResponse: "" }) });
+    const authState = {
+      authenticated: true,
+      kind: "GATEWAY_SESSION",
+      actor: { id: 11, userId: 11 },
+      session: {
+        id: "s11",
+        userId: 11,
+        credentialEpoch: 3,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        remoteAccessMode: "LOCAL_ONLY",
+      },
+      remoteAccessMode: "LOCAL_ONLY",
+    };
+
+    await expect(
+      runtime.meetings.revise(1, { summary: "Must not be written" }, 11, authState)
+    ).rejects.toMatchObject({ code: "MGW_REMOTE_ACCESS_REQUIRED", status: 403 });
   });
 
   test("passes valid provider JSON through QA's grounded validator", async () => {

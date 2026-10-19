@@ -149,6 +149,71 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
     return importer.process(job);
   }
 
+  test("legacy revision persists trusted auth context and completes through the job runner", async () => {
+    const { createMeetingRuntime } = require("../../modules/meetings/runtime");
+    const originalEngine = process.env.EMBEDDING_ENGINE;
+    process.env.EMBEDDING_ENGINE = "native";
+    const runtime = createMeetingRuntime({
+      prisma,
+      encryption: { encrypt: (value) => value, decrypt: (value) => value },
+      getEmbedder: () => ({
+        model: "legacy-revision-integration",
+        embedChunks: async (texts) => texts.map(() => [1, 0]),
+        embedTextInput: async () => [1, 0],
+      }),
+      getVectorDb: () => ({ performSimilaritySearch: async () => ({ sources: [] }) }),
+      resolveConnector: async () => ({}),
+      storageRoot: path.join(temporaryRoot, "legacy-revision-storage"),
+      uploadRoot: path.join(temporaryRoot, "legacy-revision-uploads"),
+      audit: async () => {},
+    });
+    const authState = {
+      authenticated: true,
+      kind: "LEGACY_MULTI_USER",
+      actor: { id: 7, userId: 7 },
+      session: null,
+      remoteAccessMode: null,
+    };
+
+    try {
+      const meeting = await runtime.meetings.createMetadata(
+        {
+          connectionId,
+          externalId: "legacy-revision-worker",
+          title: "Legacy revision worker",
+          startTime: "2026-04-03T02:00:00.000Z",
+        },
+        7
+      );
+      const revised = await runtime.meetings.revise(
+        meeting.id,
+        { summary: "Persist this revised decision." },
+        7,
+        authState
+      );
+      const job = await prisma.meeting_jobs.findFirst({
+        where: { meetingId: meeting.id, kind: "REINDEX" },
+      });
+
+      expect(revised.retrievalStatus).toBe("INDEXING");
+      expect(JSON.parse(job.payload).authContext).toEqual({
+        kind: "LEGACY_MULTI_USER",
+        userId: 7,
+      });
+      await expect(runtime.jobs.runOnce()).resolves.toBe(true);
+      await expect(
+        prisma.meeting_jobs.findUnique({ where: { id: job.id } })
+      ).resolves.toMatchObject({ status: "SUCCESS", error: null });
+      await expect(
+        prisma.meetings.findUnique({ where: { id: meeting.id } })
+      ).resolves.toMatchObject({ retrievalStatus: "AVAILABLE" });
+    } finally {
+      await runtime.stop();
+      if (originalEngine === undefined) delete process.env.EMBEDDING_ENGINE;
+      else process.env.EMBEDDING_ENGINE = originalEngine;
+    }
+  }, 120_000);
+
   async function createMetadataMeeting(externalId) {
     return meetingService.createMetadata(
       {
@@ -368,6 +433,14 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
   });
 
   test("captures the current provider profile and OCR settings per operation", async () => {
+    await prisma.meeting_jobs.updateMany({
+      where: { status: "CREATED" },
+      data: {
+        status: "FAILED",
+        activeKey: null,
+        error: "[TEST_FIXTURE_ISOLATION] Prior integration fixture job",
+      },
+    });
     const { createMeetingRuntime } = require("../../modules/meetings/runtime");
     const originalEngine = process.env.EMBEDDING_ENGINE;
     process.env.EMBEDDING_ENGINE = "native";
@@ -410,6 +483,13 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       uploadRoot: path.join(temporaryRoot, "runtime-uploads"),
       audit: async () => {},
     });
+    const authState = {
+      authenticated: true,
+      kind: "LEGACY_MULTI_USER",
+      actor: { id: 7, userId: 7 },
+      session: null,
+      remoteAccessMode: null,
+    };
 
     const ocrRequests = [[], []];
     const servers = [];
@@ -459,7 +539,8 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       const source = await runtime.upload(
         metadataMeeting.id,
         { name: "profile.txt", buffer: Buffer.from("profile decision") },
-        7
+        7,
+        authState
       );
       await runUntil(async () => {
         const current = await prisma.meeting_sources.findUnique({
@@ -476,17 +557,19 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       await runtime.meetings.approve(metadataMeeting.id, 7);
       const conversation = await runtime.qa.createConversation(
         { meetingIds: [metadataMeeting.id], workspaceIds: [] },
-        7
+        7,
+        authState
       );
 
       currentModel = "integration-model-b";
       await expect(
-        runtime.qa.ask(conversation.id, { question: "What was decided?" }, 7)
+        runtime.qa.ask(conversation.id, { question: "What was decided?" }, 7, authState)
       ).rejects.toMatchObject({ code: "EMBEDDING_PROFILE_MISMATCH" });
-      const rebuild = await runtime.requestReindex(metadataMeeting.id, 7);
+      const rebuild = await runtime.requestReindex(metadataMeeting.id, 7, authState);
       expect(JSON.parse(rebuild.payload)).toMatchObject({
         manual: true,
         profileId: "native:integration-model-b",
+        authContext: { kind: "LEGACY_MULTI_USER", userId: 7 },
       });
       await runUntil(async () => {
         const current = await prisma.meeting_jobs.findUnique({
@@ -501,7 +584,7 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
         "native:integration-model-b"
       );
       await expect(
-        runtime.qa.ask(conversation.id, { question: "What was decided?" }, 7)
+        runtime.qa.ask(conversation.id, { question: "What was decided?" }, 7, authState)
       ).resolves.toMatchObject({ status: "ANSWERED" });
 
       const endpointA = await startOcrService(0, "OCR from service A");
@@ -517,7 +600,8 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       const firstScan = await runtime.upload(
         metadataMeeting.id,
         { name: "first-scan.png", buffer: Buffer.from("synthetic image A") },
-        7
+        7,
+        authState
       );
       await runUntil(async () => {
         const current = await prisma.meeting_sources.findUnique({
@@ -536,7 +620,8 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       const secondScan = await runtime.upload(
         metadataMeeting.id,
         { name: "second-scan.png", buffer: Buffer.from("synthetic image B") },
-        7
+        7,
+        authState
       );
       await runUntil(async () => {
         const current = await prisma.meeting_sources.findUnique({
@@ -584,6 +669,14 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
   }, 30_000);
 
   test("runtime reindex failure marks the current meeting INDEX_FAILED", async () => {
+    await prisma.meeting_jobs.updateMany({
+      where: { status: "CREATED" },
+      data: {
+        status: "FAILED",
+        activeKey: null,
+        error: "[TEST_FIXTURE_ISOLATION] Prior integration fixture job",
+      },
+    });
     const { createMeetingRuntime } = require("../../modules/meetings/runtime");
     const originalEngine = process.env.EMBEDDING_ENGINE;
     process.env.EMBEDDING_ENGINE = "native";
@@ -605,6 +698,13 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       uploadRoot: path.join(temporaryRoot, "runtime-reindex-uploads"),
       audit: async () => {},
     });
+    const authState = {
+      authenticated: true,
+      kind: "LEGACY_MULTI_USER",
+      actor: { id: 7, userId: 7 },
+      session: null,
+      remoteAccessMode: null,
+    };
     try {
       const meeting = await runtime.meetings.createMetadata(
         {
@@ -618,7 +718,8 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       const source = await runtime.upload(
         meeting.id,
         { name: "reindex.txt", buffer: Buffer.from("reindex evidence") },
-        7
+        7,
+        authState
       );
       for (let attempt = 0; attempt < 30; attempt += 1) {
         if (
@@ -629,7 +730,7 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
         if (!(await runtime.jobs.runOnce())) break;
       }
       failEmbedding = true;
-      const reindex = await runtime.requestReindex(meeting.id, 7);
+      const reindex = await runtime.requestReindex(meeting.id, 7, authState);
       await expect(runtime.jobs.runOnce()).rejects.toThrow(
         "Configured embedding service request failed"
       );
@@ -641,7 +742,7 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       ).toMatchObject({ retrievalStatus: "INDEX_FAILED" });
 
       failEmbedding = false;
-      const superseded = await runtime.requestReindex(meeting.id, 7);
+      const superseded = await runtime.requestReindex(meeting.id, 7, authState);
       await prisma.meetings.update({
         where: { id: meeting.id },
         data: {

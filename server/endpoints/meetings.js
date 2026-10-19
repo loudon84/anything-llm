@@ -353,8 +353,8 @@ function createMeetingsEndpoints(
   route("get", "/conversations/:id", noRole, async (req, _res, user, authState) => ({
     conversation: await runtime.qa.getConversation(
       numericId(req.params.id, "Conversation ID"),
-      user?.id
-      ,authState
+      user?.id,
+      authState
     ),
   }));
   route(
@@ -365,8 +365,8 @@ function createMeetingsEndpoints(
       answer: await runtime.qa.ask(
         numericId(req.params.id, "Conversation ID"),
         reqBody(req),
-        user?.id
-        ,authState
+        user?.id,
+        authState
       ),
     })
   );
@@ -377,8 +377,8 @@ function createMeetingsEndpoints(
     async (req, _res, user, authState) => {
       const history = await runtime.qa.history(
         numericId(req.params.id, "Conversation ID"),
-        user?.id
-        ,authState
+        user?.id,
+        authState
       );
       return {
         conversation: history.conversation,
@@ -467,7 +467,8 @@ function createMeetingsEndpoints(
     meeting: await runtime.meetings.revise(
       numericId(req.params.id, "Meeting ID"),
       reqBody(req),
-      user?.id
+      user?.id,
+      authState
     ),
     });
   });

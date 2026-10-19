@@ -143,7 +143,9 @@ function createJobRunner({
         where: { id: job.id, status: "PROCESSING", leaseOwner: job.leaseOwner },
         data: {
           status: "FAILED",
-          error: String(error?.message || "Job failed").slice(0, 1000),
+          error: `${error?.code ? `[${String(error.code)}] ` : ""}${String(
+            error?.message || "Job failed"
+          )}`.slice(0, 1000),
           leaseOwner: null,
           leaseUntil: null,
           activeKey: null,

@@ -308,6 +308,7 @@ function createIndexer({
 
   async function reindex(meetingId, { job } = {}) {
     const id = Number(meetingId);
+    const jobPayload = parseJson(job?.payload, {});
     const meeting = await prisma.meetings.findUnique({ where: { id } });
     if (
       !meeting ||
@@ -438,7 +439,13 @@ function createIndexer({
               externalId: current.externalId,
               quarter: current.quarter,
               activeKey,
-              payload: JSON.stringify({ generation, sourceSetRevision }),
+              payload: JSON.stringify({
+                generation,
+                sourceSetRevision,
+                ...(jobPayload.authContext
+                  ? { authContext: jobPayload.authContext }
+                  : {}),
+              }),
               status: "CREATED",
               attempts: 0,
             },
