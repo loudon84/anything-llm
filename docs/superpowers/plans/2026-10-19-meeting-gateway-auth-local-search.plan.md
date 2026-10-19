@@ -188,7 +188,7 @@ expect(await prisma.users.count()).toBe(1);
 
 **Interfaces:** consumesT1+T2; produces createWeComAuthService and server-derived authState used byT4/T5. Legacy JWT request semantics remain unchanged except projected users' signed registry sessions must be validated.
 
-- [ ] **Step 1: Write failing HTTP/clock tests:** config is unavailable without actual dependency; start creates300s browser-bound state/PKCE; callback can't trust query IDs; complete only returns local JWT after profile sync; repeated tickets never redeem twice; incorrect Origin/CSRF/state/proof denied; suspended/expired/epoch-changed registry denied; logout revokes. Existing local session + lost redeem => that sessionLOCAL_ONLY; no local session + lost redeem => no new login/local content; another employee's session unaffected; explicit new verified scan/profile restores only intended session.
+- [x] **Step 1: Write failing HTTP/clock tests:** config is unavailable without actual dependency; start creates300s browser-bound state/PKCE; callback can't trust query IDs; complete only returns local JWT after profile sync; repeated tickets never redeem twice; incorrect Origin/CSRF/state/proof denied; suspended/expired/epoch-changed registry denied; logout revokes. Existing local session + lost redeem => that sessionLOCAL_ONLY; no local session + lost redeem => no new login/local content; another employee's session unaffected; explicit new verified scan/profile restores only intended session.
 
 ```js
 await auth.complete(lostResponseAttemptForExistingSessionA);
@@ -198,10 +198,10 @@ expect(fakeGateway.redeemCalls).toBe(1);
 expect(responseBody).not.toHaveProperty('mt_token');
 ```
 
-- [ ] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomAuth.test.js`; confirm new scenarios red.
-- [ ] **Step 3: Implement BFF and registry checks.** Add same-origin `/api/auth/wecom/config`, `/start`, `/callback`, `/complete`, read-only `/state` (Consumer new endpoint for public recovery DTO), and unified logout. Callback stores short-lived ticket encrypted server-side then303-cleans query; URL never contains local JWT. The new state endpoint returns no ticket/Gateway token or full identity. Use secure cookie constraints inGlobalConstraints; nosecure=false shortcut. Browserproof/ticket consumption and registry issuance are atomic/CAS; uncertain redeem is not repeated. getState validates legacy existing session or projected registry session; browser cannot claim localSessionId or actor. In multi-user mode projectedJWT includes session_id/credential_epoch; keep single-user/legacy password auth compatibility and do not invent an employee for user=null. Startup loads contract lazily and reports unavailable, not crash/fake success.
-- [ ] **Step 4:** Run new BFF/session tests and baseline auth suites; verify lostresponse preserves existing data and never fabricates successful identity. Sanitized reason/code/status no-store DTOs.
-- [ ] **Step 5:** Commit `feat: add gateway wecom login and local-only recovery state`; review before T4.
+- [x] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/wecomAuth.test.js`; confirm new scenarios red.
+- [x] **Step 3: Implement BFF and registry checks.** Add same-origin `/api/auth/wecom/config`, `/start`, `/callback`, `/complete`, read-only `/state` (Consumer new endpoint for public recovery DTO), and unified logout. Callback stores short-lived ticket encrypted server-side then303-cleans query; URL never contains local JWT. The new state endpoint returns no ticket/Gateway token or full identity. Use secure cookie constraints inGlobalConstraints; nosecure=false shortcut. Browserproof/ticket consumption and registry issuance are atomic/CAS; uncertain redeem is not repeated. getState validates legacy existing session or projected registry session; browser cannot claim localSessionId or actor. In multi-user mode projectedJWT includes session_id/credential_epoch; keep single-user/legacy password auth compatibility and do not invent an employee for user=null. Startup loads contract lazily and reports unavailable, not crash/fake success.
+- [x] **Step 4:** Run new BFF/session tests and baseline auth suites; verify lostresponse preserves existing data and never fabricates successful identity. Sanitized reason/code/status no-store DTOs.
+- [x] **Step 5:** Commit `feat: add gateway wecom login and local-only recovery state`; review before T4.
 
 ### Task 4: 共享服务端门禁与本地会议检索隔离
 
@@ -214,7 +214,7 @@ expect(responseBody).not.toHaveProperty('mt_token');
 
 **Interfaces:** consumesT3 authState; produces createMeetingAuthAccess for both route and pre-retrieval/pre-LLM checks. No global runtime.stop() on an employee's mode change.
 
-- [ ] **Step 1: Write failing behavioral tests:** A's LOCAL_ONLY local data hit works with validsession; B cannot read A's meeting through list/detail/source/segments/file/conversation/history/ask; explicit multi-ID selection with any denied ID rejected before retrieval; nullcreatedBy/unknownowner quarantined, local disabled/known revoke/expired session denied; inaccessible workspace cannot reach workspaceRetriever. Existing non-WeCom/single-user ordinary feature compatibility is separately tested without attributing nullowner to a new WeCom subject.
+- [x] **Step 1: Write failing behavioral tests:** A's LOCAL_ONLY local data hit works with validsession; B cannot read A's meeting through list/detail/source/segments/file/conversation/history/ask; explicit multi-ID selection with any denied ID rejected before retrieval; nullcreatedBy/unknownowner quarantined, local disabled/known revoke/expired session denied; inaccessible workspace cannot reach workspaceRetriever. Existing non-WeCom/single-user ordinary feature compatibility is separately tested without attributing nullowner to a new WeCom subject.
 
 ```js
 await requestAs(localOnlyA).get('/api/meetings/remote').expect(403);
@@ -224,10 +224,10 @@ await expect(localSearchAs(localOnlyB, ownedMeetingA)).rejects.toMatchObject({ c
 expect(modelCallCountForDeniedSelection).toBe(0);
 ```
 
-- [ ] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetings/localOnlyAccess.test.js server/__tests__/meetings/endpoints.test.js server/__tests__/meetings/qa.test.js`; confirm newly introduced access tests red.
-- [ ] **Step 3: Implement one shared admission boundary.** Pass trustedactor to every listedlocalread, filter lists before serialization, reject explicit inaccessible scopes before snapshot/indexer.search/workspace retrieval and model calls; history/answers/file routes do not bypass policy. Use createdBy ownership and existing workspace ACL; don't infer ownership for null/legacy records. For LOCAL_ONLY reject remote list/manifest/query/sourceensure/import/retry before runtimeclient invocation and before queued work fetches; session change must not globally stop other actors. Existing client functions/worker paths without provable actor/session cannot bypass the scoped prohibition. NoGateway live access call in permittedLOCAL_ONLY local search; current known local deny still wins. Do not build new importpipeline or old directTencent fallback.
-- [ ] **Step 4:** Run positive/negative tests with outbound Gateway/Tencent spy counts exactly0 for LOCAL_ONLY; exercise actual localindex and QA pipeline where isolated fixtures permit, not only middleware mocks. Baseline legacy regression remains green.
-- [ ] **Step 5:** Commit `feat: enforce local-only meeting search and remote read fences`; review before T5.
+- [x] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetings/localOnlyAccess.test.js server/__tests__/meetings/endpoints.test.js server/__tests__/meetings/qa.test.js`; confirm newly introduced access tests red.
+- [x] **Step 3: Implement one shared admission boundary.** Pass trustedactor to every listedlocalread, filter lists before serialization, reject explicit inaccessible scopes before snapshot/indexer.search/workspace retrieval and model calls; history/answers/file routes do not bypass policy. Use createdBy ownership and existing workspace ACL; don't infer ownership for null/legacy records. For LOCAL_ONLY reject remote list/manifest/query/sourceensure/import/retry before runtimeclient invocation and before queued work fetches; session change must not globally stop other actors. Existing client functions/worker paths without provable actor/session cannot bypass the scoped prohibition. NoGateway live access call in permittedLOCAL_ONLY local search; current known local deny still wins. Do not build new importpipeline or old directTencent fallback.
+- [x] **Step 4:** Run positive/negative tests with outbound Gateway/Tencent spy counts exactly0 for LOCAL_ONLY; exercise actual localindex and QA pipeline where isolated fixtures permit, not only middleware mocks. Baseline legacy regression remains green.
+- [x] **Step 5:** Commit `feat: enforce local-only meeting search and remote read fences`; review before T5.
 
 ### Task 5: 登录入口、结果页和本地模式页面状态
 
@@ -240,7 +240,7 @@ expect(modelCallCountForDeniedSelection).toBe(0);
 
 **Interfaces:** consumes `/api/auth/wecom/{config,start,state,complete}` BFF DTO and serverremoteAccessMode; no profilefetch directly to Gateway frombrowser.
 
-- [ ] **Step 1: Write failing frontendmodel/view-state tests:** unavailableconfig does not show fakeQR/success; start navigates only validatedserverauthorizationURL; callbackresult never consumes JWT from query; stateLOCAL_ONLY gives exact limited-modecopy and disables remoteactions; existing local-list/search remain enabled only when serverauthenticated; lostresponse does not clear workinglocal login blindly or resubmit ticket; profilecompletion stores only localJWT/safeuserinfo; no hardcodedusername or privilegedrole; no newimportacceptance.
+- [x] **Step 1: Write failing frontendmodel/view-state tests:** unavailableconfig does not show fakeQR/success; start navigates only validatedserverauthorizationURL; callbackresult never consumes JWT from query; stateLOCAL_ONLY gives exact limited-modecopy and disables remoteactions; existing local-list/search remain enabled only when serverauthenticated; lostresponse does not clear workinglocal login blindly or resubmit ticket; profilecompletion stores only localJWT/safeuserinfo; no hardcodedusername or privilegedrole; no newimportacceptance.
 
 ```js
 const ui = resolveWeComView({ authenticated: true, remoteAccessMode: 'LOCAL_ONLY' });
@@ -249,10 +249,10 @@ assert.equal(ui.canFetchRemote, false);
 assert.equal(ui.message, '认证结果丢失，仅可检索本地已有会议数据；重新扫码后恢复远端访问');
 ```
 
-- [ ] **Step 2:** Run `node --test frontend/tests/wecomAuth.node.js`; confirm new test failure before implementation.
-- [ ] **Step 3: Implement state-driven UI.** Preserve existingPasswordModal/SimpleSSO compatibility and route guards. New `/sso/wecom/result` view uses same-originstate, not auth tokens inlocation; errors distinct from lackofmeetingpermission. AddWeCom CTA controlled byavailable/reason. PresentGatewaydisplayName safely; localuser handle is not new registrationform. LOCAL_ONLY banner explains local-onlydata and explicitrescan action; remote controls disabled, server remainsauthority. Do not add adminbindings or new importforms. Noauth service rollout config automaticallyenabled.
-- [ ] **Step 4:** Run `node --test frontend/tests/wecomAuth.node.js`; `corepack yarn --cwd frontend test:meeting-gateway`; `corepack yarn --cwd frontend build`. Browser/DOM evidence should cover desktop/mobile login unavailable/result/localonly states if supported; fixture visualstates must be labeledfixture, neverrealWeComlogin.
-- [ ] **Step 5:** Commit `feat: add gateway wecom login pages and local-only notices`; review beforeT6.
+- [x] **Step 2:** Run `node --test frontend/tests/wecomAuth.node.js`; confirm new test failure before implementation.
+- [x] **Step 3: Implement state-driven UI.** Preserve existingPasswordModal/SimpleSSO compatibility and route guards. New `/sso/wecom/result` view uses same-originstate, not auth tokens inlocation; errors distinct from lackofmeetingpermission. AddWeCom CTA controlled byavailable/reason. PresentGatewaydisplayName safely; localuser handle is not new registrationform. LOCAL_ONLY banner explains local-onlydata and explicitrescan action; remote controls disabled, server remainsauthority. Do not add adminbindings or new importforms. Noauth service rollout config automaticallyenabled.
+- [x] **Step 4:** Run `node --test frontend/tests/wecomAuth.node.js`; `corepack yarn --cwd frontend test:meeting-gateway`; `corepack yarn --cwd frontend build`. Browser/DOM evidence should cover desktop/mobile login unavailable/result/localonly states if supported; fixture visualstates must be labeledfixture, neverrealWeComlogin.
+- [x] **Step 5:** Commit `feat: add gateway wecom login pages and local-only notices`; review beforeT6.
 
 ### Task 6: 三项阶段验收、依赖证据和交付记录
 
@@ -266,7 +266,7 @@ assert.equal(ui.message, '认证结果丢失，仅可检索本地已有会议数
 
 **Interfaces:** consumes testresults/source+config+specidentity and separate fixture/realwecom evidence; produces phase-onlyresult nofakefullR2PASS.
 
-- [ ] **Step 1: Write failing gate tests:** missing phasecase fails; fixtureprofile evidence cannot satisfy realGatewayPHASE-AUTH-01; BLOCKED/SKIPPED remains nonPASS; deferredimport never countedPASS or currentrequired; mismatching build/config or malformed evidence fails; local-onlyoutboundcount>0 fails. No self-certified PASS from merely writingJSON.
+- [x] **Step 1: Write failing gate tests:** missing phasecase fails; fixtureprofile evidence cannot satisfy realGatewayPHASE-AUTH-01; BLOCKED/SKIPPED remains nonPASS; deferredimport never countedPASS or currentrequired; mismatching build/config or malformed evidence fails; local-onlyoutboundcount>0 fails. No self-certified PASS from merely writingJSON.
 
 ```js
 expect(evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence: onlyFixtureEvidence }))
@@ -274,8 +274,8 @@ expect(evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence: onlyFixtureEvid
 expect(evaluatePhaseGate({ phase: 'AUTH_LOCAL_SEARCH', evidence: tamperedEvidence }).status).not.toBe('PASS');
 ```
 
-- [ ] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/authLocalSearchGate.test.js`; confirm new tests red.
-- [ ] **Step 3:** Implement phasecase evidence validation with source/config/spec matching, actual testcommands/exitcounts, nohardcodedpass; keep currentphase importscope disposition separate fromexecutionstatus. Use existing evidenceintegrity/signing primitive only if present, otherwise explicitly record missing trustmaterial and failclosed forrealPASS rather than inventproductionkeys. Collect integrationtests ofactualBFF/profileprojection/localpolicy/QA with isolatedDB and controlledupstream. Missing actualGatewaywire/credentials/HTTPSrealuser samples isBLOCKED forrealphase; continue all independenttestabletasks.
+- [x] **Step 2:** Run `corepack yarn test --runInBand server/__tests__/meetingGateway/authLocalSearchGate.test.js`; confirm new tests red.
+- [x] **Step 3:** Implement phasecase evidence validation with source/config/spec matching, actual testcommands/exitcounts, nohardcodedpass; keep currentphase importscope disposition separate fromexecutionstatus. Use existing evidenceintegrity/signing primitive only if present, otherwise explicitly record missing trustmaterial and failclosed forrealPASS rather than inventproductionkeys. Collect integrationtests ofactualBFF/profileprojection/localpolicy/QA with isolatedDB and controlledupstream. Missing actualGatewaywire/credentials/HTTPSrealuser samples isBLOCKED forrealphase; continue all independenttestabletasks.
 - [ ] **Step 4:** Run consolidated affected suites (not newimportacceptance), frontendtests/build, schemavalidate, isolatedmigrationcompatibility and scoped diffcheck. Run phasegate; report fixturepasses separately fromrealBLOCKED. Request final Luna wholechange review and address findings throughonefixwave + scopedrereview.
 - [ ] **Step 5:** Commit `test: verify gateway auth and local-search phase boundaries`; leavebranch/worktree intact. No push/merge orproductionDBmigration. Report exactimplementedtasks, currenttestresults, remainingexternaldependency and uservisiblepageURL only if verified.
 
