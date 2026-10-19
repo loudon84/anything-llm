@@ -10,6 +10,7 @@ import PrivateRoute, {
 import Login from "@/pages/Login";
 import SimpleSSOPassthrough from "@/pages/Login/SSO/simple";
 import WeComResult from "@/pages/Login/SSO/WeComResult";
+import TencentMeetingGatewayResult from "@/pages/Login/SSO/TencentMeetingGatewayResult";
 import OnboardingFlow from "@/pages/OnboardingFlow";
 import paths from "@/utils/paths";
 import "@/index.css";
@@ -40,6 +41,10 @@ const router = createBrowserRouter([
       {
         path: paths.sso.wecomResult(),
         element: <WeComResult />,
+      },
+      {
+        path: paths.sso.meetingGatewayResult(),
+        element: <TencentMeetingGatewayResult />,
       },
       {
         path: "/workspace/:slug/settings/:tab",

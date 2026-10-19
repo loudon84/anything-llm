@@ -53,3 +53,55 @@ test("employee login limiter bounds distinct IP state, expires entries, and fail
   expect(limiter.consume("ip-c")).toBe(true);
   expect(limiter.size).toBe(1);
 });
+
+test("employee login readiness reports available only when the backend flow is configured and multi-user ready", async () => {
+  const routes = new Map();
+  const router = {
+    post(path, ...args) { routes.set("POST " + path, args[args.length - 1]); },
+    get(path, ...args) { routes.set("GET " + path, args[args.length - 1]); },
+    delete() {},
+  };
+  meetingGatewayEndpoints(router, {
+    enabled: true,
+    employeeAuth: { isAvailable: jest.fn(async () => true) },
+  });
+  const response = { json(body) { this.body = body; return this; } };
+
+  await routes.get("GET /meeting-gateway/employee-login/status")({}, response);
+
+  expect(response.body).toEqual({ available: true });
+});
+
+test("employee login readiness stays unavailable when Gateway configuration or multi-user mode is missing", async () => {
+  const routes = new Map();
+  const router = {
+    post(path, ...args) { routes.set("POST " + path, args[args.length - 1]); },
+    get(path, ...args) { routes.set("GET " + path, args[args.length - 1]); },
+    delete() {},
+  };
+  meetingGatewayEndpoints(router, {
+    enabled: false,
+    employeeAuth: { isAvailable: jest.fn(async () => false) },
+  });
+  const response = { json(body) { this.body = body; return this; } };
+
+  await routes.get("GET /meeting-gateway/employee-login/status")({}, response);
+
+  expect(response.body).toEqual({ available: false });
+});
+
+test("employee login readiness does not report a missing employee auth service as configured", async () => {
+  const routes = new Map();
+  const router = {
+    post(path, ...args) { routes.set("POST " + path, args[args.length - 1]); },
+    get(path, ...args) { routes.set("GET " + path, args[args.length - 1]); },
+    delete() {},
+  };
+  meetingGatewayEndpoints(router, { enabled: true, employeeAuth: null });
+  const response = { json(body) { this.body = body; return this; } };
+
+  await routes.get("GET /meeting-gateway/employee-login/status")({}, response);
+
+  expect(response.body).toEqual({ available: false });
+  expect(JSON.stringify(response.body)).not.toMatch(/secret|token|password|origin/i);
+});

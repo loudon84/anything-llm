@@ -41,6 +41,13 @@ function createEmployeeAuthService({ gateway, identityStore, sessions, jwt, orig
       throw error;
     }
   }
-  return { login };
+  async function isAvailable() {
+    try {
+      return await isMultiUserMode() === true && gateway.transportAvailable === true;
+    } catch (_error) {
+      return false;
+    }
+  }
+  return { isAvailable, login };
 }
 module.exports = { createEmployeeAuthService };

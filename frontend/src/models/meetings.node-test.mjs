@@ -634,6 +634,93 @@ test("background meeting refresh keeps the user's unsaved content edits", () => 
   );
 });
 
+test("Gateway panel shows employee authentication separately from Tencent connection state", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { default: GatewayConnectionPanel } = await vite.ssrLoadModule(
+      "/src/components/MeetingGateway/GatewayConnectionPanel.jsx"
+    );
+    const html = renderToStaticMarkup(
+      React.createElement(GatewayConnectionPanel, {
+        authState: {
+          authenticated: true,
+          remoteAccessMode: "GATEWAY_ENABLED",
+          user: { username: "employee-41" },
+        },
+      })
+    );
+    assert.match(html, /员工身份：已通过会议员工账号验证/);
+    assert.match(html, /腾讯会议授权：/);
+    assert.match(html, /尚未连接腾讯会议/);
+    assert.doesNotMatch(html, /授权已由员工登录自动完成/);
+  } finally {
+    await vite.close();
+  }
+});
+
+test("LOCAL_ONLY Gateway panel keeps employee reauthentication available", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { default: GatewayConnectionPanel } = await vite.ssrLoadModule(
+      "/src/components/MeetingGateway/GatewayConnectionPanel.jsx"
+    );
+    const html = renderToStaticMarkup(
+      React.createElement(GatewayConnectionPanel, {
+        authState: {
+          authenticated: true,
+          remoteAccessMode: "LOCAL_ONLY",
+          user: { username: "employee-41" },
+        },
+      })
+    );
+    assert.match(html, /重新验证会议员工账号/);
+    assert.match(html, /本地已有会议搜索仍可使用/);
+    assert.doesNotMatch(html, /授权腾讯会议连接/);
+  } finally {
+    await vite.close();
+  }
+});
+
+test("employee login stays hidden in single-user mode and waits for backend readiness in multi-user mode", async () => {
+  const vite = await createServer({
+    configFile: "vite.config.js",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  try {
+    const { default: EmployeeLoginEntry } = await vite.ssrLoadModule(
+      "/src/components/MeetingGateway/EmployeeLoginEntry.jsx"
+    );
+    const singleUserHtml = renderToStaticMarkup(
+      React.createElement(
+        StaticRouter,
+        { location: "/login" },
+        React.createElement(EmployeeLoginEntry, { multiUserMode: false })
+      )
+    );
+    const multiUserHtml = renderToStaticMarkup(
+      React.createElement(
+        StaticRouter,
+        { location: "/login" },
+        React.createElement(EmployeeLoginEntry, { multiUserMode: true })
+      )
+    );
+    assert.equal(singleUserHtml, "");
+    assert.match(multiUserHtml, /正在检查会议账号登录服务/);
+    assert.doesNotMatch(multiUserHtml, /使用会议员工账号登录/);
+  } finally {
+    await vite.close();
+  }
+});
+
 test("upload feedback retains rejection after refresh and reports partial batch success", () => {
   assert.deepEqual(getUploadBatchFeedback(1, 3, "后续文件失败"), {
     error: "后续文件失败",

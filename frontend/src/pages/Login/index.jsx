@@ -8,6 +8,7 @@ import { baseHeaders } from "@/utils/request";
 import paths from "@/utils/paths";
 import useQuery from "@/hooks/useQuery";
 import useSimpleSSO from "@/hooks/useSimpleSSO";
+import EmployeeLoginEntry from "@/components/MeetingGateway/EmployeeLoginEntry";
 
 /**
  * Login page that handles both single and multi-user login.
@@ -35,6 +36,7 @@ export default function Login() {
     <>
       <PasswordModal mode={mode} />
       <WeComLoginEntry />
+      <EmployeeLoginEntry multiUserMode={mode === "multi"} />
     </>
   );
 }

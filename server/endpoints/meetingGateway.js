@@ -40,6 +40,17 @@ function createBoundedRateLimiter({ windowMs = 60_000, maxAttempts = 10, maxEntr
 function meetingGatewayEndpoints(apiRouter, { sessions = null, employeeAuth = null, oauth = null, enabled = false, contractConfirmed = false } = {}) {
   const oauthReady = enabled === true && oauth?.contractConfirmed === true;
   const employeeLoginAttempts = createBoundedRateLimiter();
+  apiRouter.get("/meeting-gateway/employee-login/status", async (_request, response) => {
+    let available = false;
+    try {
+      available = enabled === true && employeeAuth?.isAvailable
+        ? await employeeAuth.isAvailable() === true
+        : false;
+    } catch (_error) {
+      available = false;
+    }
+    return response.json({ available });
+  });
   apiRouter.post("/meeting-gateway/employee-login", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     const body = request.body;

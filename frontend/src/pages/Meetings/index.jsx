@@ -29,6 +29,7 @@ import {
   formatDate,
 } from "./MeetingsUI";
 import LocalOnlyNotice from "./LocalOnlyNotice";
+import GatewayConnectionPanel from "@/components/MeetingGateway/GatewayConnectionPanel";
 
 function currentQuarter() {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -399,6 +400,7 @@ export default function MeetingsCenter() {
             onRescan={rescan}
           />
         )}
+      <GatewayConnectionPanel authState={authState} />
       {error && <Notice tone="error">{error}</Notice>}
       <Panel title="最近的问答会话">
         {conversationHistory.length ? (

@@ -31,6 +31,7 @@ export default {
       return "/sso/simple";
     },
     wecomResult: () => "/sso/wecom/result",
+    meetingGatewayResult: () => "/sso/meeting-gateway/result",
   },
   onboarding: {
     home: () => {
