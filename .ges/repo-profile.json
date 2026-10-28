@@ -1,0 +1,63 @@
+{
+  "schema": "ges.repo-profile.v2",
+  "repository_lifecycle": "brownfield",
+  "layout": "single",
+  "kind": "brownfield",
+  "repository_kind": "brownfield",
+  "agents": [
+    "cursor"
+  ],
+  "languages": [
+    "typescript"
+  ],
+  "spec_kit": false,
+  "legacy_ges": false,
+  "ci": [
+    "github-actions"
+  ],
+  "package_managers": [
+    "npm"
+  ],
+  "frameworks": [],
+  "existing": {
+    "AGENTS.md": false,
+    "CLAUDE.md": false,
+    ".agents": false,
+    ".cursor": true,
+    ".codex": false,
+    ".specify": false,
+    ".smc": false,
+    "CONTEXT.md": false,
+    "CONTEXT-MAP.md": false,
+    "docs/adr": false
+  },
+  "source_roots": [],
+  "scripts": {
+    "test": [
+      "open-computer/cli/package.json",
+      "package.json"
+    ],
+    "build": [
+      "frontend/package.json",
+      "open-computer/cli/package.json",
+      "open-computer/services/memory-manager/package.json"
+    ],
+    "lint": [
+      "collector/package.json",
+      "frontend/package.json",
+      "package.json",
+      "server/package.json"
+    ]
+  },
+  "tsconfig_evidence": [
+    "open-computer/cli/tsconfig.json"
+  ],
+  "analyzer_version": "6.0.0-alpha.5",
+  "analyzed_at": "2026-10-15T01:28:29.197436+00:00",
+  "git": {
+    "repository": true,
+    "head": "1336d327f4460510b755059b15481fd94a57cef7",
+    "remote": "git@github.com:loudon84/anything-llm.git"
+  },
+  "llm_token_usage": 0
+}
