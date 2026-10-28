@@ -520,6 +520,7 @@ model meetings {
   transcript      String?
   coverage        String
   generation      Int              @default(0)
+  contentVersion  Int              @default(0)
   deletedAt       DateTime?
   createdBy       Int?
   reviewedBy      Int?
@@ -530,10 +531,54 @@ model meetings {
   sources         meeting_sources[]
   chunks          meeting_chunks[]
   jobs            meeting_jobs[]
+  actionCandidates meeting_action_candidates[]
+  localTasks      meeting_local_tasks[]
 
   @@index([quarter, deletedAt])
   @@index([connectionId, externalId])
   @@index([retrievalStatus, reviewStatus])
+}
+
+model meeting_action_candidates {
+  id                Int      @id @default(autoincrement())
+  meetingId         Int
+  candidateId       String
+  kind              String // auto|manual
+  status            String // pending|created|needs_confirm
+  originKey         String?
+  sourceFingerprint String?
+  title             String
+  description       String?
+  sourceExcerpt     String?
+  taskId            Int?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  meeting           meetings @relation(fields: [meetingId], references: [id])
+
+  @@unique([meetingId, candidateId])
+  @@index([meetingId, status])
+}
+
+model meeting_local_tasks {
+  id                 Int      @id @default(autoincrement())
+  meetingId          Int
+  candidateId        String
+  title              String
+  description        String?
+  status             String   @default("pending")
+  assigneeKey        String?
+  assigneeName       String?
+  assigneeDepartment String?
+  dueAt              String? // YYYY-MM-DD
+  notes              String?
+  createdBy          Int?
+  idempotencyKey     String?  @unique
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  meeting            meetings @relation(fields: [meetingId], references: [id])
+
+  @@unique([meetingId, candidateId])
+  @@index([meetingId, status])
 }
 
 model meeting_sources {
