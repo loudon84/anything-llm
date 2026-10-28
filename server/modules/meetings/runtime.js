@@ -314,6 +314,7 @@ function createMeetingRuntime({
   };
   const meetingAuthAccess = createMeetingAuthAccess({
     meetingStore: {
+      findMeeting: (id) => prisma.meetings.findUnique({ where: { id: Number(id) } }),
       findMeetings: (ids) => prisma.meetings.findMany({ where: { id: { in: ids } } }),
     },
     workspaceAccess: async ({ workspaceId, userId }) => Boolean(await lookupWorkspace({ id: workspaceId, userId })),
@@ -323,6 +324,7 @@ function createMeetingRuntime({
   const reviseMeeting = meetings.revise.bind(meetings);
   meetings.revise = async (id, changes, userId, authState) => {
     meetingAuthAccess.assertRemoteAllowed({ authState, action: "meeting.revise" });
+    await meetingAuthAccess.assertMeetingWritable({ authState, meetingId: id, action: "meeting.revise" });
     return reviseMeeting(id, changes, userId, jobAuthContext(authState));
   };
   async function authorizeJob(job) {
@@ -699,7 +701,7 @@ function createMeetingRuntime({
     },
     async upload(meetingId, file, userId, authState) {
       meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.parse" });
-      await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [meetingId], action: "source.upload" });
+      await meetingAuthAccess.assertMeetingWritable({ authState, meetingId, action: "source.upload" });
       const meeting = await meetings.get(meetingId);
       return (await operation(meeting.connectionId)).sources.upload(
         meetingId,
@@ -735,13 +737,13 @@ function createMeetingRuntime({
       return {
         addText: async (id, data, userId, authState) => {
           meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.parse" });
-          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "source.add" });
+          await meetingAuthAccess.assertMeetingWritable({ authState, meetingId: id, action: "source.add" });
           const m = await meetings.get(id);
           return (await operation(m.connectionId)).sources.addText(id, data, userId, jobAuthContext(authState));
         },
         remove: async (id, sourceId, userId, authState) => {
           meetingAuthAccess.assertRemoteAllowed({ authState, action: "source.reindex" });
-          await meetingAuthAccess.assertLocalMeetingReadable({ authState, meetingIds: [id], action: "source.remove" });
+          await meetingAuthAccess.assertMeetingWritable({ authState, meetingId: id, action: "source.remove" });
           const m = await meetings.get(id);
           return (await operation(m.connectionId)).sources.remove(id, sourceId, userId, jobAuthContext(authState));
         },

@@ -100,17 +100,15 @@ export function canDeleteSupplement(meeting, source) {
     !["SUPPLEMENT_FILE", "SUPPLEMENT_TEXT"].includes(source?.sourceType)
   )
     return false;
-  return source.sourceType === "SUPPLEMENT_TEXT"
-    ? ["DRAFT", "APPROVED"].includes(meeting?.reviewStatus)
-    : meeting?.reviewStatus === "DRAFT";
+  return meeting?.reviewStatus === "DRAFT";
 }
 
 export function getMeetingActionCapabilities(meeting) {
   const review = meeting?.reviewStatus;
   return {
-    editContent: ["DRAFT", "APPROVED"].includes(review),
-    addSupplementText: ["DRAFT", "APPROVED"].includes(review),
-    addSupplementFile: ["DRAFT", "APPROVED"].includes(review),
+    editContent: review === "DRAFT",
+    addSupplementText: review === "DRAFT",
+    addSupplementFile: review === "DRAFT",
     approve: review === "DRAFT" && meeting?.retrievalStatus === "AVAILABLE",
     deleteMeeting: review === "DRAFT",
   };

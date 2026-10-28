@@ -131,6 +131,7 @@ function createMeetingsEndpoints(
     originals || runtime.getWorkspaceOriginals?.() || null;
   const admission = meetingAuthAccess || createMeetingAuthAccess({
     meetingStore: {
+      findMeeting: async (id) => prisma.meetings.findUnique({ where: { id: Number(id) } }),
       findMeetings: async (ids) => prisma.meetings.findMany({ where: { id: { in: ids } } }),
     },
     workspaceAccess: async ({ workspaceId, userId, actor }) => {
@@ -220,6 +221,8 @@ function createMeetingsEndpoints(
   const query = (req) => req.query || {};
   const assertMeetingRead = (authState, meetingId, action) =>
     admission.assertLocalMeetingReadable({ authState, meetingIds: [meetingId], action });
+  const assertMeetingWrite = (authState, meetingId, action) =>
+    admission.assertMeetingWritable({ authState, meetingId, action });
   const isAdminUser = async (req, res, user) =>
     !(res.locals?.multiUserMode ?? (await SystemSettings.isMultiUserMode())) ||
     user?.role === ROLES.admin;
@@ -462,7 +465,7 @@ function createMeetingsEndpoints(
     return { meeting, sources: sources.map(publicSource) };
   });
   route("patch", "/:id/content", noRole, async (req, _res, user, authState) => {
-    await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.revise");
+    await assertMeetingWrite(authState, numericId(req.params.id, "Meeting ID"), "meeting.revise");
     return ({
     meeting: await runtime.meetings.revise(
       numericId(req.params.id, "Meeting ID"),
@@ -509,7 +512,7 @@ function createMeetingsEndpoints(
     noRole,
     async (req, _res, user, authState) => {
       const id = numericId(req.params.id, "Meeting ID");
-      await assertMeetingRead(authState, id, "source.upload");
+      await assertMeetingWrite(authState, id, "source.upload");
       admission.assertRemoteAllowed({ authState, action: "source.parse" });
       if (!req.file)
         throw new MeetingError(
@@ -535,7 +538,7 @@ function createMeetingsEndpoints(
   );
   route("post", "/:id/sources/text", noRole, async (req, _res, user, authState) => {
     const id = numericId(req.params.id, "Meeting ID");
-    await assertMeetingRead(authState, id, "source.add");
+    await assertMeetingWrite(authState, id, "source.add");
     admission.assertRemoteAllowed({ authState, action: "source.parse" });
     return ({
     source: await runtime.sources.addText(
@@ -552,7 +555,7 @@ function createMeetingsEndpoints(
     noRole,
     async (req, _res, user, authState) => {
       admission.assertRemoteAllowed({ authState, action: "source.reindex" });
-      await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "source.delete");
+      await assertMeetingWrite(authState, numericId(req.params.id, "Meeting ID"), "source.delete");
       return ({
       source: await runtime.sources.remove(
         numericId(req.params.id, "Meeting ID"),

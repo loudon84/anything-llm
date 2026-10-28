@@ -107,7 +107,7 @@ test("auto-selected over-limit and unavailable meetings stay deselectable", () =
   assert.deepEqual(state.unavailableIds, []);
 });
 
-test("supplement file deletion is draft-only while text deletion returns approved meetings to draft", () => {
+test("supplement deletion is draft-only for both text and file", () => {
   const draft = { reviewStatus: "DRAFT" };
   assert.equal(
     canSupplementSource(draft, { sourceType: "SUPPLEMENT_FILE" }),
@@ -122,7 +122,7 @@ test("supplement file deletion is draft-only while text deletion returns approve
       { reviewStatus: "APPROVED" },
       { sourceType: "SUPPLEMENT_TEXT" }
     ),
-    true
+    false
   );
   assert.equal(
     canSupplementSource(draft, {
@@ -143,16 +143,16 @@ test("remote API page unwraps the actual meetings.items and nextCursor envelope"
   assert.throws(() => getRemoteMeetingPage({ meetings: [] }), /无效响应/);
 });
 
-test("approved meeting action matrix allows revisions and new files but not deleting files", () => {
+test("approved meeting action matrix freezes content edits and supplements", () => {
   assert.deepEqual(
     getMeetingActionCapabilities({
       reviewStatus: "APPROVED",
       retrievalStatus: "AVAILABLE",
     }),
     {
-      editContent: true,
-      addSupplementText: true,
-      addSupplementFile: true,
+      editContent: false,
+      addSupplementText: false,
+      addSupplementFile: false,
       approve: false,
       deleteMeeting: false,
     }
@@ -162,7 +162,7 @@ test("approved meeting action matrix allows revisions and new files but not dele
       { reviewStatus: "APPROVED" },
       { sourceType: "SUPPLEMENT_TEXT" }
     ),
-    true
+    false
   );
   assert.equal(
     canDeleteSupplement(

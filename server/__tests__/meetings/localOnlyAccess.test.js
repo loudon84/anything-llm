@@ -118,4 +118,67 @@ describe("meeting auth admission", () => {
     await expect(service.get(2, gatewayState(11)))
       .rejects.toMatchObject({ code: "MGW_RESOURCE_NOT_ACCESSIBLE", status: 403 });
   });
+
+  test("GATEWAY non-creator with valid session can write a DRAFT meeting", async () => {
+    const meetings = [
+      { id: 10, createdBy: 11, deletedAt: null, reviewStatus: "DRAFT", workspaceId: null },
+      { id: 11, createdBy: 11, deletedAt: null, reviewStatus: "APPROVED", workspaceId: null },
+    ];
+    const access = createMeetingAuthAccess({
+      clock: () => new Date("2026-10-20T00:00:00.000Z"),
+      meetingStore: {
+        findMeeting: async (id) => meetings.find((row) => row.id === Number(id)) || null,
+        findMeetings: async (ids) => meetings.filter((row) => ids.includes(row.id)),
+      },
+      workspaceAccess: async () => true,
+    });
+
+    await expect(
+      access.assertMeetingWritable({
+        authState: gatewayState(22),
+        meetingId: 10,
+        action: "meeting.revise",
+      })
+    ).resolves.toMatchObject({ id: 10, reviewStatus: "DRAFT" });
+
+    await expect(
+      access.assertLocalMeetingReadable({
+        authState: gatewayState(22),
+        meetingIds: [10],
+        action: "meeting.read",
+      })
+    ).rejects.toMatchObject({ code: "MGW_RESOURCE_NOT_ACCESSIBLE", status: 403 });
+
+    await expect(
+      access.assertMeetingWritable({
+        authState: gatewayState(22),
+        meetingId: 11,
+        action: "meeting.revise",
+      })
+    ).rejects.toMatchObject({ code: "MEETING_IMMUTABLE", status: 409 });
+  });
+
+  test("LEGACY authenticated actor can write a DRAFT meeting regardless of creator", async () => {
+    const meetings = [
+      { id: 5, createdBy: 99, deletedAt: null, reviewStatus: "DRAFT", workspaceId: null },
+    ];
+    const access = createMeetingAuthAccess({
+      meetingStore: {
+        findMeeting: async (id) => meetings.find((row) => row.id === Number(id)) || null,
+        findMeetings: async (ids) => meetings.filter((row) => ids.includes(row.id)),
+      },
+    });
+
+    await expect(
+      access.assertMeetingWritable({
+        authState: {
+          authenticated: true,
+          kind: "LEGACY_MULTI_USER",
+          actor: { id: 7, userId: 7 },
+        },
+        meetingId: 5,
+        action: "meeting.revise",
+      })
+    ).resolves.toMatchObject({ id: 5 });
+  });
 });

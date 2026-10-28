@@ -259,7 +259,6 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       (await prisma.meetings.findUnique({ where: { id: meetingId } }))
         .retrievalStatus
     ).toBe("AVAILABLE");
-    await meetingService.approve(meetingId, 7);
 
     const newFile = await sourceService.upload(
       meetingId,
@@ -267,10 +266,6 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
       7
     );
     await processLatestSourceJob(meetingId);
-    expect(
-      (await prisma.meetings.findUnique({ where: { id: meetingId } }))
-        .reviewStatus
-    ).toBe("DRAFT");
     await sourceService.remove(meetingId, first.id, 7);
     await processLatestSourceJob(meetingId);
     const archived = await prisma.meeting_sources.findUnique({
@@ -292,7 +287,7 @@ describe("meeting persistence integration on a fresh SQLite database", () => {
         { name: "renamed-first.txt", buffer: oldContent },
         7
       )
-    ).rejects.toMatchObject({ code: "SOURCE_REUPLOAD_REQUIRES_DRAFT" });
+    ).rejects.toMatchObject({ code: "MEETING_IMMUTABLE", status: 409 });
     const after = await prisma.meetings.findUnique({
       where: { id: meetingId },
     });

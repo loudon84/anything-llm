@@ -309,12 +309,9 @@ function createMeetingService({ prisma, audit = async () => {}, meetingAuthAcces
           );
       return transaction(async (db) => {
         const meeting = await findMeeting(db, id);
-        if (
-          meeting.reviewStatus !== REVIEW.DRAFT &&
-          meeting.reviewStatus !== REVIEW.APPROVED
-        ) {
+        if (meeting.reviewStatus !== REVIEW.DRAFT) {
           throw new MeetingError(
-            "Meeting cannot be revised in its current state",
+            "Meeting content is immutable after approval",
             "MEETING_IMMUTABLE",
             409
           );
@@ -327,6 +324,9 @@ function createMeetingService({ prisma, audit = async () => {}, meetingAuthAcces
             sourceType: { in: ["SUMMARY", "TRANSCRIPT"] },
           },
         });
+        const isGatewayOrigin = (source) =>
+          typeof source?.originKey === "string" &&
+          source.originKey.startsWith("gateway:");
         for (const [sourceType, field, present] of [
           ["SUMMARY", "summary", hasSummary],
           ["TRANSCRIPT", "transcript", hasTranscript],
@@ -345,8 +345,10 @@ function createMeetingService({ prisma, audit = async () => {}, meetingAuthAcces
             .createHash("sha256")
             .update(content)
             .digest("hex");
+          // Never mutate gateway-imported SUMMARY/TRANSCRIPT rows (D-SUM-02 foreshadow).
           const existingSource = existingTextSources.find(
-            (source) => source.sourceType === sourceType
+            (source) =>
+              source.sourceType === sourceType && !isGatewayOrigin(source)
           );
           if (!existingSource && !content.trim()) continue;
           const sourceData = {

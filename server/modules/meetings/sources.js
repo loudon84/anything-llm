@@ -122,9 +122,9 @@ function createSourceService({
 
   async function ensureSupplementAllowed(db, meetingId) {
     const meeting = await currentMeeting(db, meetingId);
-    if (!["DRAFT", "APPROVED"].includes(meeting.reviewStatus))
+    if (meeting.reviewStatus !== "DRAFT")
       throw new MeetingError(
-        "Meeting cannot accept sources in its current state",
+        "Meeting content is immutable after approval",
         "MEETING_IMMUTABLE",
         409
       );
@@ -338,25 +338,6 @@ function createSourceService({
             "SOURCE_DUPLICATE",
             409
           );
-        if (
-          sourceType === "SUPPLEMENT_FILE" &&
-          current.reviewStatus === "APPROVED"
-        ) {
-          const archivedFile = await tx.meeting_sources.findFirst({
-            where: {
-              meetingId: current.id,
-              sourceType: "SUPPLEMENT_FILE",
-              contentHash,
-              deletedAt: { not: null },
-            },
-          });
-          if (archivedFile)
-            throw new MeetingError(
-              "Reuploading a deleted supplemental file requires a draft meeting",
-              "SOURCE_REUPLOAD_REQUIRES_DRAFT",
-              409
-            );
-        }
         const initialSegments =
           text == null ? null : validateSegments(asSegments(text));
         const source = await tx.meeting_sources.create({
@@ -377,11 +358,6 @@ function createSourceService({
           },
         });
         await createParseJob(tx, current, source, authContext);
-        if (current.reviewStatus === "APPROVED")
-          await tx.meetings.update({
-            where: { id: current.id },
-            data: { reviewStatus: "DRAFT", reviewedBy: null, reviewedAt: null },
-          });
         await recordAudit(
           {
             action: "MEETING_SOURCE_ADDED",
@@ -511,21 +487,9 @@ function createSourceService({
           "SOURCE_IMMUTABLE",
           409
         );
-      if (
-        source.sourceType === "SUPPLEMENT_FILE" &&
-        meeting.reviewStatus !== "DRAFT"
-      )
+      if (meeting.reviewStatus !== "DRAFT")
         throw new MeetingError(
-          "Approved supplemental files are read-only",
-          "SOURCE_IMMUTABLE",
-          409
-        );
-      if (
-        source.sourceType === "SUPPLEMENT_TEXT" &&
-        !["DRAFT", "APPROVED"].includes(meeting.reviewStatus)
-      )
-        throw new MeetingError(
-          "Meeting text cannot be deleted in its current state",
+          "Meeting content is immutable after approval",
           "MEETING_IMMUTABLE",
           409
         );
@@ -540,10 +504,6 @@ function createSourceService({
         data: {
           generation,
           retrievalStatus: RETRIEVAL.INDEXING,
-          ...(source.sourceType === "SUPPLEMENT_TEXT" &&
-          meeting.reviewStatus === "APPROVED"
-            ? { reviewStatus: "DRAFT", reviewedBy: null, reviewedAt: null }
-            : {}),
         },
       });
       await tx.meeting_jobs.create({

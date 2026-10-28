@@ -30,6 +30,25 @@ function setup(
       routes.push({ method, path, middleware, handler });
   }
   const prisma = {
+    meetings: {
+      findUnique: async ({ where }) => ({
+        id: Number(where.id),
+        deletedAt: null,
+        reviewStatus: "DRAFT",
+        workspaceId: null,
+        createdBy: 8,
+      }),
+      findMany: async ({ where } = {}) => {
+        const ids = where?.id?.in || [];
+        return ids.map((id) => ({
+          id: Number(id),
+          deletedAt: null,
+          reviewStatus: "DRAFT",
+          workspaceId: null,
+          createdBy: 8,
+        }));
+      },
+    },
     meeting_connections: { findMany: async () => [] },
     meeting_sources: { findMany: async () => [] },
     ...prismaOverrides,

@@ -132,7 +132,7 @@ describe("meeting source identity and lifecycle", () => {
     ).toMatchObject({ code: "SOURCE_DUPLICATE" });
   });
 
-  test("rejects deletion of Tencent originals and accepts only a current draft supplement", async () => {
+  test("rejects deletion of Tencent originals and rejects supplements on APPROVED meetings", async () => {
     const source = await prisma.meeting_sources.create({
       data: {
         meetingId,
@@ -148,15 +148,17 @@ describe("meeting source identity and lifecycle", () => {
       where: { id: meetingId },
       data: { reviewStatus: "APPROVED" },
     });
-    await service().upload(
-      meetingId,
-      { name: "new.txt", buffer: Buffer.from("x") },
-      7
-    );
+    await expect(
+      service().upload(
+        meetingId,
+        { name: "new.txt", buffer: Buffer.from("x") },
+        7
+      )
+    ).rejects.toMatchObject({ code: "MEETING_IMMUTABLE", status: 409 });
     expect(
       (await prisma.meetings.findUnique({ where: { id: meetingId } }))
         .reviewStatus
-    ).toBe("DRAFT");
+    ).toBe("APPROVED");
   });
 
   test("does not allow deleting imported summary or transcript sources", async () => {
@@ -200,7 +202,7 @@ describe("meeting source identity and lifecycle", () => {
     expect(archivedParts[2]).toMatch(/^[0-9a-f-]{36}\.txt$/i);
   });
 
-  test("allows approved supplemental-text deletion with downgrade and archives its content", async () => {
+  test("rejects approved supplemental-text deletion without changing review state", async () => {
     const filePath = path.join(storageRoot, "archive.txt");
     fs.mkdirSync(storageRoot, { recursive: true });
     fs.writeFileSync(filePath, "archive bytes");
@@ -221,17 +223,13 @@ describe("meeting source identity and lifecycle", () => {
       data: { reviewStatus: "APPROVED", retrievalStatus: "AVAILABLE" },
     });
     const sources = service();
-    await sources.remove(meetingId, source.id, 7);
+    await expect(
+      sources.remove(meetingId, source.id, 7)
+    ).rejects.toMatchObject({ code: "MEETING_IMMUTABLE", status: 409 });
     expect(fs.readFileSync(filePath, "utf8")).toBe("archive bytes");
-    await expect(sources.getSource(meetingId, source.id)).rejects.toMatchObject(
-      { code: "SOURCE_NOT_FOUND" }
-    );
-    expect(await sources.getArchivedSource(meetingId, source.id)).toMatchObject(
-      { deleted: true, contentText: "Retained decision" }
-    );
     expect(
       await prisma.meetings.findUnique({ where: { id: meetingId } })
-    ).toMatchObject({ reviewStatus: "DRAFT", retrievalStatus: "INDEXING" });
+    ).toMatchObject({ reviewStatus: "APPROVED", retrievalStatus: "AVAILABLE" });
   });
 
   test("rejects approved file deletion without changing review state or removing its original", async () => {
@@ -246,7 +244,7 @@ describe("meeting source identity and lifecycle", () => {
     });
     await expect(
       service().remove(meetingId, source.id, 7)
-    ).rejects.toMatchObject({ code: "SOURCE_IMMUTABLE" });
+    ).rejects.toMatchObject({ code: "MEETING_IMMUTABLE", status: 409 });
     expect(fs.readFileSync(source.filePath, "utf8")).toBe("keep");
     expect(
       await prisma.meetings.findUnique({ where: { id: meetingId } })

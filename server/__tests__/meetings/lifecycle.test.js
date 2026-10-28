@@ -116,13 +116,13 @@ describe("meeting persistence lifecycle", () => {
     });
   });
 
-  test("revision returns to draft, pauses retrieval, and queues reindexing", async () => {
+  test("revision of a draft pauses retrieval and queues reindexing", async () => {
     const { db, state } = fakePrisma();
     const service = createMeetingService({ prisma: db });
     const meeting = await service.createMetadata(metadata("revision"), 5);
     Object.assign(meeting, {
       retrievalStatus: "AVAILABLE",
-      reviewStatus: "APPROVED",
+      reviewStatus: "DRAFT",
       generation: 1,
     });
     const revised = await service.revise(
@@ -140,6 +140,52 @@ describe("meeting persistence lifecycle", () => {
       kind: "REINDEX",
       meetingId: meeting.id,
       status: "CREATED",
+    });
+  });
+
+  test("revision of an approved meeting fails with MEETING_IMMUTABLE", async () => {
+    const { db } = fakePrisma();
+    const service = createMeetingService({ prisma: db });
+    const meeting = await service.createMetadata(metadata("approved-locked"), 5);
+    Object.assign(meeting, {
+      retrievalStatus: "AVAILABLE",
+      reviewStatus: "APPROVED",
+      generation: 1,
+    });
+    await expect(
+      service.revise(meeting.id, { summary: "Should not apply" }, 5)
+    ).rejects.toMatchObject({ code: "MEETING_IMMUTABLE", status: 409 });
+  });
+
+  test("revision leaves gateway-origin SUMMARY rows untouched", async () => {
+    const { db, state } = fakePrisma();
+    const service = createMeetingService({ prisma: db });
+    const meeting = await service.createMetadata(metadata("gateway-summary"), 5);
+    Object.assign(meeting, {
+      retrievalStatus: "AVAILABLE",
+      reviewStatus: "DRAFT",
+      generation: 1,
+    });
+    state.meeting_sources.push({
+      id: 77,
+      meetingId: meeting.id,
+      sourceType: "SUMMARY",
+      originKey: "gateway:rf1:meeting_summary:0",
+      contentText: "Imported gateway summary",
+      deletedAt: null,
+    });
+    await service.revise(meeting.id, { summary: "Local revision" }, 5);
+    const gatewayRow = state.meeting_sources.find((row) => row.id === 77);
+    expect(gatewayRow.contentText).toBe("Imported gateway summary");
+    const localRow = state.meeting_sources.find(
+      (row) =>
+        row.meetingId === meeting.id &&
+        row.sourceType === "SUMMARY" &&
+        row.id !== 77
+    );
+    expect(localRow).toMatchObject({
+      contentText: "Local revision",
+      sourceType: "SUMMARY",
     });
   });
 

@@ -69,6 +69,18 @@ function createMeetingAuthAccess({
     };
   }
 
+  async function loadMeeting(id) {
+    if (!meetingStore) deny(RESOURCE_DENIED, "Meeting access could not be verified", 403);
+    if (typeof meetingStore.findMeeting === "function") {
+      return meetingStore.findMeeting(id);
+    }
+    if (typeof meetingStore.findMeetings !== "function")
+      deny(RESOURCE_DENIED, "Meeting access could not be verified", 403);
+    const rows = await meetingStore.findMeetings([id]);
+    if (!Array.isArray(rows)) return null;
+    return rows.find((row) => Number(row.id) === Number(id)) || null;
+  }
+
   async function assertLocalMeetingReadable({ authState, meetingIds = [], action } = {}) {
     assertKnownAuth(authState);
     const ids = [...new Set((meetingIds || []).map(Number))];
@@ -91,6 +103,39 @@ function createMeetingAuthAccess({
     return ids;
   }
 
+  async function assertMeetingWritable({ authState, meetingId, action } = {}) {
+    assertKnownAuth(authState);
+    const id = Number(meetingId);
+    if (!Number.isSafeInteger(id) || id <= 0)
+      deny(RESOURCE_DENIED, `Meeting scope is unavailable for ${String(action || "write")}`, 403);
+
+    const isGateway = assertGatewaySession(authState);
+    // LEGACY: keep readable admission first. GATEWAY: expand beyond creator-only (D-ACL-01).
+    if (!isGateway) {
+      await assertLocalMeetingReadable({ authState, meetingIds: [id], action });
+    }
+
+    const meeting = await loadMeeting(id);
+    if (!meeting || meeting.deletedAt != null)
+      deny(RESOURCE_DENIED, `Meeting scope is unavailable for ${String(action || "write")}`, 403);
+    if (meeting.reviewStatus !== "DRAFT") {
+      throw new MeetingError(
+        "Meeting content is immutable after approval",
+        "MEETING_IMMUTABLE",
+        409
+      );
+    }
+
+    if (isGateway) {
+      const actorId = Number(authState.actor.userId ?? authState.actor.id);
+      if (meeting.workspaceId != null && !(await workspaceAccess({
+        workspaceId: Number(meeting.workspaceId), userId: actorId, actor: authState.actor,
+      }))) deny(RESOURCE_DENIED, "Meeting workspace is unavailable", 403);
+    }
+
+    return meeting;
+  }
+
   async function filterLocalMeetings({ authState, meetings = [], action } = {}) {
     assertKnownAuth(authState);
     if (authState.kind !== "GATEWAY_SESSION") return meetings;
@@ -106,7 +151,14 @@ function createMeetingAuthAccess({
     return readable;
   }
 
-  return { assertLocalMeetingReadable, assertRemoteAllowed, filterLocalMeetings, getJobAuthContext, getRequestState };
+  return {
+    assertLocalMeetingReadable,
+    assertMeetingWritable,
+    assertRemoteAllowed,
+    filterLocalMeetings,
+    getJobAuthContext,
+    getRequestState,
+  };
 }
 
 module.exports = { createMeetingAuthAccess };
