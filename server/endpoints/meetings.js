@@ -213,9 +213,18 @@ function createMeetingsEndpoints(
   const noRole = null;
   const reqBody = (req) =>
     req.body && typeof req.body === "object" ? req.body : {};
+  const TEXT_SOURCE_TYPES = new Set([
+    "SUMMARY",
+    "TRANSCRIPT",
+    "LOCAL_SUMMARY",
+    "SUPPLEMENT_TEXT",
+    "GATEWAY_ARTIFACT",
+  ]);
   const publicSource = (source) => {
     if (!source) return source;
-    const { filePath: _filePath, contentText: _contentText, ...safe } = source;
+    const { filePath: _filePath, contentText, ...safe } = source;
+    if (TEXT_SOURCE_TYPES.has(source.sourceType))
+      return { ...safe, contentText: contentText ?? null };
     return safe;
   };
   const query = (req) => req.query || {};
@@ -474,6 +483,24 @@ function createMeetingsEndpoints(
       authState
     ),
     });
+  });
+  route("patch", "/:id/local-summary", noRole, async (req, _res, user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingWrite(authState, id, "meeting.localSummary");
+    const body = reqBody(req);
+    const result = await runtime.meetings.saveLocalSummary(
+      id,
+      {
+        content: body.content,
+        contentVersion: body.contentVersion,
+      },
+      user?.id,
+      authState
+    );
+    return {
+      meeting: result.meeting,
+      localSummary: publicSource(result.localSummary),
+    };
   });
   route("post", "/:id/approve", noRole, async (req, _res, user, authState) => {
     await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.approve");

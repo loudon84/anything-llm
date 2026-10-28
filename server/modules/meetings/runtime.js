@@ -3,6 +3,7 @@ const path = require("path");
 const { EventEmitter } = require("events");
 const { createMeetingConfig } = require("./config");
 const { createMeetingService } = require("./meetingService");
+const { createLocalSummaryService } = require("./localSummary");
 const { createSourceService } = require("./sources");
 const { createMeetingAuthAccess } = require("../../utils/meetingGateway/meetingAuthAccess");
 const { createImporter } = require("./importer");
@@ -320,12 +321,31 @@ function createMeetingRuntime({
     workspaceAccess: async ({ workspaceId, userId }) => Boolean(await lookupWorkspace({ id: workspaceId, userId })),
   });
   const meetings = createMeetingService({ prisma, audit: auditWrite, meetingAuthAccess });
+  const localSummaryService = createLocalSummaryService({
+    prisma,
+    audit: auditWrite,
+  });
   const jobAuthContext = (authState) => meetingAuthAccess.getJobAuthContext(authState);
   const reviseMeeting = meetings.revise.bind(meetings);
   meetings.revise = async (id, changes, userId, authState) => {
     meetingAuthAccess.assertRemoteAllowed({ authState, action: "meeting.revise" });
     await meetingAuthAccess.assertMeetingWritable({ authState, meetingId: id, action: "meeting.revise" });
     return reviseMeeting(id, changes, userId, jobAuthContext(authState));
+  };
+  meetings.saveLocalSummary = async (
+    meetingId,
+    { content, contentVersion } = {},
+    userId,
+    authState
+  ) => {
+    return localSummaryService.saveLocalSummary({
+      meetingId,
+      content,
+      expectedContentVersion: contentVersion,
+      userId,
+      authState,
+      meetingAuthAccess,
+    });
   };
   async function authorizeJob(job) {
     let payload;
