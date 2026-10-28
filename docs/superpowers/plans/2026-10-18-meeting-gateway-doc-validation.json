@@ -1,0 +1,111 @@
+{
+  "scope": "DOCUMENT_STATIC_ONLY",
+  "executed_at": "2026-10-17T16:54:12.538Z",
+  "product_tests": "NOT_RUN",
+  "real_gateway": "NOT_RUN",
+  "path_scan": {
+    "model": "gpt-6-luna",
+    "modify_occurrences": 38,
+    "existing_git_paths": 34,
+    "prior_create_dependency_occurrences": 4
+  },
+  "checks": [
+    {
+      "name": "chapters_0_to_36",
+      "status": "PASS",
+      "detail": 37
+    },
+    {
+      "name": "26_original_requirements",
+      "status": "PASS",
+      "detail": 26
+    },
+    {
+      "name": "72_unique_acceptances",
+      "status": "PASS",
+      "detail": {
+        "original": 52,
+        "revision": 20
+      }
+    },
+    {
+      "name": "15_ordered_tasks",
+      "status": "PASS",
+      "detail": 15
+    },
+    {
+      "name": "all_requirements_in_plan",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "all_review_items_mapped",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "no_old_failure_multichoice",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "review_and_draft_status",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "jest_commands_not_nonexistent_node_test",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "non_circular_gate_sets",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "plan_no_placeholders",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "balanced_fences",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "31_js_examples_parse",
+      "status": "PASS",
+      "detail": {
+        "blocks": 31,
+        "errors": []
+      }
+    },
+    {
+      "name": "v1_0_source_unchanged",
+      "status": "PASS",
+      "detail": "cf58852625f04a54c5f06ac44af279c3cfa0e2f479331eecd0621c3186c5af94"
+    },
+    {
+      "name": "task_contracts",
+      "status": "PASS",
+      "detail": null
+    },
+    {
+      "name": "query_recovery_defined_without_new_enum",
+      "status": "PASS",
+      "detail": null
+    }
+  ],
+  "pass": true,
+  "files": [
+    {
+      "path": "E:/git/anything-llm/prd/anythingllm-meeting-gateway-prd-v1.1.md",
+      "sha256": "d31f0012b92aedf67e5225b19c7e952118140ae4192d34bb99761b90e46d1427"
+    },
+    {
+      "path": "E:/git/anything-llm/docs/superpowers/plans/2026-10-18-anythingllm-meeting-gateway-r1.plan.md",
+      "sha256": "86c4a0e95f127617ae7fe07cc2033bc1537f1721038e739f4377a45bc7cd542c"
+    }
+  ]
+}

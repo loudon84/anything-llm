@@ -43,5 +43,8 @@
   "devDependencies": {
     "concurrently": "^9.1.2",
     "jest": "^29.7.0"
+  },
+  "dependencies": {
+    "lat.md": "^0.13.1"
   }
 }
