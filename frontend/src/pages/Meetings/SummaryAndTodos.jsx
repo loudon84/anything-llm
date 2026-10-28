@@ -31,6 +31,112 @@ function originalText(source) {
   return String(source?.contentText || "").trim();
 }
 
+function useDebouncedValue(value, delayMs = 300) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+function PersonPicker({ disabled, selected, onSelect }) {
+  const [query, setQuery] = useState("");
+  const [people, setPeople] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const debouncedQuery = useDebouncedValue(query, 300);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      const q = String(debouncedQuery || "").trim();
+      if (q.length < 2) {
+        setPeople([]);
+        setSearchError("");
+        return;
+      }
+      setSearching(true);
+      setSearchError("");
+      try {
+        const rows = await Meetings.searchOaPeople(q);
+        if (!cancelled) setPeople(rows);
+      } catch (e) {
+        if (!cancelled) {
+          setPeople([]);
+          setSearchError(
+            e.code === "FEATURE_DISABLED"
+              ? "本地待办功能未开启。"
+              : e.message || "人员搜索失败。"
+          );
+        }
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery]);
+
+  return (
+    <div className="space-y-2">
+      <input
+        className={inputClass}
+        value={query}
+        disabled={disabled}
+        placeholder="输入至少 2 个字符搜索 OA 人员"
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {selected && (
+        <p className="text-sm text-theme-text-secondary">
+          已选：{selected.fd_name}
+          {selected.fd_department ? ` · ${selected.fd_department}` : ""}
+          {selected.fd_no ? ` · ${selected.fd_no}` : ""}
+          <button
+            type="button"
+            className="ml-2 underline"
+            disabled={disabled}
+            onClick={() => onSelect(null)}
+          >
+            清除
+          </button>
+        </p>
+      )}
+      {searching && (
+        <p className="text-xs text-theme-text-secondary">正在搜索…</p>
+      )}
+      {searchError && <Notice tone="error">{searchError}</Notice>}
+      {people.length > 0 && (
+        <ul className="max-h-40 overflow-auto rounded-lg border border-theme-sidebar-border">
+          {people.map((person) => (
+            <li key={`${person.fd_no}-${person.fd_name}`}>
+              <button
+                type="button"
+                className="flex w-full flex-col items-start px-3 py-2 text-left text-sm hover:bg-theme-bg-primary"
+                disabled={disabled}
+                onClick={() => {
+                  onSelect(person);
+                  setQuery(person.fd_name || "");
+                  setPeople([]);
+                }}
+              >
+                <span>{person.fd_name}</span>
+                <span className="text-xs text-theme-text-secondary">
+                  {[person.fd_department, person.fd_no]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function SummaryAndTodos() {
   const { id } = useParams();
   const [meeting, setMeeting] = useState(null);
@@ -42,7 +148,14 @@ export default function SummaryAndTodos() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [localTasksEnabled, setLocalTasksEnabled] = useState(false);
+  const [tasks, setTasks] = useState([]);
   const [candidates, setCandidates] = useState([]);
+  const [selectedCandidate, setSelectedCandidate] = useState(null);
+  const [assignee, setAssignee] = useState(null);
+  const [dueAt, setDueAt] = useState("");
+  const [notes, setNotes] = useState("");
+  const [taskBusy, setTaskBusy] = useState(false);
   const [manualTitle, setManualTitle] = useState("");
   const [manualDescription, setManualDescription] = useState("");
   const [editingId, setEditingId] = useState(null);
@@ -59,11 +172,29 @@ export default function SummaryAndTodos() {
     setCandidates(rows || []);
   }, []);
 
+  const loadTasks = useCallback(async (meetingId) => {
+    try {
+      const listed = await Meetings.listLocalTasks(meetingId);
+      setLocalTasksEnabled(!listed.disabled);
+      setTasks(listed.tasks || []);
+    } catch (e) {
+      if (e.code === "FEATURE_DISABLED") {
+        setLocalTasksEnabled(false);
+        setTasks([]);
+        return;
+      }
+      throw e;
+    }
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const result = await Meetings.detail(id);
+      const [result, config] = await Promise.all([
+        Meetings.detail(id),
+        Meetings.config().catch(() => null),
+      ]);
       setMeeting(result.meeting);
       setSources(result.sources || []);
       const local = (result.sources || []).find(
@@ -73,12 +204,17 @@ export default function SummaryAndTodos() {
       setDraft(text);
       setSavedDraft(text);
       await loadCandidates(result.meeting.id);
+      const enabled = Boolean(config?.meetingLocalTasksEnabled);
+      setLocalTasksEnabled(enabled);
+      if (enabled) {
+        await loadTasks(result.meeting.id);
+      }
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [id, loadCandidates]);
+  }, [id, loadCandidates, loadTasks]);
 
   useEffect(() => {
     load();
@@ -111,6 +247,15 @@ export default function SummaryAndTodos() {
     return gatewayFirst.map(originalText).filter(Boolean).join("\n\n");
   }, [importedOriginals]);
 
+  const openCandidates = useMemo(() => {
+    const created = new Set(
+      tasks.map((task) => String(task.candidateId || ""))
+    );
+    return (candidates || []).filter(
+      (candidate) => !created.has(String(candidate.candidateId || ""))
+    );
+  }, [candidates, tasks]);
+
   async function save() {
     if (!meeting || !canEdit) return;
     setBusy(true);
@@ -137,6 +282,7 @@ export default function SummaryAndTodos() {
       }
       setNotice("本地摘要已保存，索引将在后台重建。");
       await loadCandidates(meeting.id);
+      if (localTasksEnabled) await loadTasks(meeting.id);
     } catch (e) {
       if (e.status === 409 || e.code === "CONTENT_VERSION_CONFLICT") {
         setError(
@@ -240,6 +386,56 @@ export default function SummaryAndTodos() {
       }
     } finally {
       setCandidateBusy(false);
+    }
+  }
+
+  async function createTask() {
+    if (!meeting || !canEdit || !localTasksEnabled || !selectedCandidate) return;
+    if (!assignee?.fd_no && !assignee?.fd_name) {
+      setError("请先选择 OA 负责人。");
+      return;
+    }
+    setTaskBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const task = await Meetings.createLocalTask(
+        meeting.id,
+        {
+          candidateId: selectedCandidate.candidateId,
+          title: selectedCandidate.title,
+          description: selectedCandidate.description || "",
+          assigneeKey: assignee.fd_no || assignee.fd_name,
+          assigneeName: assignee.fd_name,
+          assigneeDepartment: assignee.fd_department || "",
+          dueAt: dueAt || null,
+          notes: notes || null,
+        },
+        {
+          idempotencyKey: `meeting-${meeting.id}-candidate-${selectedCandidate.candidateId}`,
+        }
+      );
+      setTasks((current) => {
+        if (current.some((row) => row.id === task.id)) return current;
+        return [...current, task];
+      });
+      setSelectedCandidate(null);
+      setAssignee(null);
+      setDueAt("");
+      setNotes("");
+      setNotice("本地待办已创建。");
+      await loadTasks(meeting.id);
+    } catch (e) {
+      if (e.code === "FEATURE_DISABLED") {
+        setLocalTasksEnabled(false);
+        setError("本地待办功能未开启。");
+      } else if (e.code === "MEETING_IMMUTABLE") {
+        setError("会议已审核，不可再创建待办。");
+      } else {
+        setError(e.message);
+      }
+    } finally {
+      setTaskBusy(false);
     }
   }
 
@@ -361,6 +557,7 @@ export default function SummaryAndTodos() {
             </Button>
           </div>
         )}
+      </Panel>
 
       <Panel
         title="行动项候选"
@@ -383,6 +580,11 @@ export default function SummaryAndTodos() {
           <ul className="space-y-2">
             {candidates.map((candidate) => {
               const editing = editingId === candidate.candidateId;
+              const canCreateTask =
+                localTasksEnabled &&
+                openCandidates.some(
+                  (row) => row.candidateId === candidate.candidateId
+                );
               return (
                 <li
                   key={candidate.candidateId}
@@ -436,18 +638,28 @@ export default function SummaryAndTodos() {
                           </pre>
                         ) : null}
                       </div>
-                      {canEdit && (
-                        <Button
-                          disabled={candidateBusy}
-                          onClick={() => {
-                            setEditingId(candidate.candidateId);
-                            setEditTitle(candidate.title || "");
-                            setEditDescription(candidate.description || "");
-                          }}
-                        >
-                          编辑
-                        </Button>
-                      )}
+                      <div className="flex flex-wrap gap-2">
+                        {canEdit && (
+                          <Button
+                            disabled={candidateBusy || taskBusy}
+                            onClick={() => {
+                              setEditingId(candidate.candidateId);
+                              setEditTitle(candidate.title || "");
+                              setEditDescription(candidate.description || "");
+                            }}
+                          >
+                            编辑
+                          </Button>
+                        )}
+                        {canCreateTask && canEdit && (
+                          <Button
+                            disabled={!canEdit || taskBusy}
+                            onClick={() => setSelectedCandidate(candidate)}
+                          >
+                            创建任务
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </li>
@@ -483,6 +695,91 @@ export default function SummaryAndTodos() {
           </div>
         )}
       </Panel>
+
+      {localTasksEnabled && (
+        <>
+          {selectedCandidate && canEdit && (
+            <Panel title={`创建任务：${selectedCandidate.title}`}>
+              <Field label="负责人（OA）">
+                <PersonPicker
+                  disabled={taskBusy}
+                  selected={assignee}
+                  onSelect={setAssignee}
+                />
+              </Field>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <Field label="截止日期（可选，上海日历日）">
+                  <input
+                    type="date"
+                    className={inputClass}
+                    value={dueAt}
+                    disabled={taskBusy}
+                    onChange={(e) => setDueAt(e.target.value)}
+                  />
+                </Field>
+                <Field label="备注（可选）">
+                  <input
+                    className={inputClass}
+                    value={notes}
+                    disabled={taskBusy}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </Field>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  variant="primary"
+                  disabled={taskBusy || !assignee}
+                  onClick={createTask}
+                >
+                  确认创建
+                </Button>
+                <Button
+                  disabled={taskBusy}
+                  onClick={() => {
+                    setSelectedCandidate(null);
+                    setAssignee(null);
+                  }}
+                >
+                  取消
+                </Button>
+              </div>
+            </Panel>
+          )}
+
+          <Panel title="本地待办">
+            {tasks.length === 0 ? (
+              <p className="text-sm text-theme-text-secondary">暂无本地待办。</p>
+            ) : (
+              <ul className="space-y-2">
+                {tasks.map((task) => (
+                  <li
+                    key={task.id}
+                    className="rounded-lg bg-theme-bg-primary p-3 text-sm"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{task.title}</span>
+                      <Status value={task.status} />
+                    </div>
+                    <p className="mt-1 text-xs text-theme-text-secondary">
+                      {[
+                        task.assigneeName,
+                        task.assigneeDepartment,
+                        task.dueAt ? `截止 ${task.dueAt}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </p>
+                    {task.notes ? (
+                      <p className="mt-1 text-xs">{task.notes}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </>
+      )}
     </Page>
   );
 }

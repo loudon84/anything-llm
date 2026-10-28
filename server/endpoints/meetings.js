@@ -15,6 +15,7 @@ const {
   searchPeople,
   getOaPeopleBaseUrl,
 } = require("../modules/meetings/oaPeople");
+const { createLocalTasksService } = require("../modules/meetings/localTasks");
 
 const MAX_UPLOAD_BYTES = 100_000_000;
 const SAFE_ID = /^\d+$/;
@@ -126,6 +127,7 @@ function createMeetingsEndpoints(
     originals = null,
     workspaceAccess = null,
     meetingAuthAccess = null,
+    localTasksService = null,
     featureFlagReader = null,
     oaSearch = null,
   } = {}
@@ -147,6 +149,8 @@ function createMeetingsEndpoints(
       return Boolean(await lookup({ id: workspaceId, userId, user: actor }));
     },
   });
+  const localTasks =
+    localTasksService || createLocalTasksService({ prisma });
   const flagEnabled = async () =>
     featureFlagReader
       ? featureFlagReader()
@@ -583,6 +587,46 @@ function createMeetingsEndpoints(
       };
     }
   );
+  route("get", "/:id/local-tasks", noRole, async (req, _res, _user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingRead(authState, id, "meeting.localTask.list");
+    if (!(await flagEnabled())) {
+      return { tasks: [], disabled: true };
+    }
+    const listed = await localTasks.listLocalTasks({
+      meetingId: id,
+      authState,
+      meetingAuthAccess: admission,
+    });
+    return { ...listed, disabled: false };
+  });
+  route("post", "/:id/local-tasks", noRole, async (req, _res, user, authState) => {
+    await requireLocalTasksFlag();
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingWrite(authState, id, "meeting.localTask.create");
+    const body = reqBody(req);
+    const idempotencyKey =
+      req.get?.("Idempotency-Key") ||
+      req.headers?.["idempotency-key"] ||
+      body.idempotencyKey ||
+      null;
+    const task = await localTasks.createLocalTask({
+      meetingId: id,
+      candidateId: body.candidateId,
+      title: body.title,
+      description: body.description,
+      assigneeKey: body.assigneeKey,
+      assigneeName: body.assigneeName,
+      assigneeDepartment: body.assigneeDepartment,
+      dueAt: body.dueAt,
+      notes: body.notes,
+      createdBy: user?.id,
+      idempotencyKey,
+      authState,
+      meetingAuthAccess: admission,
+    });
+    return { task };
+  });
   route("post", "/:id/approve", noRole, async (req, _res, user, authState) => {
     await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.approve");
     return ({

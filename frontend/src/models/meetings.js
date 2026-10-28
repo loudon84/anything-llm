@@ -26,15 +26,22 @@ export async function meetingRequest(path, options = {}) {
     body = null;
   }
   if (!response.ok) {
-    throw new Error(
+    const error = new Error(
       response.status >= 500
         ? "会议服务暂时不可用，请稍后重试。"
         : body?.error || `请求失败（${response.status}）`
     );
+    error.status = response.status;
+    error.code = body?.code;
+    throw error;
   }
   if (!body || typeof body !== "object")
     throw new Error("会议服务返回了无效响应。");
-  if (body.error) throw new Error(body.error);
+  if (body.error) {
+    const error = new Error(body.error);
+    error.code = body.code;
+    throw error;
+  }
   return body;
 }
 
@@ -56,7 +63,55 @@ export const Meetings = {
     }).getState();
   },
   async config() {
-    return (await meetingRequest("/config")).config;
+    const body = await meetingRequest("/config");
+    return body.config;
+  },
+  async searchOaPeople(q) {
+    const body = await meetingRequest(
+      `/oa/people${queryString({ q })}`
+    );
+    if (!Array.isArray(body.people))
+      throw new Error("会议服务返回了无效的人员列表。");
+    return body.people;
+  },
+  async listLocalTasks(id) {
+    return meetingRequest(`/${encodeURIComponent(id)}/local-tasks`);
+  },
+  async createLocalTask(id, data = {}, { idempotencyKey } = {}) {
+    const response = await fetch(
+      `${root}/${encodeURIComponent(id)}/local-tasks`,
+      {
+        method: "POST",
+        headers: {
+          ...baseHeaders(),
+          "Content-Type": "application/json",
+          ...(idempotencyKey
+            ? { "Idempotency-Key": String(idempotencyKey) }
+            : {}),
+        },
+        body: JSON.stringify(data),
+      }
+    );
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (!response.ok) {
+      const error = new Error(
+        response.status >= 500
+          ? "会议服务暂时不可用，请稍后重试。"
+          : body?.error || `请求失败（${response.status}）`
+      );
+      error.status = response.status;
+      error.code = body?.code;
+      throw error;
+    }
+    if (!body || typeof body !== "object")
+      throw new Error("会议服务返回了无效响应。");
+    if (body.error) throw new Error(body.error);
+    return body.task;
   },
   async saveConfig(data) {
     return (
@@ -161,7 +216,6 @@ export const Meetings = {
     if (body.error) throw new Error(body.error);
     return body;
   },
-
   async listActionCandidates(id) {
     const body = await meetingRequest(
       `/${encodeURIComponent(id)}/action-candidates`
