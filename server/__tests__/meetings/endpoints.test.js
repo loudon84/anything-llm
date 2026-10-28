@@ -96,6 +96,7 @@ function setup(
     authenticate: auth,
     requireAdmin: admin,
     uploadRoot: require("path").join(__dirname, ".tmp-meeting-uploads"),
+    featureFlagReader: async () => false,
     ...endpointOptions,
   });
   return { routes, runtime, prisma };
@@ -507,7 +508,9 @@ describe("authenticated meeting endpoints", () => {
       name: "Tencent",
       configured: true,
       capabilities: { transcript: true },
+      meetingLocalTasksEnabled: false,
     });
+    expect(response.value.meetingLocalTasksEnabled).toBe(false);
     expect(JSON.stringify(response.value)).not.toMatch(
       /private|secret|tokenPresent/
     );
@@ -532,7 +535,11 @@ describe("authenticated meeting endpoints", () => {
       ),
       { user: { id: 1, role: "admin" } }
     );
-    expect(response.value.config).toEqual(publicConfig);
+    expect(response.value.config).toEqual({
+      ...publicConfig,
+      meetingLocalTasksEnabled: false,
+    });
+    expect(response.value.meetingLocalTasksEnabled).toBe(false);
     expect(JSON.stringify(response.value)).not.toContain("actual-secret-value");
   });
 

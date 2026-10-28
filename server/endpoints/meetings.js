@@ -10,6 +10,11 @@ const {
 const { SystemSettings } = require("../models/systemSettings");
 const { MeetingError } = require("../modules/meetings/errors");
 const { createMeetingAuthAccess } = require("../utils/meetingGateway/meetingAuthAccess");
+const { isMeetingLocalTasksEnabled } = require("../modules/meetings/featureFlags");
+const {
+  searchPeople,
+  getOaPeopleBaseUrl,
+} = require("../modules/meetings/oaPeople");
 
 const MAX_UPLOAD_BYTES = 100_000_000;
 const SAFE_ID = /^\d+$/;
@@ -121,6 +126,8 @@ function createMeetingsEndpoints(
     originals = null,
     workspaceAccess = null,
     meetingAuthAccess = null,
+    featureFlagReader = null,
+    oaSearch = null,
   } = {}
 ) {
   if (!router || !runtime || !prisma)
@@ -140,6 +147,25 @@ function createMeetingsEndpoints(
       return Boolean(await lookup({ id: workspaceId, userId, user: actor }));
     },
   });
+  const flagEnabled = async () =>
+    featureFlagReader
+      ? featureFlagReader()
+      : isMeetingLocalTasksEnabled();
+  const requireLocalTasksFlag = async () => {
+    if (await flagEnabled()) return;
+    throw new MeetingError(
+      "Meeting local tasks feature is disabled",
+      "FEATURE_DISABLED",
+      403
+    );
+  };
+  const searchOaPeople =
+    oaSearch ||
+    ((query) =>
+      searchPeople({
+        query,
+        baseUrl: getOaPeopleBaseUrl(),
+      }));
   fs.mkdirSync(uploadRoot, { recursive: true });
   const upload = multer({
     storage: multer.diskStorage({
@@ -304,17 +330,27 @@ function createMeetingsEndpoints(
     const configs = await Promise.all(
       rows.map((row) => runtime.config.getPublic(row.id))
     );
+    const meetingLocalTasksEnabled = await flagEnabled();
     const config = adminView
-      ? configs[0] || null
+      ? configs[0]
+        ? { ...configs[0], meetingLocalTasksEnabled }
+        : { meetingLocalTasksEnabled }
       : configs[0]
         ? {
             id: configs[0].id,
             name: configs[0].name,
             configured: configs[0].configured,
             capabilities: configs[0].capabilities || {},
+            meetingLocalTasksEnabled,
           }
-        : null;
-    return { config };
+        : { meetingLocalTasksEnabled };
+    return { config, meetingLocalTasksEnabled };
+  });
+  route("get", "/oa/people", noRole, async (req) => {
+    await requireLocalTasksFlag();
+    const q = String(query(req).q ?? query(req).name ?? "").trim();
+    const people = await searchOaPeople(q);
+    return { people };
   });
   route("put", "/config", admin, async (_req, _res, user) => ({
     config: await runtime.config.save(reqBody(_req), user?.id),
@@ -502,7 +538,6 @@ function createMeetingsEndpoints(
       localSummary: publicSource(result.localSummary),
     };
   });
-
   route("get", "/:id/action-candidates", noRole, async (req, _res, _user, authState) => {
     const id = numericId(req.params.id, "Meeting ID");
     await assertMeetingRead(authState, id, "actionCandidates.list");

@@ -97,6 +97,7 @@ const SystemSettings = {
 
     // beta feature flags
     "experimental_live_file_sync",
+    "meeting_local_tasks",
 
     // Hub settings
     "hub_api_key",
@@ -418,6 +419,12 @@ const SystemSettings = {
       return Math.min(Math.floor(n), 10);
     },
     experimental_live_file_sync: (update) => {
+      if (typeof update === "boolean")
+        return update === true ? "enabled" : "disabled";
+      if (!["enabled", "disabled"].includes(update)) return "disabled";
+      return String(update);
+    },
+    meeting_local_tasks: (update) => {
       if (typeof update === "boolean")
         return update === true ? "enabled" : "disabled";
       if (!["enabled", "disabled"].includes(update)) return "disabled";
@@ -1119,6 +1126,9 @@ const SystemSettings = {
       experimental_live_file_sync:
         (await SystemSettings.get({ label: "experimental_live_file_sync" }))
           ?.value === "enabled",
+      meeting_local_tasks:
+        (await SystemSettings.get({ label: "meeting_local_tasks" }))?.value ===
+        "enabled",
     };
   },
 
