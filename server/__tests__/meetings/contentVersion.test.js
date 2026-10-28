@@ -32,7 +32,20 @@ describe("meetings.contentVersion schema default", () => {
       .split(";")
       .map((sql) => sql.trim())
       .filter(Boolean)) {
-      await prisma.$executeRawUnsafe(statement);
+      try {
+        await prisma.$executeRawUnsafe(statement);
+      } catch (error) {
+        // Source anythingllm.db may already include this migration.
+        const message = String(error?.message || error);
+        if (
+          /duplicate column name|already exists|UNIQUE constraint failed/i.test(
+            message
+          )
+        ) {
+          continue;
+        }
+        throw error;
+      }
     }
   });
 
