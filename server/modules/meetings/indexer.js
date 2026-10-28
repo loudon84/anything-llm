@@ -335,13 +335,22 @@ function createIndexer({
     const sources = await prisma.meeting_sources.findMany({
       where: { meetingId: id, deletedAt: null, parseStatus: "SUCCESS" },
     });
+    const hasLocalSummary = sources.some(
+      (source) =>
+        source.sourceType === "LOCAL_SUMMARY" &&
+        String(source.contentText || "").trim()
+    );
     const segments = [];
     const sourceRevisions = new Map();
     for (const source of sources) {
+      // D-SUM-04: non-empty LOCAL_SUMMARY replaces SUMMARY slot for retrieval.
+      if (hasLocalSummary && source.sourceType === "SUMMARY") continue;
+
       let current = parseJson(source.segments, []);
       if (!Array.isArray(current) && Array.isArray(current?.segments))
         current = current.segments;
       if (
+        !hasLocalSummary &&
         source.sourceType === "SUMMARY" &&
         meeting.summary != null &&
         meeting.summary !== source.contentText

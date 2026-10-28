@@ -402,7 +402,17 @@ export default function MeetingDetail() {
           )}
         </div>
       </Panel>
-      <Panel title="摘要与转写">
+      <Panel
+        title="摘要与转写"
+        actions={
+          <Link
+            className="rounded-lg bg-theme-bg-sidebar px-3 py-2 text-sm"
+            to={paths.meetings.summary(meeting.id)}
+          >
+            摘要与待办
+          </Link>
+        }
+      >
         <div className="grid gap-4 lg:grid-cols-2">
           <Field label="摘要">
             <textarea

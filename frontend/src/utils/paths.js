@@ -105,6 +105,7 @@ export default {
   meetings: {
     home: () => "/meetings",
     detail: (id) => `/meetings/${encodeURIComponent(id)}`,
+    summary: (id) => `/meetings/${encodeURIComponent(id)}/summary`,
     conversation: (id) => `/meetings/conversations/${encodeURIComponent(id)}`,
     source: (meetingId, sourceId) =>
       `/meetings/${encodeURIComponent(meetingId)}/sources/${encodeURIComponent(sourceId)}`,

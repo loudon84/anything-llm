@@ -34,7 +34,9 @@ export function getSourceTypeLabel(sourceType) {
       SUPPLEMENT_FILE: "用户补充文件",
       SUPPLEMENT_TEXT: "用户补充文本",
       SUMMARY: "会议摘要",
+      LOCAL_SUMMARY: "本地维护摘要",
       TRANSCRIPT: "会议转写",
+      GATEWAY_ARTIFACT: "腾讯导入原文",
     }[sourceType] || sourceType
   );
 }

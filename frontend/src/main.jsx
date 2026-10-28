@@ -71,6 +71,14 @@ const router = createBrowserRouter([
         },
       },
       {
+        path: "/meetings/:id/summary",
+        lazy: async () => {
+          const { default: SummaryAndTodos } =
+            await import("@/pages/Meetings/SummaryAndTodos");
+          return { element: <PrivateRoute Component={SummaryAndTodos} /> };
+        },
+      },
+      {
         path: "/meetings/:id",
         lazy: async () => {
           const { default: Detail } = await import("@/pages/Meetings/Detail");

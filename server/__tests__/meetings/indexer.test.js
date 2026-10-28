@@ -406,4 +406,159 @@ describe("located meeting chunk index", () => {
       code: "EMBEDDER_UNCONFIGURED",
     });
   });
+
+  test("prefers non-empty LOCAL_SUMMARY and excludes gateway SUMMARY from reindex", async () => {
+    const meeting = {
+      id: 1,
+      generation: 3,
+      retrievalStatus: "INDEXING",
+      deletedAt: null,
+      summary: "Poisoned meeting.summary that must not re-enter index",
+      transcript: null,
+    };
+    const sources = [
+      {
+        id: 10,
+        meetingId: 1,
+        sourceType: "SUMMARY",
+        originKey: "gateway:rf1:meeting_summary:0",
+        contentHash: "gateway",
+        contentText: "Gateway imported summary",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          {
+            text: "Gateway imported summary",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+      },
+      {
+        id: 11,
+        meetingId: 1,
+        sourceType: "LOCAL_SUMMARY",
+        originKey: "local:summary",
+        contentHash: "local",
+        contentText: "Local maintained summary",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          {
+            text: "Local maintained summary",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+      },
+      {
+        id: 12,
+        meetingId: 1,
+        sourceType: "TRANSCRIPT",
+        contentHash: "transcript",
+        contentText: "Spoken transcript",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          {
+            text: "Spoken transcript",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+      },
+    ];
+    const inserted = [];
+    const tx = {
+      meetings: {
+        findUnique: async () => meeting,
+        update: async ({ data }) => Object.assign(meeting, data),
+      },
+      meeting_sources: { findMany: async () => sources },
+      meeting_chunks: {
+        deleteMany: async () => {},
+        create: async ({ data }) => inserted.push(data),
+      },
+    };
+    const indexer = createIndexer({
+      prisma: { ...tx, $transaction: async (callback) => callback(tx) },
+      embedder: {
+        embedDocuments: async (texts) => texts.map(() => [1, 0]),
+      },
+      chunkCharacters: 80,
+    });
+
+    await indexer.reindex(1);
+
+    expect(inserted.map((chunk) => chunk.sourceId).sort()).toEqual([11, 12]);
+    expect(inserted.map((chunk) => chunk.text).sort()).toEqual([
+      "Local maintained summary",
+      "Spoken transcript",
+    ]);
+    expect(
+      inserted.some((chunk) => chunk.text.includes("Gateway"))
+    ).toBe(false);
+    expect(
+      inserted.some((chunk) => chunk.text.includes("Poisoned"))
+    ).toBe(false);
+  });
+
+  test("falls back to SUMMARY and meetings.summary override when LOCAL_SUMMARY is absent", async () => {
+    const meeting = {
+      id: 1,
+      generation: 3,
+      retrievalStatus: "INDEXING",
+      deletedAt: null,
+      summary: "Override summary from meeting row",
+      transcript: null,
+    };
+    const sources = [
+      {
+        id: 10,
+        meetingId: 1,
+        sourceType: "SUMMARY",
+        originKey: "gateway:rf1:meeting_summary:0",
+        contentHash: "gateway",
+        contentText: "Gateway imported summary",
+        parseStatus: "SUCCESS",
+        deletedAt: null,
+        segments: JSON.stringify([
+          {
+            text: "Gateway imported summary",
+            location: { type: "paragraph", paragraph: 0 },
+          },
+        ]),
+      },
+    ];
+    const inserted = [];
+    const sourceUpdates = [];
+    const tx = {
+      meetings: {
+        findUnique: async () => meeting,
+        update: async ({ data }) => Object.assign(meeting, data),
+      },
+      meeting_sources: {
+        findMany: async () => sources,
+        update: async ({ where, data }) => {
+          sourceUpdates.push({ where, data });
+          return data;
+        },
+      },
+      meeting_chunks: {
+        deleteMany: async () => {},
+        create: async ({ data }) => inserted.push(data),
+      },
+    };
+    const indexer = createIndexer({
+      prisma: { ...tx, $transaction: async (callback) => callback(tx) },
+      embedder: {
+        embedDocuments: async (texts) => texts.map(() => [1, 0]),
+      },
+      chunkCharacters: 80,
+    });
+
+    await indexer.reindex(1);
+
+    expect(inserted.map((chunk) => chunk.text)).toEqual([
+      "Override summary from meeting row",
+    ]);
+    expect(inserted[0].sourceId).toBe(10);
+  });
 });

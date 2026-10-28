@@ -128,6 +128,39 @@ export const Meetings = {
       })
     ).meeting;
   },
+  async saveLocalSummary(id, { content, contentVersion }) {
+    const response = await fetch(
+      `${root}/${encodeURIComponent(id)}/local-summary`,
+      {
+        method: "PATCH",
+        headers: {
+          ...baseHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ content, contentVersion }),
+      }
+    );
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (!response.ok) {
+      const error = new Error(
+        response.status >= 500
+          ? "会议服务暂时不可用，请稍后重试。"
+          : body?.error || `请求失败（${response.status}）`
+      );
+      error.status = response.status;
+      error.code = body?.code;
+      throw error;
+    }
+    if (!body || typeof body !== "object")
+      throw new Error("会议服务返回了无效响应。");
+    if (body.error) throw new Error(body.error);
+    return body;
+  },
   async approve(id) {
     return (
       await meetingRequest(`/${encodeURIComponent(id)}/approve`, {
