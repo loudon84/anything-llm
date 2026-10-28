@@ -502,6 +502,52 @@ function createMeetingsEndpoints(
       localSummary: publicSource(result.localSummary),
     };
   });
+
+  route("get", "/:id/action-candidates", noRole, async (req, _res, _user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingRead(authState, id, "actionCandidates.list");
+    return {
+      candidates: await runtime.meetings.listActionCandidates(id),
+    };
+  });
+  route("post", "/:id/action-candidates/refresh", noRole, async (req, _res, _user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingWrite(authState, id, "actionCandidates.refresh");
+    return {
+      candidates: await runtime.meetings.refreshActionCandidates(id),
+    };
+  });
+  route("post", "/:id/action-candidates", noRole, async (req, _res, _user, authState) => {
+    const id = numericId(req.params.id, "Meeting ID");
+    await assertMeetingWrite(authState, id, "actionCandidates.create");
+    const body = reqBody(req);
+    return {
+      candidate: await runtime.meetings.createActionCandidate(id, {
+        title: body.title,
+        description: body.description,
+      }),
+    };
+  });
+  route(
+    "patch",
+    "/:id/action-candidates/:candidateId",
+    noRole,
+    async (req, _res, _user, authState) => {
+      const id = numericId(req.params.id, "Meeting ID");
+      await assertMeetingWrite(authState, id, "actionCandidates.update");
+      const body = reqBody(req);
+      return {
+        candidate: await runtime.meetings.updateActionCandidate(
+          id,
+          String(req.params.candidateId || ""),
+          {
+            title: body.title,
+            description: body.description,
+          }
+        ),
+      };
+    }
+  );
   route("post", "/:id/approve", noRole, async (req, _res, user, authState) => {
     await assertMeetingRead(authState, numericId(req.params.id, "Meeting ID"), "meeting.approve");
     return ({

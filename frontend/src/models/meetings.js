@@ -161,6 +161,40 @@ export const Meetings = {
     if (body.error) throw new Error(body.error);
     return body;
   },
+
+  async listActionCandidates(id) {
+    const body = await meetingRequest(
+      `/${encodeURIComponent(id)}/action-candidates`
+    );
+    if (!Array.isArray(body.candidates))
+      throw new Error("会议服务返回了无效的行动项候选。");
+    return body.candidates;
+  },
+  async refreshActionCandidates(id) {
+    const body = await meetingRequest(
+      `/${encodeURIComponent(id)}/action-candidates/refresh`,
+      { method: "POST", body: JSON.stringify({}) }
+    );
+    if (!Array.isArray(body.candidates))
+      throw new Error("会议服务返回了无效的行动项候选。");
+    return body.candidates;
+  },
+  async createActionCandidate(id, data = {}) {
+    const body = await meetingRequest(
+      `/${encodeURIComponent(id)}/action-candidates`,
+      { method: "POST", body: JSON.stringify(data) }
+    );
+    if (!body.candidate) throw new Error("会议服务返回了无效的行动项候选。");
+    return body.candidate;
+  },
+  async updateActionCandidate(id, candidateId, data = {}) {
+    const body = await meetingRequest(
+      `/${encodeURIComponent(id)}/action-candidates/${encodeURIComponent(candidateId)}`,
+      { method: "PATCH", body: JSON.stringify(data) }
+    );
+    if (!body.candidate) throw new Error("会议服务返回了无效的行动项候选。");
+    return body.candidate;
+  },
   async approve(id) {
     return (
       await meetingRequest(`/${encodeURIComponent(id)}/approve`, {

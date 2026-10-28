@@ -42,10 +42,22 @@ export default function SummaryAndTodos() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [candidates, setCandidates] = useState([]);
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualDescription, setManualDescription] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [candidateBusy, setCandidateBusy] = useState(false);
 
   const dirty = draft !== savedDraft;
   const actions = getMeetingActionCapabilities(meeting);
   const canEdit = actions.editContent;
+
+  const loadCandidates = useCallback(async (meetingId) => {
+    const rows = await Meetings.listActionCandidates(meetingId);
+    setCandidates(rows || []);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -60,12 +72,13 @@ export default function SummaryAndTodos() {
       const text = originalText(local);
       setDraft(text);
       setSavedDraft(text);
+      await loadCandidates(result.meeting.id);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, loadCandidates]);
 
   useEffect(() => {
     load();
@@ -123,6 +136,7 @@ export default function SummaryAndTodos() {
         );
       }
       setNotice("本地摘要已保存，索引将在后台重建。");
+      await loadCandidates(meeting.id);
     } catch (e) {
       if (e.status === 409 || e.code === "CONTENT_VERSION_CONFLICT") {
         setError(
@@ -143,6 +157,90 @@ export default function SummaryAndTodos() {
     setPreview(false);
     setError("");
     setNotice("");
+  }
+
+  async function refreshCandidates() {
+    if (!meeting || !canEdit) return;
+    setCandidateBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const rows = await Meetings.refreshActionCandidates(meeting.id);
+      setCandidates(rows || []);
+      setNotice("已从导入原文刷新行动项候选。");
+    } catch (e) {
+      if (e.code === "MEETING_IMMUTABLE") {
+        setError("会议已审核，不可刷新行动项。");
+      } else {
+        setError(e.message);
+      }
+    } finally {
+      setCandidateBusy(false);
+    }
+  }
+
+  async function addManualCandidate() {
+    if (!meeting || !canEdit) return;
+    const title = manualTitle.trim();
+    if (!title) {
+      setError("手动候选标题不能为空。");
+      return;
+    }
+    setCandidateBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const candidate = await Meetings.createActionCandidate(meeting.id, {
+        title,
+        description: manualDescription,
+      });
+      setCandidates((current) => [...current, candidate]);
+      setManualTitle("");
+      setManualDescription("");
+      setNotice("已添加手动行动项候选。");
+    } catch (e) {
+      if (e.code === "MEETING_IMMUTABLE") {
+        setError("会议已审核，不可新增行动项。");
+      } else {
+        setError(e.message);
+      }
+    } finally {
+      setCandidateBusy(false);
+    }
+  }
+
+  async function saveCandidateEdit(candidateId) {
+    if (!meeting || !canEdit) return;
+    const title = editTitle.trim();
+    if (!title) {
+      setError("行动项标题不能为空。");
+      return;
+    }
+    setCandidateBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const candidate = await Meetings.updateActionCandidate(
+        meeting.id,
+        candidateId,
+        { title, description: editDescription }
+      );
+      setCandidates((current) =>
+        current.map((row) =>
+          row.candidateId === candidateId ? candidate : row
+        )
+      );
+      setEditingId(null);
+      setNotice("行动项候选已更新。");
+    } catch (e) {
+      if (e.code === "MEETING_IMMUTABLE") {
+        setError("会议已审核，不可编辑行动项。");
+      } else {
+        setError(e.message);
+      }
+    } finally {
+      setCandidateBusy(false);
+    }
   }
 
   if (loading) {
@@ -260,6 +358,127 @@ export default function SummaryAndTodos() {
             </Button>
             <Button disabled={busy || !dirty} onClick={cancel}>
               取消
+            </Button>
+          </div>
+        )}
+
+      <Panel
+        title="行动项候选"
+        actions={
+          canEdit ? (
+            <Button
+              disabled={candidateBusy || busy}
+              onClick={refreshCandidates}
+            >
+              从原文刷新
+            </Button>
+          ) : null
+        }
+      >
+        {candidates.length === 0 ? (
+          <p className="text-sm text-theme-text-secondary">
+            暂无行动项候选。可从导入原文刷新，或手动新增。
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {candidates.map((candidate) => {
+              const editing = editingId === candidate.candidateId;
+              return (
+                <li
+                  key={candidate.candidateId}
+                  className="rounded-lg bg-theme-bg-primary p-3 text-sm"
+                >
+                  {editing ? (
+                    <div className="space-y-2">
+                      <input
+                        className={inputClass}
+                        value={editTitle}
+                        disabled={candidateBusy}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                      />
+                      <textarea
+                        className={`${inputClass} min-h-20`}
+                        value={editDescription}
+                        disabled={candidateBusy}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="primary"
+                          disabled={candidateBusy}
+                          onClick={() =>
+                            saveCandidateEdit(candidate.candidateId)
+                          }
+                        >
+                          保存
+                        </Button>
+                        <Button
+                          disabled={candidateBusy}
+                          onClick={() => setEditingId(null)}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">{candidate.title}</span>
+                          <Status value={candidate.status} />
+                          <span className="text-xs text-theme-text-secondary">
+                            {candidate.kind === "manual" ? "手动" : "自动"}
+                          </span>
+                        </div>
+                        {candidate.description ? (
+                          <pre className="mt-1 whitespace-pre-wrap font-sans text-xs text-theme-text-secondary">
+                            {candidate.description}
+                          </pre>
+                        ) : null}
+                      </div>
+                      {canEdit && (
+                        <Button
+                          disabled={candidateBusy}
+                          onClick={() => {
+                            setEditingId(candidate.candidateId);
+                            setEditTitle(candidate.title || "");
+                            setEditDescription(candidate.description || "");
+                          }}
+                        >
+                          编辑
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {canEdit && (
+          <div className="mt-4 space-y-2 border-t border-theme-sidebar-border pt-3">
+            <Field label="手动新增候选">
+              <input
+                className={inputClass}
+                value={manualTitle}
+                disabled={candidateBusy}
+                placeholder="标题（必填）"
+                onChange={(e) => setManualTitle(e.target.value)}
+              />
+            </Field>
+            <textarea
+              className={`${inputClass} min-h-16`}
+              value={manualDescription}
+              disabled={candidateBusy}
+              placeholder="描述（可选）"
+              onChange={(e) => setManualDescription(e.target.value)}
+            />
+            <Button
+              variant="primary"
+              disabled={candidateBusy || !manualTitle.trim()}
+              onClick={addManualCandidate}
+            >
+              添加候选
             </Button>
           </div>
         )}

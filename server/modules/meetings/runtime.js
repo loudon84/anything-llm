@@ -4,6 +4,12 @@ const { EventEmitter } = require("events");
 const { createMeetingConfig } = require("./config");
 const { createMeetingService } = require("./meetingService");
 const { createLocalSummaryService } = require("./localSummary");
+const {
+  syncActionCandidates,
+  listActionCandidates,
+  createManualCandidate,
+  updateActionCandidate,
+} = require("./actionItems");
 const { createSourceService } = require("./sources");
 const { createMeetingAuthAccess } = require("../../utils/meetingGateway/meetingAuthAccess");
 const { createImporter } = require("./importer");
@@ -347,6 +353,14 @@ function createMeetingRuntime({
       meetingAuthAccess,
     });
   };
+  meetings.listActionCandidates = async (meetingId) =>
+    listActionCandidates(meetingId, { prisma });
+  meetings.createActionCandidate = async (meetingId, input) =>
+    createManualCandidate(meetingId, input, { prisma });
+  meetings.updateActionCandidate = async (meetingId, candidateId, input) =>
+    updateActionCandidate(meetingId, candidateId, input, { prisma });
+  meetings.refreshActionCandidates = async (meetingId) =>
+    syncActionCandidates(meetingId, { prisma });
   async function authorizeJob(job) {
     let payload;
     try { payload = JSON.parse(job.payload || "{}"); } catch { payload = {}; }
